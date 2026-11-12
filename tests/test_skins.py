@@ -7,15 +7,17 @@ standard skin layout (see skins.py).
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from helpers import ensure_app, make_solid_image, write_image  # noqa: E402
-from pixel_forge.pixelize import PixelForgeError  # noqa: E402
+from helpers import (ensure_app, make_noisy_image,  # noqa: E402
+                     make_solid_image, write_image)
+from pixel_forge.pixelize import PixelForgeError, pixelize_image  # noqa: E402
 from pixel_forge.skins import (detect_skin, extract_skin,  # noqa: E402
                                pixelize_texture, skin_figure,
-                               skin_parts)
+                               skin_parts, texture_target_size)
 
 # Distinct colors per front-view region.
 REGION_COLORS = {
@@ -220,6 +222,58 @@ class SkinExtractTests(unittest.TestCase):
         self.assertEqual((texture.width(), texture.height()),
                          (16, 16))
         self.assertEqual(pixel(texture, 0, 0), (9, 8, 7, 255))
+
+
+class TextureCapTests(unittest.TestCase):
+    """v0.8 regression: the texture path caps at 512 px (review
+    W2 — a 4000x3000 photo used to freeze the UI for 209 s)."""
+    @classmethod
+    def setUpClass(cls):
+        ensure_app()
+
+    def test_texture_target_size(self):
+        self.assertEqual(
+            texture_target_size(make_solid_image(64, 64, 1, 2, 3)),
+            (64, 64))
+        self.assertEqual(
+            texture_target_size(make_solid_image(512, 512, 1, 2, 3)),
+            (512, 512))
+        self.assertEqual(
+            texture_target_size(make_solid_image(1024, 768, 1, 2, 3)),
+            (512, 384))
+        self.assertEqual(
+            texture_target_size(make_solid_image(300, 600, 1, 2, 3)),
+            (256, 512))
+
+    def test_large_photo_caps_at_512_and_finishes_fast(self):
+        # Uncapped, a 1024x1024 photo took 21.8 s on the sandbox
+        # CPU; capped it takes ~2 s. The 15 s bound is ~9x the
+        # capped time and still catches an uncapped regression.
+        image = make_noisy_image(1024, 1024)
+        start = time.monotonic()
+        texture = pixelize_texture(image)
+        elapsed = time.monotonic() - start
+        self.assertEqual((texture.width(), texture.height()),
+                         (512, 512))
+        self.assertLess(elapsed, 15,
+                        "1024x1024 texture took %.1f s — the cap "
+                        "may have regressed" % elapsed)
+
+    def test_small_texture_unchanged_by_cap(self):
+        # A texture under the cap must be pixel-for-pixel what the
+        # uncapped core produces: same call, same image.
+        image = make_noisy_image(64, 64, rects=200)
+        capped = pixelize_texture(image)
+        direct = pixelize_image(image, width=64, height=64,
+                                palette="image", max_colors=256,
+                                dither=False)
+        self.assertEqual((capped.width(), capped.height()),
+                         (64, 64))
+        for y in range(64):
+            for x in range(64):
+                self.assertEqual(capped.pixel(x, y),
+                                 direct.pixel(x, y),
+                                 "pixel differs at %d,%d" % (x, y))
 
 
 if __name__ == "__main__":

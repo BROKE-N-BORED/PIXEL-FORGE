@@ -19,7 +19,11 @@ opaque pixels.
 A PNG that is not a skin falls back to texture handling: it is
 pixelized through the Item 1 core at its native size (a 16x16
 texture stays 16x16) with a 256-color from-image palette and no
-dithering, so the pixels come through unchanged.
+dithering, so the pixels come through unchanged — except that a
+texture bigger than TEXTURE_MAX_DIMENSION on its longest side
+is downscaled to fit that cap first. The core at native size
+with a 256-color palette took 209 s on a 4000x3000 photo, so
+the cap is what keeps a big photo import to seconds.
 """
 
 from pathlib import Path
@@ -27,7 +31,13 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 
-from .pixelize import PixelForgeError, load_image, pixelize_image
+from .pixelize import (PixelForgeError, compute_target_size,
+                       downscale, load_image, pixelize_image)
+
+# Longest side a texture is pixelized at. 512 matches the Image
+# tab's max preset; anything bigger is downscaled (keeping its
+# aspect ratio) before the pixelize core runs.
+TEXTURE_MAX_DIMENSION = 512
 
 # Front-view regions on the 64x64 layout: name -> (x, y, w, h).
 # The 64x32 layout shares head, hat, body, right arm, right leg.
@@ -150,10 +160,27 @@ def skin_figure(image):
     return figure
 
 
+def texture_target_size(image):
+    """(width, height) a texture is pixelized at: its native size
+    when the longest side fits TEXTURE_MAX_DIMENSION, else fitted
+    inside the cap box keeping the aspect ratio."""
+    if max(image.width(), image.height()) <= TEXTURE_MAX_DIMENSION:
+        return image.width(), image.height()
+    return compute_target_size(image.width(), image.height(),
+                               TEXTURE_MAX_DIMENSION,
+                               TEXTURE_MAX_DIMENSION, True)
+
+
 def pixelize_texture(image):
     """A non-skin image as a texture: through the Item 1 core at
     its native size, 256-color from-image palette, no dithering —
-    the pixels come through unchanged."""
+    the pixels come through unchanged. Images bigger than
+    TEXTURE_MAX_DIMENSION on the longest side are downscaled to
+    fit the cap first (aspect kept), so a big photo import takes
+    seconds instead of minutes; smaller textures are untouched."""
+    target_w, target_h = texture_target_size(image)
+    if (target_w, target_h) != (image.width(), image.height()):
+        image = downscale(image, target_w, target_h)
     return pixelize_image(image, width=image.width(),
                           height=image.height(), palette="image",
                           max_colors=256, dither=False)

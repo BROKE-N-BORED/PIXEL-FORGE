@@ -1,5 +1,26 @@
 # Pixel Forge changelog
 
+## 0.8 — 2026-11-12
+
+Texture-import freeze fixed — task-list item #2, weakness W2 of
+the v0.6 internal review. A big photo imported as a game asset
+used to freeze the window for minutes (21.8 s for 1024x1024,
+33 s for 1920x1080, 208.8 s for 4000x3000, at ~950 MB RAM):
+`pixelize_texture` ran the core at native size with 256 colors,
+synchronously on the UI thread.
+
+- Textures now cap at 512 px on the longest side (the Image tab's
+  max preset), downscaled keeping the aspect ratio before the
+  core runs. A 4000x3000 photo now imports in under a second.
+  Textures at or under the cap are pixel-for-pixel unchanged.
+- The texture path loads on a worker thread (the PromptWorker
+  pattern), so the window stays responsive while it works; the
+  status bar says "Loading texture…" until it lands.
+- The Code tab's info line says when a texture was downscaled
+  ("downscaled from 4000 x 3000 to 512 x 384") — never silently
+  resized. The skin path (64x64/64x32 parts + figure) is
+  untouched. No other changes in this release.
+
 ## 0.7 — 2026-11-12
 
 Window fit — the #1 finding of the v0.6 internal review (W1).

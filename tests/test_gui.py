@@ -9,13 +9,14 @@ Skipped when PySide6 is not importable.
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from helpers import (make_gradient_image, make_solid_image,  # noqa: E402
-                     make_test_video, stub_env, write_image,
-                     write_stub_engine)
+from helpers import (make_gradient_image, make_noisy_image,  # noqa: E402
+                     make_solid_image, make_test_video, stub_env,
+                     write_image, write_stub_engine)
 
 try:
     from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, \
@@ -1354,12 +1355,28 @@ class CodeTabTests(unittest.TestCase):
         cls.texture = write_image(
             make_solid_image(16, 16, 1, 2, 3),
             os.path.join(cls.tmp, "grass.png"))
+        cls.big_texture = write_image(
+            make_noisy_image(1024, 1024),
+            os.path.join(cls.tmp, "photo.png"))
 
     def setUp(self):
         from pixel_forge.gui import MainWindow
         self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
         self.win = MainWindow(library_dir=self.lib_dir)
         self.win.tabs.setCurrentIndex(3)
+
+    def _wait_for_texture(self, timeout=30):
+        """Pump the event loop until the texture worker lands (or
+        the timeout hits). Returns True when the Code tab holds a
+        texture — the texture path is async since v0.8."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.code_kind == "texture"
+                    and self.win.texture_worker is None):
+                return True
+            time.sleep(0.05)
+        return False
 
     def tearDown(self):
         self.win.close()
@@ -1443,12 +1460,42 @@ class CodeTabTests(unittest.TestCase):
 
     def test_load_texture_falls_back_with_note(self):
         self.assertTrue(self.win.load_game_asset(self.texture))
+        self.assertTrue(self._wait_for_texture())
         self.assertEqual(self.win.code_list.count(), 1)
         self.assertTrue(self.win.code_list.item(0).text()
                         .startswith("grass — texture, 16 x 16"))
         self.assertIn("not a Minecraft skin",
                       self.win.code_info_label.text())
         self.assertFalse(self.win.code_export_parts_btn.isEnabled())
+
+    def test_load_large_texture_downscales_and_notes_it(self):
+        # v0.8 regression (review W2): a 1024x1024 photo used to
+        # freeze the window ~22 s at native size. Now it caps at
+        # 512 and the info line says so — never silently resized.
+        self.assertTrue(self.win.load_game_asset(self.big_texture))
+        self.assertTrue(self._wait_for_texture())
+        self.assertEqual(self.win.code_list.count(), 1)
+        self.assertTrue(self.win.code_list.item(0).text()
+                        .startswith("photo — texture, 512 x 512"))
+        self.assertEqual((self.win.code_image.width(),
+                          self.win.code_image.height()), (512, 512))
+        self.assertIn("downscaled from 1024 x 1024 to 512 x 512",
+                      self.win.code_info_label.text())
+
+    def test_texture_load_keeps_window_responsive(self):
+        # v0.8: the texture loads on a worker thread, so the event
+        # loop must keep running while it works — load_game_asset
+        # returns at once with a "Loading texture…" status.
+        from PySide6.QtCore import QTimer
+        fired = []
+        self.assertTrue(self.win.load_game_asset(self.big_texture))
+        self.assertIn("Loading texture",
+                      self.win.statusBar().currentMessage())
+        QTimer.singleShot(0, lambda: fired.append(True))
+        self.app.processEvents()
+        self.assertTrue(fired, "event loop did not run during load")
+        self.assertTrue(self._wait_for_texture())
+        self.assertEqual(self.win.code_kind, "texture")
 
     def test_export_code_asset(self):
         self.assertTrue(self.win.load_code(self.game))

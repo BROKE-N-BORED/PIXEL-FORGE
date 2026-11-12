@@ -91,6 +91,10 @@ bash uninstall.sh
   it into its parts — head, body, arms, legs, overlays — plus the
   combined figure; Export parts writes one PNG per part. Any
   other image pixelizes as a texture instead, and says so.
+  A texture bigger than 512 px on its longest side is
+  downscaled to fit that cap first (the info line says so),
+  and loads on a worker thread, so a big photo never freezes
+  the window.
 - **Library tab:** every sprite you save from the other tabs, with
   tags and search. Save to library on the Image tab (current
   result), the Prompt tab (pixelized keeper), or the Code tab
@@ -310,15 +314,17 @@ A preset needs all six keys: `width` and `height` (1–512),
 (true/false). A hand-edited file with a bad preset fails loudly
 instead of applying nonsense.
 
-## What v0.7 does and does not do
+## What v0.8 does and does not do
 
-v0.7 is Items 1–6 of the plan: image to pixel sprite core, video to
+v0.8 is Items 1–6 of the plan: image to pixel sprite core, video to
 sprite frames, prompt-to-sprite with a local image model,
 spritesheets + animation export, a sprite library with presets,
-and code + game-asset input — plus the window-fit fix: every tab's
-control column scrolls, so the window fits a 768 px screen. The
-MIMIK merge is the one remaining planned item — none of that is in
-this build.
+and code + game-asset input — plus the window-fit fix (every tab's
+control column scrolls, so the window fits a 768 px screen) and
+the texture-import fix (a big photo as a game asset caps at
+512 px and loads on a worker thread instead of freezing the
+window). The MIMIK merge is the one remaining planned item —
+none of that is in this build.
 
 ## Requirements
 

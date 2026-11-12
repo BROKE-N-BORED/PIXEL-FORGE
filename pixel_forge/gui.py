@@ -190,6 +190,44 @@ class PromptWorker(QThread):
         self.done.emit(batch)
 
 
+class TextureWorker(QThread):
+    """Pixelizes a game-asset texture off the GUI thread.
+
+    A big photo as a texture used to freeze the window for
+    minutes (209 s for a 4000x3000 image at native size). The
+    512 px cap in pixelize_texture bounds the work to seconds,
+    and the worker keeps the window responsive while it runs.
+    Signals cross back to the GUI thread; the worker never
+    touches a widget itself. Only a QImage crosses the thread
+    boundary (QPixmap is not thread-safe).
+    """
+    done = Signal(dict)   # path, source size, texture, color count
+    failed = Signal(str)  # readable error message
+
+    def __init__(self, image, path, parent=None):
+        super().__init__(parent)
+        self.image = image
+        self.path = str(path)
+
+    def run(self):
+        try:
+            texture = pixelize_texture(self.image)
+            colors = count_opaque_colors(texture)
+        except PixelForgeError as exc:
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - window must stay up
+            self.failed.emit("could not load texture: %s" % exc)
+            return
+        self.done.emit({
+            "path": self.path,
+            "source_width": self.image.width(),
+            "source_height": self.image.height(),
+            "image": texture,
+            "colors": colors,
+        })
+
+
 class SpritesheetDialog(QDialog):
     """Preview a packed spritesheet before exporting it.
 
@@ -412,7 +450,9 @@ class MainWindow(QMainWindow):
 
         # Code tab state. Assets are small rendered QImages held in
         # memory; a skin also keeps its source path so its parts
-        # can be exported to a folder.
+        # can be exported to a folder. A texture loads on a worker
+        # thread (see TextureWorker) so a big photo never freezes
+        # the window.
         self.code_assets = []
         self.code_not_rendered = []
         self.code_source = None
@@ -421,6 +461,7 @@ class MainWindow(QMainWindow):
         self.code_image = None
         self.code_skin_path = None
         self.code_skin_layout = None
+        self.texture_worker = None
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_image_tab(), "Image")
@@ -2123,6 +2164,7 @@ class MainWindow(QMainWindow):
         box and returns False — the window stays up either way."""
         if isinstance(paths, (str, Path)):
             paths = [paths]
+        self._stop_texture_worker()
         try:
             result = parse_paths(paths)
         except PixelForgeError as exc:
@@ -2151,8 +2193,11 @@ class MainWindow(QMainWindow):
 
     def load_game_asset(self, path):
         """Load a game asset: a Minecraft skin splits into its
-        parts (plus the combined figure); anything else pixelizes
-        as a texture. Returns True on success."""
+        parts (plus the combined figure) right away; anything else
+        pixelizes as a texture on a worker thread (see
+        TextureWorker), so a big photo never freezes the window.
+        Returns True when the load started (or finished, for a
+        skin); False when the file cannot be read at all."""
         try:
             image = load_image(path)
         except PixelForgeError as exc:
@@ -2161,6 +2206,7 @@ class MainWindow(QMainWindow):
         layout = detect_skin(image)
         self.code_source = str(path)
         self.code_not_rendered = []
+        self._stop_texture_worker()
         if layout is not None:
             try:
                 parts = skin_parts(image)
@@ -2193,24 +2239,67 @@ class MainWindow(QMainWindow):
                 "Minecraft skin (%s): %d parts"
                 % (layout, len(parts)))
             return True
-        texture = pixelize_texture(image)
+        # Texture: pixelize off the GUI thread. The worker hands
+        # the finished texture to _on_texture_done.
+        self.texture_worker = TextureWorker(image, path, parent=self)
+        self.texture_worker.done.connect(self._on_texture_done)
+        self.texture_worker.failed.connect(self._on_texture_failed)
+        self.statusBar().showMessage("Loading texture…")
+        self.texture_worker.start()
+        return True
+
+    def _on_texture_done(self, result):
+        # See _on_prompt_progress: only the current worker counts
+        # — a texture load superseded by a newer import is ignored.
+        if self.sender() is not self.texture_worker:
+            return
+        self.texture_worker = None
+        texture = result["image"]
         self.code_kind = "texture"
         self.code_skin_path = None
         self.code_skin_layout = None
         self.code_export_parts_btn.setEnabled(False)
+        src_w, src_h = (result["source_width"],
+                        result["source_height"])
+        capped = ((texture.width(), texture.height())
+                  != (src_w, src_h))
+        if capped:
+            detail = ("downscaled from %d x %d to %d x %d — "
+                      "pixelized as a texture"
+                      % (src_w, src_h, texture.width(),
+                         texture.height()))
+        else:
+            detail = ("not a Minecraft skin (%d x %d) — "
+                      "pixelized as a texture" % (src_w, src_h))
         self.code_assets = [{
-            "name": Path(path).stem, "kind": "texture",
-            "source_file": str(path),
+            "name": Path(result["path"]).stem, "kind": "texture",
+            "source_file": result["path"],
             "width": texture.width(), "height": texture.height(),
-            "colors": count_opaque_colors(texture),
+            "colors": result["colors"],
             "image": texture,
-            "detail": "not a Minecraft skin (%d x %d) — "
-            "pixelized as a texture" % (image.width(),
-                                        image.height())}]
+            "detail": detail}]
         self._rebuild_code_list()
-        self.statusBar().showMessage(
-            "Not a skin — pixelized as a texture")
-        return True
+        if capped:
+            self.statusBar().showMessage(
+                "Not a skin — pixelized as a texture "
+                "(downscaled from %d x %d)" % (src_w, src_h))
+        else:
+            self.statusBar().showMessage(
+                "Not a skin — pixelized as a texture")
+
+    def _on_texture_failed(self, message):
+        # See _on_prompt_progress: only the current worker counts.
+        if self.sender() is not self.texture_worker:
+            return
+        self.texture_worker = None
+        QMessageBox.warning(self, "Pixel Forge", message)
+        self.statusBar().showMessage("Texture load failed")
+
+    def _stop_texture_worker(self):
+        if self.texture_worker is not None:
+            if self.texture_worker.isRunning():
+                self.texture_worker.wait(10000)
+            self.texture_worker = None
 
     def _on_import_code(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -2971,6 +3060,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._stop_playback()
         self._stop_prompt_worker()
+        self._stop_texture_worker()
         self._cleanup_video_raw()
         self._cleanup_prompt_batch()
         event.accept()
