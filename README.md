@@ -7,7 +7,9 @@ transparent PNG ready to drop into a game. Import a video and turn
 its frames into a run of pixel sprites, then pack them into a
 spritesheet with metadata a game can play. Or describe a sprite and
 generate it with a local image model, then pick the best of 3
-candidates and pixelize it.
+candidates and pixelize it. Or feed it source code and rebuild the
+pixel art the code defines, and load a Minecraft skin and split it
+into its parts.
 
 Everything runs locally on your machine — no accounts, no paid APIs,
 no network at run time. Video import needs ffmpeg
@@ -77,11 +79,24 @@ bash uninstall.sh
   Generate says plainly what to install instead of faking anything.
   Generating again replaces the previous candidates, so export your
   keeper first.
+- **Code tab:** import a `.py`, `.js`, or `.ts` file (or a whole
+  folder of them) and the pixel art the code defines is rebuilt as
+  real sprites — pixel maps and palettes, parsed statically and
+  never executed, so a file cannot run anything when you import
+  it. Click an asset to preview it, Export PNG, or Save to
+  library. Anything the code defines that cannot be rendered
+  (art built by loops or function calls, draw-call specs) is
+  listed under "Found but not rendered" with the reason. Import
+  game asset loads a Minecraft skin (64x64 or 64x32) and splits
+  it into its parts — head, body, arms, legs, overlays — plus the
+  combined figure; Export parts writes one PNG per part. Any
+  other image pixelizes as a texture instead, and says so.
 - **Library tab:** every sprite you save from the other tabs, with
   tags and search. Save to library on the Image tab (current
-  result) or the Prompt tab (pixelized keeper), or Save sheet to
-  library on the Video tab (the whole spritesheet PNG + JSON pair
-  as one entry) — each save asks for a name and optional tags.
+  result), the Prompt tab (pixelized keeper), or the Code tab
+  (selected asset), or Save sheet to library on the Video tab
+  (the whole spritesheet PNG + JSON pair as one entry) — each
+  save asks for a name and optional tags.
   In the Library tab, search by name or tag, filter by tag, click
   a sprite to preview it big, Load into Image tab to rework it,
   Rename it, Delete it (the file goes too), or Export a copy
@@ -110,6 +125,10 @@ pixel-forge library list
 pixel-forge library list --tag hero
 pixel-forge library add sprite.png --name "Red Knight" --tags hero,red
 pixel-forge presets list
+pixel-forge code game.py --list
+pixel-forge code game.py --asset HERO --out hero.png
+pixel-forge code src/ --list
+pixel-forge skin steve.png --out steve-parts/
 pixel-forge --help
 ```
 
@@ -136,6 +155,35 @@ Options for `convert` (and the pixelize half of `frames` and
 - `--dither` / `--no-dither` — ordered (Bayer) dithering (default on).
 - `--out` — output PNG (default: `<input-stem>-pixel.png` next to the
   input).
+
+## Code input: what is detected
+
+The Code tab and `pixel-forge code` read source code statically —
+nothing is ever executed, so importing a file cannot run anything.
+What they find, all as literal data in the file:
+
+- **Pixel maps** — a variable holding rows of pixels: int rows
+  (`[[0,1,1,0],...]`, where 0 is transparent and 1 is the first
+  color of a palette from the same file, or PICO-8 colors by
+  default), hex
+  rows (`[["#ff0000", None],...]`), RGB rows (`[[(255,0,0)],...]`),
+  and character rows (`["....",".XX.",...]`) with a dict in the
+  same file mapping each character to a color (`.` and space are
+  always transparent). Maps are capped at 512 x 512 and rows must
+  all be the same length.
+- **Palettes** — a flat list of colors (hex strings, RGB tuples,
+  named colors like `red` or `gold`) or a dict mapping names, ints,
+  or characters to colors. Rendered as a strip, one block per color.
+- **Draw-call specs** — lists of dicts with rectangle keys (`x`,
+  `y`, `w`, `h`, `color`) are recognized and reported as not
+  rendered: they describe drawing steps, not pixels.
+
+Not detected: anything computed (function calls, loops, arithmetic,
+comprehensions), sprites loaded from image files at run time, and
+sprites drawn through a game engine's API or Three.js / WebGL
+geometry. Python detection looks at assignments anywhere in the
+file; JS/TS detection is a textual scan (a regex literal containing
+`//` may confuse its comment stripping).
 
 Transparency is preserved: transparent pixels stay transparent and
 never enter the palette; other pixels keep their original alpha.
@@ -262,13 +310,13 @@ A preset needs all six keys: `width` and `height` (1–512),
 (true/false). A hand-edited file with a bad preset fails loudly
 instead of applying nonsense.
 
-## What v0.5 does and does not do
+## What v0.6 does and does not do
 
-v0.5 is Items 1–5 of the plan: image to pixel sprite core, video to
+v0.6 is Items 1–6 of the plan: image to pixel sprite core, video to
 sprite frames, prompt-to-sprite with a local image model,
-spritesheets + animation export, and a sprite library with
-presets. Code and game-asset input and the MIMIK merge are planned
-later items — none of that is in this build.
+spritesheets + animation export, a sprite library with presets,
+and code + game-asset input. The MIMIK merge is the one remaining
+planned item — none of that is in this build.
 
 ## Requirements
 

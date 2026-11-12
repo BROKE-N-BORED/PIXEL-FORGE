@@ -14,8 +14,9 @@ visible folder he can browse in Nemo, same pattern as
 
 An index entry records the display name, the file, the kind
 ("sprite" or "sheet"), tags, where it came from ("image", "video",
-"prompt", or "file" for a CLI add), size, palette (sprites), and
-frame count + metadata file (sheets), plus the date it was saved.
+"prompt", "code", "skin", or "file" for a CLI add), size, palette
+(sprites), and frame count + metadata file (sheets), plus the date
+it was saved.
 Files are named from the entry name (slugified, with -2, -3, ...
 on collision); renaming an entry renames the display name only,
 so the file on disk stays put.
@@ -40,7 +41,7 @@ LIBRARY_VERSION = 1
 INDEX_NAME = "library.json"
 
 KINDS = ("sprite", "sheet")
-SOURCES = ("image", "video", "prompt", "file")
+SOURCES = ("image", "video", "prompt", "code", "skin", "file")
 
 
 def default_library_dir():

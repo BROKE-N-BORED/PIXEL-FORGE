@@ -1,5 +1,57 @@
 # Pixel Forge changelog
 
+## 0.6 — 2026-11-12
+
+Item 6 of the plan: code + game-asset input.
+
+- Code tab: import a .py / .js / .ts file (or a folder of them)
+  and the pixel art the code defines is rebuilt as real sprites.
+  Parsed statically — Python with ast.parse + literal_eval, JS/TS
+  with a small literal parser — and NEVER executed, evaled, or
+  imported, so a file cannot run anything when you import it.
+  Detected: pixel maps (int rows with a palette from the file or
+  PICO-8 colors by default, hex rows, RGB rows, character rows
+  with a legend dict), and palettes (flat color lists or dicts of
+  colors). Each asset shows its variable name, kind, size, and a
+  preview; Export PNG and Save to library work like the other
+  tabs. Anything found but not renderable (art computed at run
+  time, draw-call specs, character rows with no legend, ragged
+  rows) is listed with a plain reason — nothing is faked. The
+  README documents exactly what is and is not detected.
+- Game assets: Import game asset in the Code tab loads a
+  Minecraft skin (64x64 new format or 64x32 classic, detected by
+  size) and splits it into its parts — head, hat, body, jacket,
+  arms, sleeves, legs, pants — plus the combined 16x32 figure
+  with overlays composited. Classic skins get mirrored left limbs.
+  Export parts writes one PNG per part plus figure.png. Any other
+  image pixelizes as a texture through the Item 1 core at its
+  native size, with a note saying so.
+- CLI: `pixel-forge code FILE --list` lists the assets found,
+  `pixel-forge code FILE --asset NAME --out PNG` renders one,
+  `pixel-forge skin FILE --out DIR` extracts a skin's parts.
+  No assets found, unknown asset, or not a skin all fail with a
+  readable message and exit 1, no traceback.
+- Library sources now include "code" and "skin" for saves from
+  the Code tab.
+- Fixed in place (verification catch): int maps indexed a palette
+  from the file 0-based (value 1 was the SECOND color) while the
+  PICO-8 default path was 1-based (value 1 the first) — one
+  function, two conventions. Worse, a map using every color of
+  its palette failed the coverage check and silently fell back
+  to PICO-8 colors. File palettes are now 1-based like the
+  default: 0 transparent, 1 the first color, and a full-range
+  map keeps its palette.
+- Fixed in place (verification catch): the Code tab's info
+  label wrapped its text but the layout gave it too little
+  height, so the text overflowed into the controls below — the
+  same defect as the Prompt status label in v0.3, fixed the
+  same way (minimum height from the label's own
+  heightForWidth). The "Found but not rendered" list lives in
+  a scroll box instead: sizing it to its full text overflowed
+  the column and squeezed the Zoom row and info label out of
+  view entirely. Also "1 colors" now reads "1 color" in the
+  asset info line.
+
 ## 0.5 — 2026-11-12
 
 Item 5 of the plan: library + presets.

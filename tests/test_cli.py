@@ -433,5 +433,144 @@ class LibraryCliTests(unittest.TestCase):
         self.assertNotIn("My Look (built-in)", out)
 
 
+class CodeCliTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        ensure_app()
+        cls.tmp = tempfile.mkdtemp()
+        cls.game = os.path.join(cls.tmp, "game.py")
+        with open(cls.game, "w") as handle:
+            handle.write('PALETTE = ["#ff0000", "#00ff00"]\n'
+                         "HERO = [[0, 1], [1, 0]]\n"
+                         "DRAW = [{'x': 0, 'y': 0, 'w': 4, 'h': 4,"
+                         " 'color': '#ff0000'}]\n")
+        cls.empty = os.path.join(cls.tmp, "empty.py")
+        with open(cls.empty, "w") as handle:
+            handle.write("# no sprites here\n")
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = main(argv)
+        except SystemExit as exc:
+            code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_code_list(self):
+        code, out, err = self._run(["code", self.game, "--list"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("HERO — map, 2 x 2", out)
+        self.assertIn("PALETTE — palette, 2 colors", out)
+        self.assertIn("DRAW — found but not rendered", out)
+        self.assertIn("draw-call", out)
+
+    def test_code_render_asset(self):
+        out_path = os.path.join(self.tmp, "hero.png")
+        code, out, err = self._run(["code", self.game,
+                                    "--asset", "HERO",
+                                    "--out", out_path])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(out_path))
+        self.assertIn("HERO: 2 x 2", out)
+        image = QImage(out_path)
+        self.assertEqual((image.width(), image.height()), (2, 2))
+
+    def test_code_missing_asset_fails_cleanly(self):
+        code, _out, err = self._run(["code", self.game,
+                                     "--asset", "NOPE"])
+        self.assertEqual(code, 1)
+        self.assertIn("no asset named 'NOPE'", err)
+        self.assertIn("HERO", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_code_no_asset_flag_fails_cleanly(self):
+        code, _out, err = self._run(["code", self.game])
+        self.assertEqual(code, 1)
+        self.assertIn("--asset", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_code_no_assets_list_reports_empty(self):
+        code, out, err = self._run(["code", self.empty, "--list"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("No pixel-art assets found", out)
+
+    def test_code_no_assets_render_fails_cleanly(self):
+        code, _out, err = self._run(["code", self.empty,
+                                     "--asset", "HERO"])
+        self.assertEqual(code, 1)
+        self.assertIn("no pixel-art assets found", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_code_missing_file_fails_cleanly(self):
+        code, _out, err = self._run(
+            ["code", os.path.join(self.tmp, "nope.py"), "--list"])
+        self.assertEqual(code, 1)
+        self.assertIn("not found", err)
+        self.assertNotIn("Traceback", err)
+
+
+class SkinCliTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        ensure_app()
+        cls.tmp = tempfile.mkdtemp()
+        from helpers import make_solid_image
+        from PySide6.QtGui import qRgba
+        skin = make_solid_image(64, 64, 10, 20, 30)
+        # A red head front, so the extracted part is checkable.
+        for y in range(8, 16):
+            for x in range(8, 16):
+                skin.setPixel(x, y, qRgba(255, 0, 0, 255))
+        cls.skin = write_image(skin, os.path.join(cls.tmp,
+                                                  "steve.png"))
+        cls.texture = write_image(
+            make_solid_image(16, 16, 1, 2, 3),
+            os.path.join(cls.tmp, "grass.png"))
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = main(argv)
+        except SystemExit as exc:
+            code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_skin_extract(self):
+        out_dir = os.path.join(self.tmp, "parts")
+        code, out, err = self._run(["skin", self.skin,
+                                    "--out", out_dir])
+        self.assertEqual(code, 0, err)
+        self.assertIn("12 part(s) + figure", out)
+        self.assertTrue(os.path.isfile(
+            os.path.join(out_dir, "head.png")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(out_dir, "figure.png")))
+        head = QImage(os.path.join(out_dir, "head.png"))
+        self.assertEqual((head.width(), head.height()), (8, 8))
+        self.assertEqual(head.pixelColor(0, 0).red(), 255)
+
+    def test_skin_default_out_dir(self):
+        code, _out, err = self._run(["skin", self.skin])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isdir(
+            os.path.join(self.tmp, "steve-skin-parts")))
+
+    def test_skin_not_a_skin_fails_cleanly(self):
+        code, _out, err = self._run(["skin", self.texture])
+        self.assertEqual(code, 1)
+        self.assertIn("not a Minecraft skin", err)
+        self.assertIn("16 x 16", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_skin_missing_file_fails_cleanly(self):
+        code, _out, err = self._run(
+            ["skin", os.path.join(self.tmp, "nope.png")])
+        self.assertEqual(code, 1)
+        self.assertIn("not found", err)
+        self.assertNotIn("Traceback", err)
+
+
 if __name__ == "__main__":
     unittest.main()

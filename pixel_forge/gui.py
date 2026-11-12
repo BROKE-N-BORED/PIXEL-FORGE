@@ -1,6 +1,6 @@
 """Pixel Forge window — native Qt GUI, dark theme.
 
-Four tabs. Image: import a picture, pick a size and a palette, watch
+Five tabs. Image: import a picture, pick a size and a palette, watch
 the before and after side by side, export a transparent PNG.
 Conversion is live: every control change re-pixelizes at once.
 Video: import a clip, extract frames with ffmpeg, keep or drop frames
@@ -11,6 +11,12 @@ Prompt: describe a sprite, generate 3 candidates with the local
 image engine, click one to keep it, pixelize it with the same
 controls, export a transparent PNG. Generation runs in a worker
 thread — a minutes-long CPU run never freezes the window.
+Code: import a .py / .js / .ts file (or a folder of them) and the
+pixel art the code defines — pixel maps, palettes — is rebuilt as
+real sprites, parsed statically and never executed. Or import a
+game asset: a Minecraft skin splits into its parts, anything else
+pixelizes as a texture. Export PNG and Save to library work like
+the other tabs.
 Library: every sprite saved from the other tabs, with tags and
 search — click one to preview it, load it back into the Image tab,
 rename it, delete it, or export a copy.
@@ -42,6 +48,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
                                QSpinBox, QSplitter, QStatusBar,
                                QTabWidget, QVBoxLayout, QWidget)
 
+from .codeinput import CODE_EXTENSIONS, parse_paths
 from .imagegen import (DEFAULT_COUNT, DEFAULT_NEGATIVE,
                        GenerationCancelled, engine_status, generate,
                        load_batch, new_batch, require_engine,
@@ -51,6 +58,8 @@ from .palettes import PALETTE_LABELS
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
                        count_opaque_colors, load_image, pixelize_image)
 from .presets import BUILTIN_PRESETS, PresetStore
+from .skins import (detect_skin, extract_skin, pixelize_texture,
+                    skin_figure, skin_parts)
 from .spritesheet import (build_metadata, frames_from_sheet,
                           pack_frames, write_sheet)
 from .video import (DEFAULT_FPS, FPS_PRESETS, VIDEO_EXTENSIONS,
@@ -104,6 +113,12 @@ def video_filter():
     """A QFileDialog filter for the video extensions ffmpeg reads."""
     patterns = " ".join("*%s" % ext for ext in sorted(VIDEO_EXTENSIONS))
     return "Videos (%s);;All files (*)" % patterns
+
+
+def code_filter():
+    """A QFileDialog filter for the code files Pixel Forge parses."""
+    patterns = " ".join("*%s" % ext for ext in sorted(CODE_EXTENSIONS))
+    return "Code (%s);;All files (*)" % patterns
 
 
 def checkerboard_pixmap(image, scale, smooth):
@@ -395,10 +410,23 @@ class MainWindow(QMainWindow):
         self.prompt_result_image = None
         self._updating_prompt_size = False
 
+        # Code tab state. Assets are small rendered QImages held in
+        # memory; a skin also keeps its source path so its parts
+        # can be exported to a folder.
+        self.code_assets = []
+        self.code_not_rendered = []
+        self.code_source = None
+        self.code_kind = None  # "code", "skin", or "texture"
+        self.code_current = None
+        self.code_image = None
+        self.code_skin_path = None
+        self.code_skin_layout = None
+
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_image_tab(), "Image")
         self.tabs.addTab(self._build_video_tab(), "Video")
         self.tabs.addTab(self._build_prompt_tab(), "Prompt")
+        self.tabs.addTab(self._build_code_tab(), "Code")
         self.tabs.addTab(self._build_library_tab(), "Library")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self.tabs)
@@ -620,6 +648,9 @@ class MainWindow(QMainWindow):
             if Path(path).suffix.lower() in VIDEO_EXTENSIONS:
                 self.tabs.setCurrentIndex(1)
                 self.load_video(path)
+            elif Path(path).suffix.lower() in CODE_EXTENSIONS:
+                self.tabs.setCurrentIndex(3)
+                self.load_code(path)
             else:
                 self.tabs.setCurrentIndex(0)
                 self.load_image(path)
@@ -1922,6 +1953,377 @@ class MainWindow(QMainWindow):
         if path:
             self.export_prompt_keeper(path)
 
+    # ============================================================== code tab
+
+    def _build_code_tab(self):
+        root = QWidget()
+        main_layout = QHBoxLayout(root)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+
+        # ------------------------------------------------ controls
+        controls = QWidget()
+        controls.setFixedWidth(250)
+        controls.setSizePolicy(QSizePolicy.Policy.Fixed,
+                               QSizePolicy.Policy.Preferred)
+        form = QVBoxLayout(controls)
+        form.setContentsMargins(0, 0, 0, 0)
+
+        self.code_import_btn = QPushButton("Import code")
+        self.code_import_btn.clicked.connect(self._on_import_code)
+        form.addWidget(self.code_import_btn)
+
+        self.code_import_folder_btn = QPushButton("Import code folder")
+        self.code_import_folder_btn.clicked.connect(
+            self._on_import_code_folder)
+        form.addWidget(self.code_import_folder_btn)
+
+        self.code_import_asset_btn = QPushButton("Import game asset")
+        self.code_import_asset_btn.clicked.connect(
+            self._on_import_game_asset)
+        form.addWidget(self.code_import_asset_btn)
+
+        form.addWidget(self._section("Assets"))
+        self.code_list = QListWidget()
+        self.code_list.setIconSize(QSize(32, 32))
+        self.code_list.itemClicked.connect(
+            self._on_code_item_clicked)
+        form.addWidget(self.code_list, 1)
+
+        form.addWidget(self._section("Found but not rendered"))
+        self.code_skipped_label = QLabel(
+            "Import code to see what it defines.")
+        self.code_skipped_label.setWordWrap(True)
+        # The reasons list can run long (one line per skipped
+        # asset, each wrapping) — a scroll box caps what it costs
+        # the column, so the Zoom row and info label below it are
+        # never squeezed out. Sizing the label to its full text
+        # instead overflowed the column and hid them entirely.
+        skipped_scroll = QScrollArea()
+        skipped_scroll.setWidgetResizable(True)
+        skipped_scroll.setFixedHeight(72)
+        skipped_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        skipped_scroll.setWidget(self.code_skipped_label)
+        form.addWidget(skipped_scroll)
+
+        form.addWidget(self._section("Zoom"))
+        zoom_row = QHBoxLayout()
+        self.code_zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.code_zoom_slider.setRange(1, 16)
+        self.code_zoom_slider.setValue(8)
+        self.code_zoom_slider.valueChanged.connect(
+            self._on_code_zoom_changed)
+        zoom_row.addWidget(self.code_zoom_slider)
+        self.code_zoom_label = QLabel("8x")
+        self.code_zoom_label.setFixedWidth(32)
+        zoom_row.addWidget(self.code_zoom_label)
+        form.addLayout(zoom_row)
+
+        self.code_info_label = QLabel("No code loaded")
+        self.code_info_label.setWordWrap(True)
+        form.addWidget(self.code_info_label)
+
+        self.code_export_btn = QPushButton("Export PNG")
+        self.code_export_btn.setObjectName("export")
+        self.code_export_btn.setEnabled(False)
+        self.code_export_btn.clicked.connect(
+            self._on_export_code_asset)
+        form.addWidget(self.code_export_btn)
+
+        self.code_export_parts_btn = QPushButton("Export parts")
+        self.code_export_parts_btn.setEnabled(False)
+        self.code_export_parts_btn.clicked.connect(
+            self._on_export_code_parts)
+        form.addWidget(self.code_export_parts_btn)
+
+        self.code_save_library_btn = QPushButton("Save to library")
+        self.code_save_library_btn.setEnabled(False)
+        self.code_save_library_btn.clicked.connect(
+            self._on_save_code_to_library)
+        form.addWidget(self.code_save_library_btn)
+
+        main_layout.addWidget(controls)
+
+        # ------------------------------------------------ preview
+        preview_pane = QWidget()
+        preview_layout = QVBoxLayout(preview_pane)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.addWidget(self._section("Sprite"))
+        self.code_preview_label = QLabel(
+            "Import code or a game asset to see its sprites here")
+        self.code_preview_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter)
+        self.code_preview_label.setWordWrap(True)
+        preview_scroll = QScrollArea()
+        preview_scroll.setWidgetResizable(True)
+        preview_scroll.setWidget(self.code_preview_label)
+        preview_layout.addWidget(preview_scroll, 1)
+        main_layout.addWidget(preview_pane, 1)
+        self._fit_code_info_label()
+        return root
+
+    def _fit_code_info_label(self):
+        """Size the Code tab's info label to its text.
+
+        Same problem as the Prompt status label (v0.4): Qt does
+        not reliably apply a word-wrapped QLabel's heightForWidth
+        inside this fixed-width column, so the info text
+        overflowed into the controls below it. The minimum height
+        comes from the label's OWN heightForWidth at 230 px —
+        slightly narrower than the 250 px column, so it wraps at
+        least as much and the height is never short. Call it
+        after any setText on the label. (The skipped-reasons
+        label lives in a scroll box instead — its text can run
+        long enough to overflow the column on its own.)
+        """
+        label = self.code_info_label
+        label.setMinimumHeight(label.heightForWidth(230) + 2)
+        label.updateGeometry()
+
+    # ------------------------------------------------------------ input
+
+    def load_code(self, paths):
+        """Parse code file(s) or folder(s) and list the assets
+        found. Returns True on success. On failure shows a message
+        box and returns False — the window stays up either way."""
+        if isinstance(paths, (str, Path)):
+            paths = [paths]
+        try:
+            result = parse_paths(paths)
+        except PixelForgeError as exc:
+            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            return False
+        if not result["assets"] and not result["not_rendered"]:
+            QMessageBox.warning(
+                self, "Pixel Forge",
+                "no pixel-art assets found in %s — the code "
+                "defines no pixel maps or palettes Pixel Forge "
+                "can read (see the README for what is detected)"
+                % ", ".join(Path(p).name for p in paths))
+            return False
+        self.code_assets = result["assets"]
+        self.code_not_rendered = result["not_rendered"]
+        self.code_source = ", ".join(str(p) for p in paths)
+        self.code_kind = "code"
+        self.code_skin_path = None
+        self.code_skin_layout = None
+        self.code_export_parts_btn.setEnabled(False)
+        self._rebuild_code_list()
+        self.statusBar().showMessage(
+            "%d asset(s) from %d file(s)"
+            % (len(result["assets"]), len(result["files"])))
+        return True
+
+    def load_game_asset(self, path):
+        """Load a game asset: a Minecraft skin splits into its
+        parts (plus the combined figure); anything else pixelizes
+        as a texture. Returns True on success."""
+        try:
+            image = load_image(path)
+        except PixelForgeError as exc:
+            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            return False
+        layout = detect_skin(image)
+        self.code_source = str(path)
+        self.code_not_rendered = []
+        if layout is not None:
+            try:
+                parts = skin_parts(image)
+                figure = skin_figure(image)
+            except PixelForgeError as exc:
+                QMessageBox.warning(self, "Pixel Forge", str(exc))
+                return False
+            self.code_kind = "skin"
+            self.code_skin_path = str(path)
+            self.code_skin_layout = layout
+            self.code_assets = []
+            for name, part in parts.items():
+                self.code_assets.append({
+                    "name": name, "kind": "part",
+                    "source_file": str(path),
+                    "width": part.width(), "height": part.height(),
+                    "colors": count_opaque_colors(part),
+                    "image": part,
+                    "detail": "front view, %s skin" % layout})
+            self.code_assets.append({
+                "name": "figure", "kind": "figure",
+                "source_file": str(path),
+                "width": figure.width(), "height": figure.height(),
+                "colors": count_opaque_colors(figure),
+                "image": figure,
+                "detail": "combined figure, overlays included"})
+            self.code_export_parts_btn.setEnabled(True)
+            self._rebuild_code_list()
+            self.statusBar().showMessage(
+                "Minecraft skin (%s): %d parts"
+                % (layout, len(parts)))
+            return True
+        texture = pixelize_texture(image)
+        self.code_kind = "texture"
+        self.code_skin_path = None
+        self.code_skin_layout = None
+        self.code_export_parts_btn.setEnabled(False)
+        self.code_assets = [{
+            "name": Path(path).stem, "kind": "texture",
+            "source_file": str(path),
+            "width": texture.width(), "height": texture.height(),
+            "colors": count_opaque_colors(texture),
+            "image": texture,
+            "detail": "not a Minecraft skin (%d x %d) — "
+            "pixelized as a texture" % (image.width(),
+                                        image.height())}]
+        self._rebuild_code_list()
+        self.statusBar().showMessage(
+            "Not a skin — pixelized as a texture")
+        return True
+
+    def _on_import_code(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Import code", "", code_filter())
+        if paths:
+            self.load_code(paths)
+
+    def _on_import_code_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Import code folder", "")
+        if folder:
+            self.load_code(folder)
+
+    def _on_import_game_asset(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import game asset", "", supported_filter())
+        if path:
+            self.load_game_asset(path)
+
+    # ------------------------------------------------------------ list
+
+    def _rebuild_code_list(self):
+        """Rebuild the asset list and the not-rendered note from
+        the current Code tab state; select the first asset."""
+        self.code_list.blockSignals(True)
+        try:
+            self.code_list.clear()
+            for index, asset in enumerate(self.code_assets):
+                thumb = QPixmap.fromImage(asset["image"].scaled(
+                    32, 32, Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.FastTransformation))
+                item = QListWidgetItem(
+                    thumb,
+                    "%s — %s, %d x %d" % (
+                        asset["name"], asset["kind"],
+                        asset["width"], asset["height"]))
+                item.setData(Qt.ItemDataRole.UserRole, index)
+                item.setToolTip(asset["detail"])
+                self.code_list.addItem(item)
+        finally:
+            self.code_list.blockSignals(False)
+        if self.code_not_rendered:
+            lines = ["%s: %s" % (note["name"], note["reason"])
+                     for note in self.code_not_rendered]
+            self.code_skipped_label.setText("\n".join(lines))
+        elif self.code_assets:
+            self.code_skipped_label.setText(
+                "Everything found was rendered.")
+        else:
+            self.code_skipped_label.setText(
+                "Import code to see what it defines.")
+        self.code_current = None
+        self.code_image = None
+        self.code_info_label.setText(
+            "%d asset(s)" % len(self.code_assets)
+            if self.code_assets else "No code loaded")
+        self._fit_code_info_label()
+        self.code_preview_label.setPixmap(QPixmap())
+        self.code_preview_label.setText(
+            "Select an asset to preview it"
+            if self.code_assets else
+            "Import code or a game asset to see its sprites here")
+        self.code_export_btn.setEnabled(False)
+        self.code_save_library_btn.setEnabled(False)
+        if self.code_assets:
+            self.code_list.setCurrentRow(0)
+            self._show_code_asset(0)
+
+    def _on_code_item_clicked(self, item):
+        index = item.data(Qt.ItemDataRole.UserRole)
+        if index is not None:
+            self._show_code_asset(index)
+
+    def _show_code_asset(self, index):
+        asset = self.code_assets[index]
+        self.code_current = index
+        self.code_image = asset["image"]
+        self._refresh_code_pixmap()
+        colors = asset["colors"]
+        self.code_info_label.setText(
+            "%s — %s, %d x %d, %d color%s\n%s\n%s"
+            % (asset["name"], asset["kind"],
+               asset["width"], asset["height"], colors,
+               "" if colors == 1 else "s",
+               asset["detail"],
+               Path(asset["source_file"]).name))
+        self._fit_code_info_label()
+        self.code_export_btn.setEnabled(True)
+        self.code_save_library_btn.setEnabled(True)
+
+    def _refresh_code_pixmap(self):
+        if self.code_image is None:
+            return
+        pixmap = checkerboard_pixmap(
+            self.code_image, self.code_zoom_slider.value(),
+            smooth=False)
+        self.code_preview_label.setPixmap(pixmap)
+
+    def _on_code_zoom_changed(self, value):
+        self.code_zoom_label.setText("%dx" % value)
+        self._refresh_code_pixmap()
+
+    # --------------------------------------------------------- export
+
+    def export_code_asset(self, path):
+        """Write the selected Code tab asset to path as PNG.
+        Returns True on success; on failure shows a message box
+        and returns False."""
+        if self.code_image is None:
+            return False
+        if not str(path).lower().endswith(".png"):
+            path = "%s.png" % path
+        if not self.code_image.save(str(path), "PNG"):
+            QMessageBox.warning(self, "Pixel Forge",
+                                "could not write: %s" % path)
+            return False
+        self.statusBar().showMessage("Exported %s" % Path(path).name)
+        return True
+
+    def _on_export_code_asset(self):
+        if self.code_image is None:
+            return
+        default = ""
+        asset = self.code_assets[self.code_current]
+        if self.code_source:
+            default = str(Path.home() / (
+                "%s.png" % asset["name"]))
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export PNG", default, "PNG image (*.png)")
+        if path:
+            self.export_code_asset(path)
+
+    def _on_export_code_parts(self):
+        if self.code_skin_path is None:
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self, "Export skin parts to folder", "")
+        if not folder:
+            return
+        try:
+            written = extract_skin(self.code_skin_path, folder)
+        except PixelForgeError as exc:
+            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            return
+        self.statusBar().showMessage(
+            "Exported %d skin part(s) to %s"
+            % (len(written), folder))
+
     # =========================================================== presets
 
     def _tab_controls(self, tab):
@@ -2271,7 +2673,7 @@ class MainWindow(QMainWindow):
             else:
                 self.library_count_label.setText(
                     "Library is empty — save a sprite from the "
-                    "Image, Video, or Prompt tab.")
+                    "Image, Video, Prompt, or Code tab.")
         else:
             self.library_count_label.setText(
                 "%d of %d sprite(s)" % (len(entries), total))
@@ -2510,6 +2912,25 @@ class MainWindow(QMainWindow):
             ("%s sheet" % stem).strip() or "Untitled sheet",
             self.save_sheet_to_library)
 
+    def save_code_asset_to_library(self, name, tags):
+        """Save the Code tab's selected asset. Returns the entry;
+        raises PixelForgeError when nothing is selected."""
+        if self.code_image is None:
+            raise PixelForgeError("nothing to save to the library")
+        source = "code" if self.code_kind == "code" else "skin"
+        entry = self.library.add_image(
+            self.code_image, name, tags, source=source)
+        self._refresh_library()
+        return entry
+
+    def _on_save_code_to_library(self):
+        if self.code_image is None:
+            return
+        asset = self.code_assets[self.code_current]
+        self._save_to_library_via_dialog(
+            asset["name"] or "Untitled sprite",
+            self.save_code_asset_to_library)
+
     # --------------------------------------------------------- cleanup
 
     def closeEvent(self, event):
@@ -2536,6 +2957,9 @@ def main(argv=None):
         if Path(args[0]).suffix.lower() in VIDEO_EXTENSIONS:
             window.tabs.setCurrentIndex(1)
             window.load_video(args[0])
+        elif Path(args[0]).suffix.lower() in CODE_EXTENSIONS:
+            window.tabs.setCurrentIndex(3)
+            window.load_code(args[0])
         else:
             window.load_image(args[0])
     window.show()

@@ -7,6 +7,9 @@
     pixel-forge library list [--tag TAG]
     pixel-forge library add FILE --name NAME [--tags a,b]
     pixel-forge presets list
+    pixel-forge code FILE --list
+    pixel-forge code FILE --asset NAME --out OUT.png
+    pixel-forge skin FILE --out DIR
     pixel-forge gui
     pixel-forge --version
 
@@ -24,11 +27,13 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .codeinput import parse_paths
 from .imagegen import (DEFAULT_NEGATIVE, prompt_to_sprites, slugify)
 from .library import Library, normalize_tags
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
                        pixelize_file)
 from .presets import PresetStore
+from .skins import extract_skin
 from .spritesheet import load_frame_dir, write_sheet
 from .video import DEFAULT_FPS, video_to_frames
 
@@ -88,8 +93,8 @@ def _validate_pixelize_args(args):
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="pixel-forge",
-        description="Turn images, videos, and prompts into pixel art "
-        "and sprites.")
+        description="Turn images, videos, prompts, and code into "
+        "pixel art and sprites.")
     parser.add_argument("--version", action="version",
                         version="pixel-forge %s" % __version__)
     sub = parser.add_subparsers(dest="command", metavar="command")
@@ -186,6 +191,29 @@ def build_parser():
                                      metavar="command")
     pre_sub.required = True
     pre_sub.add_parser("list", help="list all presets")
+
+    code = sub.add_parser(
+        "code", help="reproduce pixel-art assets from source code "
+        "(.py, .js, .ts — parsed statically, never executed)")
+    code.add_argument("file", help="code file or folder of code "
+                      "files to parse")
+    code.add_argument("--list", action="store_true",
+                      help="list the assets found, instead of "
+                      "rendering one")
+    code.add_argument("--asset", default=None,
+                      help="name of the asset to render (see "
+                      "--list)")
+    code.add_argument("--out", default=None,
+                      help="output PNG path (default: "
+                      "<asset>-sprite.png in the current folder)")
+
+    skin = sub.add_parser(
+        "skin", help="extract a Minecraft skin's parts (64x64 or "
+        "64x32 PNG) into one PNG per part plus the figure")
+    skin.add_argument("file", help="skin PNG to extract")
+    skin.add_argument("--out", default=None,
+                      help="output folder (default: "
+                      "<skin-stem>-skin-parts next to the file)")
 
     sub.add_parser("gui", help="open the Pixel Forge window")
     return parser
@@ -336,6 +364,69 @@ def cmd_presets_list(_args):
     return 0
 
 
+def _describe_asset(asset):
+    if asset["kind"] == "map":
+        return "%s — map, %d x %d, %d colors (%s)" % (
+            asset["name"], asset["width"], asset["height"],
+            asset["colors"], asset["detail"])
+    return "%s — palette, %d colors" % (
+        asset["name"], asset["colors"])
+
+
+def cmd_code(args):
+    result = parse_paths([args.file])
+    assets = result["assets"]
+    if args.list:
+        if not assets:
+            print("No pixel-art assets found in %s "
+                  "(parsed %d file(s))"
+                  % (args.file, len(result["files"])))
+        for asset in assets:
+            print(_describe_asset(asset))
+        for note in result["not_rendered"]:
+            print("%s — found but not rendered: %s"
+                  % (note["name"], note["reason"]))
+        return 0
+    if args.asset is None:
+        raise PixelForgeError(
+            "pick an asset with --asset NAME, or list them with "
+            "--list")
+    for asset in assets:
+        if asset["name"] == args.asset:
+            out = args.out
+            if out is None:
+                out = "%s-sprite.png" % slugify(asset["name"])
+            if not str(out).lower().endswith(".png"):
+                out = "%s.png" % out
+            if not asset["image"].save(str(out), "PNG"):
+                raise PixelForgeError("could not write: %s" % out)
+            print("%s: %d x %d, %d colors — wrote %s"
+                  % (asset["name"], asset["width"],
+                     asset["height"], asset["colors"], out))
+            return 0
+    if not assets:
+        raise PixelForgeError(
+            "no pixel-art assets found in %s (parsed %d file(s)) — "
+            "nothing to render" % (args.file,
+                                   len(result["files"])))
+    raise PixelForgeError(
+        "no asset named %r in %s (found: %s)"
+        % (args.asset, args.file,
+           ", ".join(a["name"] for a in assets)))
+
+
+def cmd_skin(args):
+    out = args.out
+    if out is None:
+        src = Path(args.file)
+        out = str(src.with_name(src.stem + "-skin-parts"))
+    written = extract_skin(args.file, out)
+    parts = [p for p in written if p.name != "figure.png"]
+    print("%d part(s) + figure in %s"
+          % (len(parts), out))
+    return 0
+
+
 def cmd_gui(_args):
     from .gui import main as gui_main
     return gui_main()
@@ -368,6 +459,10 @@ def main(argv=None):
         if args.command == "presets":
             if args.presets_command == "list":
                 return cmd_presets_list(args)
+        if args.command == "code":
+            return cmd_code(args)
+        if args.command == "skin":
+            return cmd_skin(args)
         if args.command == "gui":
             return cmd_gui(args)
     except PixelForgeError as exc:

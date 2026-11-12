@@ -198,7 +198,7 @@ class VideoGuiTests(unittest.TestCase):
     def test_video_tab_exists_with_controls(self):
         tabs = [self.win.tabs.tabText(i)
                 for i in range(self.win.tabs.count())]
-        self.assertEqual(tabs, ["Image", "Video", "Prompt", "Library"])
+        self.assertEqual(tabs, ["Image", "Video", "Prompt", "Code", "Library"])
         fps = [self.win.video_fps_combo.itemData(i)
                for i in range(self.win.video_fps_combo.count())]
         self.assertEqual(fps, [2, 4, 8, 12, 24])
@@ -625,7 +625,7 @@ class PromptGuiTests(unittest.TestCase):
     def test_prompt_tab_exists_with_controls(self):
         tabs = [self.win.tabs.tabText(i)
                 for i in range(self.win.tabs.count())]
-        self.assertEqual(tabs, ["Image", "Video", "Prompt", "Library"])
+        self.assertEqual(tabs, ["Image", "Video", "Prompt", "Code", "Library"])
         self.assertEqual(self.win.prompt_edit.placeholderText(),
                          "a knight with a red shield")
         self.assertTrue(self.win.prompt_negative_edit.text())
@@ -838,7 +838,7 @@ class LibraryGuiTests(unittest.TestCase):
         from pixel_forge.gui import MainWindow
         self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
         self.win = MainWindow(library_dir=self.lib_dir)
-        self.win.tabs.setCurrentIndex(3)
+        self.win.tabs.setCurrentIndex(4)
 
     def tearDown(self):
         self.win.close()
@@ -858,7 +858,7 @@ class LibraryGuiTests(unittest.TestCase):
     def test_library_tab_exists_with_controls(self):
         tabs = [self.win.tabs.tabText(i)
                 for i in range(self.win.tabs.count())]
-        self.assertEqual(tabs, ["Image", "Video", "Prompt",
+        self.assertEqual(tabs, ["Image", "Video", "Prompt", "Code",
                                 "Library"])
         self.assertEqual(
             self.win.library_search_edit.placeholderText(),
@@ -1043,7 +1043,7 @@ class LibraryGuiTests(unittest.TestCase):
         self.win.save_image_result_to_library("Knight", ["hero"])
         second = MainWindow(library_dir=self.lib_dir)
         try:
-            second.tabs.setCurrentIndex(3)
+            second.tabs.setCurrentIndex(4)
             self.assertEqual(second.library_list.count(), 1)
             self.assertEqual(second.library_list.item(0).text(),
                              "Knight")
@@ -1296,13 +1296,185 @@ class SheetLibraryGuiTests(unittest.TestCase):
             self.lib_dir, "walk-cycle.png")))
         self.assertTrue(os.path.isfile(os.path.join(
             self.lib_dir, "walk-cycle.json")))
-        self.win.tabs.setCurrentIndex(3)
+        self.win.tabs.setCurrentIndex(4)
         self.assertEqual(self.win.library_list.count(), 1)
         item = self.win.library_list.item(0)
         self.win.library_list.setCurrentItem(item)
         self.win._on_library_item_clicked(item)
         self.assertIn("spritesheet, 16 frames",
                       self.win.library_info_label.text())
+
+
+class CodeTabTests(unittest.TestCase):
+    """Code tab — code parsing, skins, textures, export, library."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        cls.game = os.path.join(cls.tmp, "game.py")
+        with open(cls.game, "w") as handle:
+            handle.write('PALETTE = ["#ff0000", "#00ff00"]\n'
+                         "HERO = [[0, 1], [1, 0]]\n"
+                         "DRAW = [{'x': 0, 'y': 0, 'w': 4, 'h': 4,"
+                         " 'color': '#ff0000'}]\n")
+        cls.empty_py = os.path.join(cls.tmp, "empty.py")
+        with open(cls.empty_py, "w") as handle:
+            handle.write("# no sprites here\n")
+        skin = make_solid_image(64, 64, 10, 20, 30)
+        cls.skin = write_image(skin, os.path.join(cls.tmp,
+                                                  "steve.png"))
+        cls.texture = write_image(
+            make_solid_image(16, 16, 1, 2, 3),
+            os.path.join(cls.tmp, "grass.png"))
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self.win = MainWindow(library_dir=self.lib_dir)
+        self.win.tabs.setCurrentIndex(3)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def test_code_tab_exists_with_controls(self):
+        tabs = [self.win.tabs.tabText(i)
+                for i in range(self.win.tabs.count())]
+        self.assertEqual(tabs, ["Image", "Video", "Prompt", "Code",
+                                "Library"])
+        self.assertEqual(self.win.code_import_btn.text(),
+                         "Import code")
+        self.assertEqual(self.win.code_import_asset_btn.text(),
+                         "Import game asset")
+        self.assertFalse(self.win.code_export_btn.isEnabled())
+        self.assertFalse(self.win.code_export_parts_btn.isEnabled())
+        self.assertFalse(self.win.code_save_library_btn.isEnabled())
+        self.assertEqual(self.win.code_zoom_slider.value(), 8)
+
+    def test_no_bare_ampersand_on_code_tab(self):
+        self.assertTrue(self.win.load_code(self.game))
+        self.assertTrue(self.win.load_game_asset(self.skin))
+        self.assertTrue(self.win.load_game_asset(self.texture))
+        for text in visible_texts(self.win):
+            self.assertNotIn("&", text, "bare & in visible text: %r"
+                             % text)
+
+    def test_load_code_lists_assets_and_previews(self):
+        self.assertTrue(self.win.load_code(self.game))
+        self.assertEqual(self.win.code_list.count(), 2)
+        texts = [self.win.code_list.item(i).text()
+                 for i in range(self.win.code_list.count())]
+        self.assertTrue(any(t.startswith("HERO — map, 2 x 2")
+                            for t in texts))
+        self.assertTrue(any(t.startswith("PALETTE — palette")
+                            for t in texts))
+        self.assertIn("DRAW", self.win.code_skipped_label.text())
+        self.assertIn("draw-call",
+                      self.win.code_skipped_label.text())
+        pixmap = self.win.code_preview_label.pixmap()
+        self.assertIsNotNone(pixmap)
+        self.assertFalse(pixmap.isNull())
+        self.assertTrue(self.win.code_export_btn.isEnabled())
+        self.assertTrue(self.win.code_save_library_btn.isEnabled())
+        self.assertFalse(self.win.code_export_parts_btn.isEnabled())
+        # First asset in file order (PALETTE) is selected.
+        self.assertIn("PALETTE", self.win.code_info_label.text())
+
+    def test_selecting_an_asset_changes_preview(self):
+        self.assertTrue(self.win.load_code(self.game))
+        item = self.win.code_list.item(1)
+        self.win.code_list.setCurrentItem(item)
+        self.win._on_code_item_clicked(item)
+        self.assertIn("HERO", self.win.code_info_label.text())
+        self.assertEqual((self.win.code_image.width(),
+                          self.win.code_image.height()), (2, 2))
+
+    def test_load_code_no_assets_fails_cleanly(self):
+        from unittest import mock
+        from pixel_forge import gui as gui_mod
+        with mock.patch.object(gui_mod.QMessageBox, "warning") \
+                as warn:
+            self.assertFalse(self.win.load_code(self.empty_py))
+        self.assertEqual(self.win.code_list.count(), 0)
+        warn.assert_called_once()
+
+    def test_load_skin_lists_parts_and_figure(self):
+        self.assertTrue(self.win.load_game_asset(self.skin))
+        # 12 parts + the combined figure.
+        self.assertEqual(self.win.code_list.count(), 13)
+        texts = [self.win.code_list.item(i).text()
+                 for i in range(self.win.code_list.count())]
+        self.assertTrue(any(t.startswith("head — part, 8 x 8")
+                            for t in texts))
+        self.assertTrue(any(t.startswith("figure — figure, 16 x 32")
+                            for t in texts))
+        self.assertTrue(self.win.code_export_parts_btn.isEnabled())
+        self.assertIn("Minecraft skin (64x64)",
+                      self.win.statusBar().currentMessage())
+
+    def test_load_texture_falls_back_with_note(self):
+        self.assertTrue(self.win.load_game_asset(self.texture))
+        self.assertEqual(self.win.code_list.count(), 1)
+        self.assertTrue(self.win.code_list.item(0).text()
+                        .startswith("grass — texture, 16 x 16"))
+        self.assertIn("not a Minecraft skin",
+                      self.win.code_info_label.text())
+        self.assertFalse(self.win.code_export_parts_btn.isEnabled())
+
+    def test_export_code_asset(self):
+        self.assertTrue(self.win.load_code(self.game))
+        item = self.win.code_list.item(1)  # HERO, 2 x 2
+        self.win.code_list.setCurrentItem(item)
+        self.win._on_code_item_clicked(item)
+        out_path = os.path.join(self.tmp, "hero-out.png")
+        self.assertTrue(self.win.export_code_asset(out_path))
+        self.assertTrue(os.path.isfile(out_path))
+        from PySide6.QtGui import QImage
+        image = QImage(out_path)
+        self.assertEqual((image.width(), image.height()), (2, 2))
+
+    def test_save_code_asset_to_library(self):
+        self.assertTrue(self.win.load_code(self.game))
+        entry = self.win.save_code_asset_to_library(
+            "Hero from code", ["hero"])
+        self.assertEqual(entry["name"], "Hero from code")
+        self.assertEqual(entry["source"], "code")
+        self.assertEqual(entry["kind"], "sprite")
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.lib_dir, "hero-from-code.png")))
+        self.assertEqual(len(self.win.library.entries()), 1)
+
+    def test_save_skin_part_to_library(self):
+        self.assertTrue(self.win.load_game_asset(self.skin))
+        entry = self.win.save_code_asset_to_library("Skin head", [])
+        self.assertEqual(entry["source"], "skin")
+
+    def test_code_labels_fit_their_text(self):
+        # Regression: the info label wrapped but the layout gave
+        # it too little height, so the text overflowed into the
+        # controls below. (The skipped-reasons label lives in a
+        # scroll box, so its full text is reachable by scrolling
+        # instead of sizing the column.)
+        self.win.show()
+        self.app.processEvents()
+        self.assertTrue(self.win.load_code(self.game))
+        item = self.win.code_list.item(1)  # HERO
+        self.win.code_list.setCurrentItem(item)
+        self.win._on_code_item_clicked(item)
+        self.app.processEvents()
+        label = self.win.code_info_label
+        self.assertGreaterEqual(
+            label.height(),
+            label.heightForWidth(label.width()),
+            "info label text clipped: %r" % label.text()[:40])
+        # The controls below the reasons list must still have
+        # room: the zoom slider and the info label are visible,
+        # not squeezed to nothing by a long reasons list.
+        self.assertGreater(self.win.code_zoom_slider.height(), 10)
+        self.assertGreater(label.height(), 10)
 
 
 if __name__ == "__main__":
