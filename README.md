@@ -314,17 +314,19 @@ A preset needs all six keys: `width` and `height` (1–512),
 (true/false). A hand-edited file with a bad preset fails loudly
 instead of applying nonsense.
 
-## What v0.8 does and does not do
+## What v0.9 does and does not do
 
-v0.8 is Items 1–6 of the plan: image to pixel sprite core, video to
+v0.9 is Items 1–6 of the plan: image to pixel sprite core, video to
 sprite frames, prompt-to-sprite with a local image model,
 spritesheets + animation export, a sprite library with presets,
 and code + game-asset input — plus the window-fit fix (every tab's
-control column scrolls, so the window fits a 768 px screen) and
-the texture-import fix (a big photo as a game asset caps at
+control column scrolls, so the window fits a 768 px screen), the
+texture-import fix (a big photo as a game asset caps at
 512 px and loads on a worker thread instead of freezing the
-window). The MIMIK merge is the one remaining planned item —
-none of that is in this build.
+window), and the Video tab fix (extraction + pixelize run on a
+worker thread with debounced controls, so dragging a slider no
+longer locks the window up). The MIMIK merge is the one remaining
+planned item — none of that is in this build.
 
 ## Requirements
 

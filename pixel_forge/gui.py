@@ -63,7 +63,7 @@ from .skins import (detect_skin, extract_skin, pixelize_texture,
 from .spritesheet import (build_metadata, frames_from_sheet,
                           pack_frames, write_sheet)
 from .video import (DEFAULT_FPS, FPS_PRESETS, VIDEO_EXTENSIONS,
-                    extract_frames)
+                    extract_frames, require_ffmpeg)
 
 SIZE_PRESETS = [16, 32, 48, 64, 128]
 MAX_DISPLAY = 1600  # longest side of a preview pixmap, in pixels
@@ -71,6 +71,9 @@ ORIGINAL_FIT = 352  # longest side of the Original preview, in pixels
 # (each preview pane is ~360 px wide at the default window size)
 MAX_CUSTOM_SIZE = 512
 STRIP_THUMB = 64  # frame strip thumbnail size, in pixels
+VIDEO_DEBOUNCE_MS = 300  # ms of no control changes before a Video
+# tab re-extract / re-pixelize runs — a dragged slider fires
+# dozens of changes, and only the settled one needs a run.
 
 DARK_STYLESHEET = """
 QMainWindow, QWidget { background-color: #232329; color: #e8e6e3; }
@@ -152,9 +155,9 @@ def checkerboard_pixmap(image, scale, smooth):
 class PromptWorker(QThread):
     """Runs a prompt generation off the GUI thread.
 
-    A 1–5 minute CPU generation must never freeze the window — the
-    synchronous video extraction is the known wart, and this worker
-    is how the Prompt tab avoids repeating it. Signals cross back
+    A 1–5 minute CPU generation must never freeze the window —
+    the video tab's worker (VideoWorker) follows the same
+    pattern for extraction + pixelize. Signals cross back
     to the GUI thread; the worker never touches a widget itself.
     (Named `done`, not `finished` — QThread already owns `finished`.)
     """
@@ -225,6 +228,74 @@ class TextureWorker(QThread):
             "source_height": self.image.height(),
             "image": texture,
             "colors": colors,
+        })
+
+
+class VideoWorker(QThread):
+    """Extracts and pixelizes video frames off the GUI thread.
+
+    Every Video tab control change used to re-run ffmpeg
+    extraction + the pixelize pass synchronously — ~10 s per
+    extract-setting change on a 30 s clip, the window frozen
+    solid on every slider move. The worker does both in the
+    background; the debounce timer in MainWindow makes sure
+    rapid control changes run once, with the settled settings.
+    Only QImages cross the thread boundary (QPixmap is not
+    thread-safe).
+
+    Settings arrive as one dict so a run snapshots the
+    controls at start: a later control change cannot rewrite
+    the run in flight — it starts a newer run instead, and the
+    stale guard in _on_video_run_done drops the older result.
+    Two modes: "reload" extracts with ffmpeg then pixelizes
+    (owns a fresh temp dir, handed over in the result), and
+    "repixelize" pixelizes the raw frames it was handed.
+    """
+    done = Signal(dict)   # mode, frames, raw, raw_dir, fps, fresh, path
+    failed = Signal(str)  # readable error message
+
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.settings = dict(settings)
+
+    def run(self):
+        settings = self.settings
+        tmp = None
+        try:
+            if settings["mode"] == "reload":
+                tmp = tempfile.mkdtemp(prefix="pixel-forge-frames-")
+                raw = extract_frames(
+                    settings["path"], tmp,
+                    fps=settings["fps"], every=settings["every"],
+                    start=settings["start"], end=settings["end"])
+            else:
+                raw = settings["raw_frames"]
+            frames = [pixelize_image(
+                load_image(raw_path),
+                width=settings["width"], height=settings["height"],
+                keep_aspect=settings["keep_aspect"],
+                palette=settings["palette"],
+                max_colors=settings["max_colors"],
+                dither=settings["dither"])
+                for raw_path in raw]
+        except PixelForgeError as exc:
+            if tmp is not None:
+                shutil.rmtree(tmp, ignore_errors=True)
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - window must stay up
+            if tmp is not None:
+                shutil.rmtree(tmp, ignore_errors=True)
+            self.failed.emit("video failed: %s" % exc)
+            return
+        self.done.emit({
+            "mode": settings["mode"],
+            "frames": frames,
+            "raw": list(raw),
+            "raw_dir": tmp,
+            "fps": settings["fps"],
+            "fresh": settings.get("fresh", False),
+            "path": settings.get("path"),
         })
 
 
@@ -437,6 +508,17 @@ class MainWindow(QMainWindow):
         self._updating_video_size = False
         self.video_timer = QTimer(self)
         self.video_timer.timeout.connect(self._advance_video_frame)
+        # Extraction + pixelize run on a worker thread (see
+        # VideoWorker); control changes debounce so a dragged
+        # slider runs once, with the settled settings.
+        self.video_worker = None
+        self._video_orphans = set()
+        self._video_pending_reload = False
+        self._video_debounce_timer = QTimer(self)
+        self._video_debounce_timer.setSingleShot(True)
+        self._video_debounce_timer.setInterval(VIDEO_DEBOUNCE_MS)
+        self._video_debounce_timer.timeout.connect(
+            self._start_scheduled_video_run)
 
         # Prompt tab state. Candidates live on disk in a temp batch
         # dir (with batch.json); only the keeper is held in memory.
@@ -1099,19 +1181,22 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------- input
 
     def load_video(self, path):
-        """Import a video: extract frames with ffmpeg, pixelize them,
-        fill the strip. Returns True on success; on failure shows a
-        message box (including the ffmpeg fix when ffmpeg is missing)
-        and returns False — the window stays up either way.
+        """Import a video: start a background extract + pixelize
+        run and return True at once — the window stays responsive
+        while the frames land in _on_video_run_done. Returns False
+        (with a message box) when ffmpeg is missing; that check is
+        cheap and stays synchronous so a missing ffmpeg still fails
+        fast, exactly as before.
         """
         self._stop_playback()
-        self.video_path = str(path)
-        if not self._reload_video_frames():
+        try:
+            require_ffmpeg()
+        except PixelForgeError as exc:
             self.video_path = None
+            QMessageBox.warning(self, "Pixel Forge", str(exc))
             return False
-        self.statusBar().showMessage(
-            "Loaded %s (%d frames)"
-            % (Path(path).name, len(self.video_frames)))
+        self.video_path = str(path)
+        self._reload_video_frames(fresh=True)
         return True
 
     def _on_video_import(self):
@@ -1126,64 +1211,117 @@ class MainWindow(QMainWindow):
             self.video_raw_dir = None
         self.video_raw_frames = []
 
-    def _reload_video_frames(self):
-        """Re-extract raw frames with the current fps/every/range,
-        then re-pixelize. Returns False (with a message box) on
-        failure; the old frames stay put so the window is still
-        usable."""
+    def _video_pixelize_settings(self):
+        """The current size/palette/dither controls as a dict —
+        the settings a worker run snapshots at start."""
+        return {
+            "width": self.video_width_spin.value(),
+            "height": self.video_height_spin.value(),
+            "keep_aspect": self.video_aspect_check.isChecked(),
+            "palette": self.video_palette_combo.currentData(),
+            "max_colors": self.video_colors_spin.value(),
+            "dither": self.video_dither_check.isChecked(),
+        }
+
+    def _reload_video_frames(self, fresh=False):
+        """Start a background re-extract with the current
+        fps/every/range, then re-pixelize. Returns False when
+        there is no video to re-extract; otherwise True — the
+        frames land in _on_video_run_done, and a failure lands
+        in _on_video_run_failed with a message box, the old
+        frames still in place."""
         if self.video_path is None:
             return False
         self._stop_playback()
-        tmp = tempfile.mkdtemp(prefix="pixel-forge-frames-")
-        try:
-            start = self.video_start_edit.text().strip() or None
-            end = self.video_end_edit.text().strip() or None
-            raw = extract_frames(
-                self.video_path, tmp,
-                fps=self.video_fps_combo.currentData(),
-                every=self.video_every_spin.value(),
-                start=start, end=end)
-        except PixelForgeError as exc:
-            shutil.rmtree(tmp, ignore_errors=True)
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
-            return False
-        self._cleanup_video_raw()
-        self.video_raw_dir = tmp
-        self.video_raw_frames = raw
-        self.video_play_fps_spin.setValue(
-            self.video_fps_combo.currentData())
-        self.sheet_fps_spin.setValue(
-            self.video_fps_combo.currentData())
-        self._repixelize_video(reset_keep=True)
+        settings = self._video_pixelize_settings()
+        settings.update({
+            "mode": "reload",
+            "path": self.video_path,
+            "fps": self.video_fps_combo.currentData(),
+            "every": self.video_every_spin.value(),
+            "start": self.video_start_edit.text().strip() or None,
+            "end": self.video_end_edit.text().strip() or None,
+            "fresh": fresh,
+        })
+        self._start_video_run(settings)
         return True
 
-    def _repixelize_video(self, reset_keep=False):
-        """Pixelize the raw frames with the current size/palette/
-        dither controls and rebuild the strip. Keep/drop choices
-        survive when the frame count is unchanged."""
+    def _repixelize_video(self):
+        """Start a background re-pixelize of the raw frames with
+        the current size/palette/dither controls. Keep/drop
+        choices survive when the frame count is unchanged —
+        applied in _on_video_run_done, so toggles made while
+        the run is in flight are honoured too."""
         if not self.video_raw_frames:
             return
-        old_keep = self.video_keep
-        frames = []
-        try:
-            for raw_path in self.video_raw_frames:
-                image = load_image(raw_path)
-                frames.append(pixelize_image(
-                    image,
-                    width=self.video_width_spin.value(),
-                    height=self.video_height_spin.value(),
-                    keep_aspect=self.video_aspect_check.isChecked(),
-                    palette=self.video_palette_combo.currentData(),
-                    max_colors=self.video_colors_spin.value(),
-                    dither=self.video_dither_check.isChecked()))
-        except PixelForgeError as exc:
-            self.statusBar().showMessage(str(exc))
-            return
-        self.video_frames = frames
-        if (not reset_keep and len(old_keep) == len(frames)):
-            self.video_keep = list(old_keep)
+        settings = self._video_pixelize_settings()
+        settings.update({
+            "mode": "repixelize",
+            "raw_frames": list(self.video_raw_frames),
+            "fps": self.video_fps_combo.currentData(),
+        })
+        self._start_video_run(settings)
+
+    def _start_video_run(self, settings):
+        """Run the Video tab's work on a worker thread. A newer
+        run supersedes the one in flight — the superseded worker
+        keeps going in the background, but its results are
+        dropped by the stale guard in _on_video_run_done, so
+        runs never stack up behind each other."""
+        if settings["mode"] == "reload":
+            self.statusBar().showMessage("Extracting frames…")
         else:
-            self.video_keep = [True] * len(frames)
+            self.statusBar().showMessage("Pixelizing…")
+        worker = VideoWorker(settings, parent=self)
+        if self.video_worker is not None:
+            old = self.video_worker
+            self._video_orphans.add(old)
+            old.finished.connect(
+                lambda old=old: self._video_orphans.discard(old))
+        self.video_worker = worker
+        worker.done.connect(self._on_video_run_done)
+        worker.failed.connect(self._on_video_run_failed)
+        worker.start()
+
+    def _schedule_video_run(self, reload):
+        """A control changed — wait VIDEO_DEBOUNCE_MS for the
+        user to stop changing things, then run once with the
+        settled settings. An extract change schedules a
+        re-extract (which pixelizes too); a pixelize-only change
+        schedules a re-pixelize. A pending re-extract covers a
+        later pixelize change, so the flag only ever escalates."""
+        if reload:
+            self._video_pending_reload = True
+        self._video_debounce_timer.start(VIDEO_DEBOUNCE_MS)
+
+    def _start_scheduled_video_run(self):
+        reload = self._video_pending_reload
+        self._video_pending_reload = False
+        if reload:
+            self._reload_video_frames()
+        elif self.video_raw_frames:
+            self._repixelize_video()
+
+    def _on_video_run_done(self, result):
+        if self.sender() is not self.video_worker:
+            # Superseded — drop the results and clean up the
+            # temp dir this run extracted into.
+            self._video_orphans.discard(self.sender())
+            tmp = result.get("raw_dir")
+            if tmp is not None:
+                shutil.rmtree(tmp, ignore_errors=True)
+            return
+        self.video_worker = None
+        if result["mode"] == "reload":
+            self._cleanup_video_raw()
+            self.video_raw_dir = result["raw_dir"]
+            self.video_raw_frames = result["raw"]
+            self.video_play_fps_spin.setValue(result["fps"])
+            self.sheet_fps_spin.setValue(result["fps"])
+            self.video_keep = [True] * len(result["frames"])
+        elif len(self.video_keep) != len(result["frames"]):
+            self.video_keep = [True] * len(result["frames"])
+        self.video_frames = result["frames"]
         kept = self._kept_indices()
         self.video_current = kept[0] if kept else 0
         self._rebuild_strip()
@@ -1194,15 +1332,55 @@ class MainWindow(QMainWindow):
         self.sheet_preview_btn.setEnabled(bool(kept))
         self.sheet_export_btn.setEnabled(bool(kept))
         self.sheet_library_btn.setEnabled(bool(kept))
-        self.video_keep_all_btn.setEnabled(bool(frames))
-        self.video_drop_all_btn.setEnabled(bool(frames))
+        self.video_keep_all_btn.setEnabled(bool(result["frames"]))
+        self.video_drop_all_btn.setEnabled(bool(result["frames"]))
+        if result["fresh"]:
+            self.statusBar().showMessage(
+                "Loaded %s (%d frames)"
+                % (Path(result["path"]).name, len(result["frames"])))
+        elif result["mode"] == "reload":
+            self.statusBar().showMessage(
+                "Extracted %d frames" % len(result["frames"]))
+        else:
+            self.statusBar().showMessage(
+                "Pixelized %d frames" % len(result["frames"]))
+
+    def _on_video_run_failed(self, message):
+        worker = self.sender()
+        if worker is not self.video_worker:
+            self._video_orphans.discard(worker)
+            return
+        self.video_worker = None
+        settings = worker.settings
+        if settings["mode"] == "repixelize":
+            # Same as the old synchronous path: a pixelize
+            # failure is a status message, old frames stay.
+            self.statusBar().showMessage(message)
+            return
+        # A failed re-extract shows the dialog, exactly as the
+        # old synchronous _reload_video_frames did; the old
+        # frames stay in place.
+        QMessageBox.warning(self, "Pixel Forge", message)
+        if settings.get("fresh"):
+            self.video_path = None
+
+    def _stop_video_worker(self):
+        if self.video_worker is not None:
+            if self.video_worker.isRunning():
+                self.video_worker.wait(10000)
+            self.video_worker = None
+        for orphan in list(self._video_orphans):
+            if orphan.isRunning():
+                orphan.wait(10000)
+        self._video_orphans.clear()
 
     # -------------------------------------------------------- controls
 
     def _on_video_extract_changed(self):
-        """fps, every-Nth, or time range changed — re-extract."""
+        """fps, every-Nth, or time range changed — re-extract,
+        debounced: the run starts 300 ms after the last change."""
         if self.video_path is not None:
-            self._reload_video_frames()
+            self._schedule_video_run(reload=True)
 
     def _on_video_preset(self):
         preset = self.video_size_combo.currentData()
@@ -1229,7 +1407,7 @@ class MainWindow(QMainWindow):
     def _on_video_control_changed(self):
         self._mark_preset_custom("video")
         if self.video_raw_frames:
-            self._repixelize_video()
+            self._schedule_video_run(reload=False)
 
     def _on_video_zoom_changed(self, value):
         self.video_zoom_label.setText("%dx" % value)
@@ -3061,6 +3239,7 @@ class MainWindow(QMainWindow):
         self._stop_playback()
         self._stop_prompt_worker()
         self._stop_texture_worker()
+        self._stop_video_worker()
         self._cleanup_video_raw()
         self._cleanup_prompt_batch()
         event.accept()

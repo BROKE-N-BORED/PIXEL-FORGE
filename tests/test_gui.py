@@ -222,6 +222,20 @@ class VideoGuiTests(unittest.TestCase):
         self.win.deleteLater()
         self.app.processEvents()
 
+    def _wait_for_video(self, timeout=30):
+        """Pump the event loop until the Video tab settles — no
+        worker running and the debounce timer idle. The video
+        path is async since v0.9, so every load and control
+        change needs this before its results are asserted."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.video_worker is None
+                    and not self.win._video_debounce_timer.isActive()):
+                return True
+            time.sleep(0.05)
+        return False
+
     def test_video_tab_exists_with_controls(self):
         tabs = [self.win.tabs.tabText(i)
                 for i in range(self.win.tabs.count())]
@@ -241,6 +255,7 @@ class VideoGuiTests(unittest.TestCase):
 
     def test_load_video_populates_strip(self):
         self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
         self.app.processEvents()
         self.assertIn(len(self.win.video_frames), (15, 16))
         self.assertEqual(self.win.video_strip.count(),
@@ -260,6 +275,7 @@ class VideoGuiTests(unittest.TestCase):
     def test_strip_thumbnails_are_not_blank(self):
         from PySide6.QtCore import Qt
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         item = self.win.video_strip.item(0)
         icon = item.icon()
         self.assertFalse(icon.isNull())
@@ -270,6 +286,7 @@ class VideoGuiTests(unittest.TestCase):
     def test_keep_drop_changes_export(self):
         from PySide6.QtCore import Qt
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         total = len(self.win.video_frames)
         # Drop the first two frames.
         for row in (0, 1):
@@ -291,6 +308,7 @@ class VideoGuiTests(unittest.TestCase):
 
     def test_drop_all_disables_export_and_play(self):
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         self.win._on_drop_all()
         self.app.processEvents()
         self.assertFalse(any(self.win.video_keep))
@@ -304,6 +322,7 @@ class VideoGuiTests(unittest.TestCase):
 
     def test_playback_advances_and_loops(self):
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         total = len(self.win.video_frames)
         self.assertEqual(self.win.video_current, 0)
         self.win._advance_video_frame()
@@ -316,6 +335,7 @@ class VideoGuiTests(unittest.TestCase):
     def test_playback_skips_dropped_frames(self):
         from PySide6.QtCore import Qt
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         self.win.video_strip.item(1).setCheckState(
             Qt.CheckState.Unchecked)
         self.app.processEvents()
@@ -325,6 +345,7 @@ class VideoGuiTests(unittest.TestCase):
 
     def test_playback_without_loop_stops_at_end(self):
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         total = len(self.win.video_frames)
         self.win.video_loop_check.setChecked(False)
         self.win.video_current = total - 1
@@ -337,6 +358,7 @@ class VideoGuiTests(unittest.TestCase):
 
     def test_play_pause_toggles_timer(self):
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         self.win._on_play_pause()
         self.assertTrue(self.win.video_timer.isActive())
         self.assertEqual(self.win.video_play_btn.text(), "Pause")
@@ -346,9 +368,10 @@ class VideoGuiTests(unittest.TestCase):
 
     def test_size_change_repixelizes_frames(self):
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         index = self.win.video_size_combo.findData(16)
         self.win.video_size_combo.setCurrentIndex(index)
-        self.app.processEvents()
+        self.assertTrue(self._wait_for_video())
         for frame in self.win.video_frames:
             self.assertEqual((frame.width(), frame.height()), (16, 16))
         # Keep/drop choices survive a re-pixelize.
@@ -356,14 +379,131 @@ class VideoGuiTests(unittest.TestCase):
 
     def test_fps_change_reextracts(self):
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         self.assertIn(len(self.win.video_frames), (15, 16))
         index = self.win.video_fps_combo.findData(4)
         self.win.video_fps_combo.setCurrentIndex(index)
-        self.app.processEvents()
+        self.assertTrue(self._wait_for_video())
         self.assertIn(len(self.win.video_frames), (7, 8))
+
+    def test_control_change_returns_quickly(self):
+        # v0.9: a control change schedules a debounced run and
+        # returns at once — the old synchronous code blocked the
+        # window for seconds on every change.
+        self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
+        index = self.win.video_fps_combo.findData(4)
+        start = time.monotonic()
+        self.win.video_fps_combo.setCurrentIndex(index)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 1.0)
+        # Nothing has run yet — the change is debounced, not
+        # executed inline.
+        self.assertTrue(self.win._video_debounce_timer.isActive())
+        self.assertIsNone(self.win.video_worker)
+        self.assertTrue(self._wait_for_video())
+        self.assertIn(len(self.win.video_frames), (7, 8))
+
+    def test_rapid_changes_run_once(self):
+        # v0.9: five width changes in a row run exactly once,
+        # with the settled value — a dragged slider used to
+        # re-pixelize on every tick.
+        self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
+        starts = []
+        real_start = self.win._start_video_run
+
+        def counting(settings):
+            starts.append(settings["mode"])
+            return real_start(settings)
+
+        self.win._start_video_run = counting
+        for width in (24, 40, 48, 56, 64):
+            self.win.video_width_spin.setValue(width)
+        self.assertTrue(self._wait_for_video())
+        self.assertEqual(starts, ["repixelize"])
+        for frame in self.win.video_frames:
+            self.assertEqual((frame.width(), frame.height()),
+                             (64, 32))
+
+    def test_superseded_run_results_are_ignored(self):
+        # v0.9: two runs started back to back — the first one's
+        # results must be dropped by the stale guard, not shown.
+        from PySide6.QtGui import QImage
+        self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
+        original_count = len(self.win.video_frames)
+        self.win._repixelize_video()
+        first = self.win.video_worker
+        self.assertIsNotNone(first)
+        self.win._repixelize_video()
+        second = self.win.video_worker
+        self.assertIsNot(first, second)
+        fake = QImage(8, 8, QImage.Format_ARGB32)
+        fake.fill(0xFFFF0000)
+        first.done.emit({
+            "mode": "repixelize", "frames": [fake], "raw": [],
+            "raw_dir": None, "fps": 8, "fresh": False,
+            "path": None})
+        self.assertEqual(len(self.win.video_frames), original_count)
+        self.assertEqual(self.win.video_frames[0].width(), 32)
+        self.assertTrue(self._wait_for_video())
+        self.assertEqual(len(self.win.video_frames), original_count)
+        self.assertEqual(self.win.video_frames[0].width(), 32)
+
+    def test_async_frames_match_synchronous_pipeline(self):
+        # v0.9: the worker runs the same extract + pixelize calls
+        # the v0.8 synchronous tab did — the frames must be
+        # pixel-identical to running that pipeline directly.
+        import shutil
+        from pixel_forge.pixelize import load_image, pixelize_image
+        from pixel_forge.video import extract_frames
+        self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
+        tmp = tempfile.mkdtemp(prefix="pf-v09-sync-check-")
+        try:
+            raw = extract_frames(
+                self.clip, tmp,
+                fps=self.win.video_fps_combo.currentData(),
+                every=self.win.video_every_spin.value())
+            expected = [pixelize_image(
+                load_image(path),
+                width=self.win.video_width_spin.value(),
+                height=self.win.video_height_spin.value(),
+                keep_aspect=self.win.video_aspect_check.isChecked(),
+                palette=self.win.video_palette_combo.currentData(),
+                max_colors=self.win.video_colors_spin.value(),
+                dither=self.win.video_dither_check.isChecked())
+                for path in raw]
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertEqual(len(self.win.video_frames), len(expected))
+        for got, want in zip(self.win.video_frames, expected):
+            self.assertEqual((got.width(), got.height()),
+                             (want.width(), want.height()))
+            for y in range(got.height()):
+                for x in range(got.width()):
+                    self.assertEqual(got.pixel(x, y),
+                                     want.pixel(x, y))
+
+    def test_load_keeps_window_responsive(self):
+        # v0.9: the import runs on a worker thread, so the event
+        # loop must keep running while it works — load_video
+        # returns at once with an "Extracting frames…" status.
+        from PySide6.QtCore import QTimer
+        fired = []
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertIn("Extracting frames",
+                      self.win.statusBar().currentMessage())
+        QTimer.singleShot(0, lambda: fired.append(True))
+        self.app.processEvents()
+        self.assertTrue(fired, "event loop did not run during load")
+        self.assertTrue(self._wait_for_video())
+        self.assertIn(len(self.win.video_frames), (15, 16))
 
     def test_clicking_strip_frame_shows_it(self):
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         item = self.win.video_strip.item(5)
         self.win._on_strip_item_clicked(item)
         self.assertEqual(self.win.video_current, 5)
@@ -385,6 +525,7 @@ class VideoGuiTests(unittest.TestCase):
 
     def test_video_tab_screenshot(self):
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         self.win.show()
         self.app.processEvents()
         shot = os.path.join(self.tmp, "pixel-forge-video.png")
@@ -416,6 +557,20 @@ class SpritesheetGuiTests(unittest.TestCase):
         self.win.deleteLater()
         self.app.processEvents()
 
+    def _wait_for_video(self, timeout=30):
+        """Pump the event loop until the Video tab settles — no
+        worker running and the debounce timer idle. The video
+        path is async since v0.9, so every load and control
+        change needs this before its results are asserted."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.video_worker is None
+                    and not self.win._video_debounce_timer.isActive()):
+                return True
+            time.sleep(0.05)
+        return False
+
     def _make_dialog(self):
         from pixel_forge.gui import SpritesheetDialog
         images, names = self.win._kept_sheet_frames()
@@ -439,12 +594,14 @@ class SpritesheetGuiTests(unittest.TestCase):
 
     def test_sheet_buttons_enable_after_load(self):
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         self.app.processEvents()
         self.assertTrue(self.win.sheet_preview_btn.isEnabled())
         self.assertTrue(self.win.sheet_export_btn.isEnabled())
 
     def test_drop_all_disables_sheet_buttons(self):
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         self.win._on_drop_all()
         self.app.processEvents()
         self.assertFalse(self.win.sheet_preview_btn.isEnabled())
@@ -457,15 +614,17 @@ class SpritesheetGuiTests(unittest.TestCase):
 
     def test_sheet_fps_follows_extraction_fps(self):
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         self.assertEqual(self.win.sheet_fps_spin.value(), 8)
         index = self.win.video_fps_combo.findData(4)
         self.win.video_fps_combo.setCurrentIndex(index)
-        self.app.processEvents()
+        self.assertTrue(self._wait_for_video())
         self.assertEqual(self.win.sheet_fps_spin.value(), 4)
 
     def test_preview_dialog_shows_packed_sheet(self):
         import math
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         dialog = self._make_dialog()
         try:
             count = len(self.win.video_frames)
@@ -488,6 +647,7 @@ class SpritesheetGuiTests(unittest.TestCase):
 
     def test_no_bare_ampersand_in_dialog(self):
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         dialog = self._make_dialog()
         try:
             for text in visible_texts(dialog):
@@ -499,6 +659,7 @@ class SpritesheetGuiTests(unittest.TestCase):
 
     def test_dialog_playback_plays_from_the_sheet(self):
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         dialog = self._make_dialog()
         try:
             # Playback frames are cut from the sheet, not the
@@ -524,6 +685,7 @@ class SpritesheetGuiTests(unittest.TestCase):
 
     def test_dialog_play_pause_toggles_timer(self):
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         dialog = self._make_dialog()
         try:
             dialog._on_play_pause()
@@ -541,6 +703,7 @@ class SpritesheetGuiTests(unittest.TestCase):
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QImage
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         total = len(self.win.video_frames)
         # Drop the first two frames: the sheet holds the kept ones.
         for row in (0, 1):
@@ -573,6 +736,7 @@ class SpritesheetGuiTests(unittest.TestCase):
     def test_export_spritesheet_uses_cols_and_padding(self):
         import json
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         index = self.win.sheet_cols_combo.findData(2)
         self.win.sheet_cols_combo.setCurrentIndex(index)
         self.win.sheet_padding_spin.setValue(4)
@@ -590,6 +754,7 @@ class SpritesheetGuiTests(unittest.TestCase):
 
     def test_spritesheet_dialog_screenshot(self):
         self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
         dialog = self._make_dialog()
         try:
             dialog.show()
@@ -1303,9 +1468,24 @@ class SheetLibraryGuiTests(unittest.TestCase):
         self.win.deleteLater()
         self.app.processEvents()
 
+    def _wait_for_video(self, timeout=30):
+        """Pump the event loop until the Video tab settles — no
+        worker running and the debounce timer idle. The video
+        path is async since v0.9, so every load and control
+        change needs this before its results are asserted."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.video_worker is None
+                    and not self.win._video_debounce_timer.isActive()):
+                return True
+            time.sleep(0.05)
+        return False
+
     def test_save_sheet_button_follows_kept_frames(self):
         self.assertFalse(self.win.sheet_library_btn.isEnabled())
         self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
         self.assertTrue(self.win.sheet_library_btn.isEnabled())
         self.win._on_drop_all()
         self.assertFalse(self.win.sheet_library_btn.isEnabled())
@@ -1314,6 +1494,7 @@ class SheetLibraryGuiTests(unittest.TestCase):
 
     def test_save_sheet_to_library(self):
         self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
         entry = self.win.save_sheet_to_library("Walk cycle",
                                                ["walk"])
         self.assertEqual(entry["kind"], "sheet")

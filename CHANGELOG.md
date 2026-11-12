@@ -1,5 +1,30 @@
 # Pixel Forge changelog
 
+## 0.9 — 2026-11-12
+
+Video tab freeze fixed — task-list item #3, weakness W3 of
+the v0.6 internal review. Every Video tab control change used
+to re-run ffmpeg extraction + the pixelize pass synchronously
+on the UI thread (~9.8 s per extract-setting change and 2.9–6.3 s
+per pixelize change on a 30 s clip), so dragging a slider locked
+the window up on every tick.
+
+- Extraction + pixelize now run on a worker thread (the
+  PromptWorker / TextureWorker pattern), so the window stays
+  responsive while a run works; the status bar says
+  "Extracting frames…" or "Pixelizing…" until it lands. Import
+  is async too — `load_video` returns at once and the frames
+  land when the run finishes.
+- Control changes debounce 300 ms: rapid changes run once,
+  with the settled settings, instead of once per tick. A run
+  in flight when a new change lands is superseded cleanly —
+  its results are dropped by a stale guard, never stacked.
+- The results are identical to v0.8: same frames, same pixels,
+  same export names, same keep/drop behaviour, same loud
+  refusal when ffmpeg is missing (that check stays
+  synchronous, so it still fails fast). No other changes in
+  this release.
+
 ## 0.8 — 2026-11-12
 
 Texture-import freeze fixed — task-list item #2, weakness W2 of
