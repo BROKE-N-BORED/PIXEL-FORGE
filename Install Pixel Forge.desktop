@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Install Pixel Forge
+Comment=Install Pixel Forge — turn images into pixel art and sprites
+Exec=/usr/bin/python3 -c "import os,subprocess,sys; d=os.path.dirname(sys.argv[1]) if len(sys.argv)>1 and sys.argv[1] else os.getcwd(); os.chdir(d); subprocess.call([sys.executable, 'install-pixel-forge.py'])" %k
+Icon=system-software-install
+Terminal=false
+Categories=Graphics;

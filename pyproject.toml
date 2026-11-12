@@ -1,0 +1,18 @@
+[project]
+name = "pixel-forge"
+version = "0.5"
+description = "Turn images, videos, and prompts into pixel art and sprites — standalone Linux program, local models only, no network at run time."
+requires-python = ">=3.10"
+authors = [{ name = "Broke n' Bored Studio" }]
+dependencies = ["PySide6>=6.6"]
+
+[project.scripts]
+pixel-forge = "pixel_forge.cli:main"
+pixel-forge-gui = "pixel_forge.gui:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["pixel_forge*"]

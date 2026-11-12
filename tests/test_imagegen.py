@@ -1,0 +1,404 @@
+"""Prompt-to-sprite tests — engine/model lookup, batches, generation.
+
+Generation runs against a fake sd-cli (tests/helpers.py: a Python
+script that answers the real sd-cli flags and writes a seed-colored
+PNG), because no engine or model exists in this sandbox. Live
+generation against the real LCM model is NOT proven here — it needs
+Joshua's PC, where the model pull is the long pole.
+"""
+import os
+import sys
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from helpers import ensure_app, stub_env, write_stub_engine  # noqa: E402
+from pixel_forge import imagegen  # noqa: E402
+from pixel_forge.imagegen import (DEFAULT_NEGATIVE,  # noqa: E402
+                                  GenerationCancelled, MODEL_FILENAME,
+                                  build_command, engine_missing_text,
+                                  engine_status, find_engine, find_model,
+                                  generate, load_batch, model_missing_text,
+                                  new_batch, pixelize_candidates,
+                                  prompt_to_sprites, set_keeper, slugify,
+                                  validate_prompt)
+from pixel_forge.pixelize import PixelForgeError  # noqa: E402
+
+
+class ImageGenBase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        ensure_app()
+        cls.tmp = tempfile.mkdtemp()
+        cls.stub = write_stub_engine(cls.tmp)
+        cls.model = os.path.join(cls.tmp, "dummy.gguf")
+        Path(cls.model).write_bytes(b"not a real model")
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp(dir=self.tmp)
+
+    def _batch(self, prompt="a knight", **kwargs):
+        _batch, bdir = new_batch(self.work, prompt, **kwargs)
+        return bdir
+
+
+class FindTests(ImageGenBase):
+    def test_find_engine_env_override(self):
+        with stub_env(self.stub, self.model):
+            self.assertEqual(find_engine(), Path(self.stub))
+
+    def test_find_engine_env_bogus_falls_through(self):
+        if imagegen.shutil.which("sd-cli") or imagegen.shutil.which("sd"):
+            self.skipTest("a real sd-cli is installed on this machine")
+        # PATH is an empty dir (the stub itself lives in cls.tmp,
+        # so PATH must NOT point there).
+        with mock.patch.dict(os.environ,
+                             {"PIXELFORGE_SD_CLI": "/nonexistent/sd-cli",
+                              "PATH": self.work}, clear=False):
+            self.assertIsNone(find_engine())
+
+    def test_find_engine_path_search(self):
+        bindir = os.path.join(self.work, "bin")
+        os.mkdir(bindir)
+        write_stub_engine(bindir)
+        env = {"PATH": bindir}
+        env.pop("PIXELFORGE_SD_CLI", None)
+        with mock.patch.dict(os.environ, env, clear=True):
+            # HOME must survive: find_engine checks home candidates.
+            os.environ["HOME"] = self.tmp
+            self.assertEqual(find_engine(),
+                             Path(bindir) / "sd-cli")
+
+    def test_find_model_env_override(self):
+        with stub_env(self.stub, self.model):
+            self.assertEqual(find_model(), Path(self.model))
+
+    def test_find_model_shared_home_first(self):
+        shared = Path(self.work) / "shared"
+        own = Path(self.work) / "own"
+        shared.mkdir()
+        own.mkdir()
+        (shared / MODEL_FILENAME).write_bytes(b"shared")
+        (own / MODEL_FILENAME).write_bytes(b"own")
+        with mock.patch.object(imagegen, "model_homes",
+                               return_value=[shared, own]):
+            with mock.patch.dict(os.environ, {}, clear=True):
+                os.environ["HOME"] = self.tmp
+                self.assertEqual(find_model(),
+                                 shared / MODEL_FILENAME)
+        (shared / MODEL_FILENAME).unlink()
+        with mock.patch.object(imagegen, "model_homes",
+                               return_value=[shared, own]):
+            with mock.patch.dict(os.environ, {}, clear=True):
+                os.environ["HOME"] = self.tmp
+                self.assertEqual(find_model(), own / MODEL_FILENAME)
+
+    def test_find_model_any_gguf_fallback(self):
+        home_dir = Path(self.work) / "home"
+        home_dir.mkdir()
+        other = home_dir / "some-other-lcm.gguf"
+        other.write_bytes(b"gguf")
+        with mock.patch.object(imagegen, "model_homes",
+                               return_value=[home_dir]):
+            with mock.patch.dict(os.environ, {}, clear=True):
+                os.environ["HOME"] = self.tmp
+                self.assertEqual(find_model(), other)
+
+    def test_find_model_missing_returns_none(self):
+        with mock.patch.object(imagegen, "model_homes",
+                               return_value=[Path(self.work) / "nope"]):
+            with mock.patch.dict(os.environ, {}, clear=True):
+                os.environ["HOME"] = self.tmp
+                self.assertIsNone(find_model())
+
+    def test_engine_status_reports_paths(self):
+        with stub_env(self.stub, self.model):
+            status = engine_status()
+        self.assertEqual(status["engine"], Path(self.stub))
+        self.assertEqual(status["model"], Path(self.model))
+        self.assertTrue(status["engine_checked"])
+        self.assertTrue(status["model_checked"])
+
+    def test_engine_status_reports_missing(self):
+        with mock.patch.object(imagegen, "find_engine",
+                               return_value=None), \
+                mock.patch.object(imagegen, "find_model",
+                                  return_value=None):
+            status = engine_status()
+        self.assertIsNone(status["engine"])
+        self.assertIsNone(status["model"])
+        self.assertIn("/opt/sd.cpp/bin/sd-cli",
+                      status["engine_checked"])
+
+    def test_missing_texts_name_the_fix(self):
+        self.assertIn("--with-image-engine", engine_missing_text())
+        self.assertIn("nothing was generated", engine_missing_text())
+        self.assertIn(MODEL_FILENAME, model_missing_text())
+        self.assertIn("2.1 GB", model_missing_text())
+
+
+class PromptTests(ImageGenBase):
+    def test_validate_prompt_strips_and_accepts(self):
+        self.assertEqual(validate_prompt("  a knight  "), "a knight")
+
+    def test_validate_prompt_empty_refuses(self):
+        for bad in ("", "   ", None):
+            with self.assertRaises(PixelForgeError) as ctx:
+                validate_prompt(bad)
+            self.assertIn("type a prompt first", str(ctx.exception))
+
+    def test_validate_prompt_too_long_refuses(self):
+        with self.assertRaises(PixelForgeError) as ctx:
+            validate_prompt("x" * 1001)
+        self.assertIn("keep it under", str(ctx.exception))
+
+    def test_slugify(self):
+        self.assertEqual(slugify("A Knight With A Red Shield!"),
+                         "a-knight-with-a-red-shield")
+        self.assertEqual(slugify("!!!"), "image")
+        self.assertLessEqual(len(slugify("word " * 30)), 40)
+
+
+class BatchTests(ImageGenBase):
+    def test_new_batch_creates_dir_and_record(self):
+        _batch, bdir = new_batch(self.work, "a knight")
+        record = load_batch(bdir)
+        self.assertEqual(record["prompt"], "a knight")
+        self.assertEqual(record["negative"], DEFAULT_NEGATIVE)
+        self.assertEqual(record["count_per_round"], 3)
+        self.assertEqual(record["size"], 512)
+        self.assertEqual(record["steps"], 4)
+        self.assertEqual(record["candidates"], [])
+        self.assertIsNone(record["keeper"])
+        self.assertTrue((bdir / "batch.json").is_file())
+
+    def test_new_batch_unique_dirs(self):
+        _b1, d1 = new_batch(self.work, "a knight")
+        _b2, d2 = new_batch(self.work, "a knight")
+        self.assertNotEqual(d1, d2)
+        self.assertTrue(d1.is_dir() and d2.is_dir())
+
+    def test_new_batch_empty_prompt_refuses(self):
+        with self.assertRaises(PixelForgeError):
+            new_batch(self.work, "   ")
+
+    def test_load_batch_missing_raises(self):
+        with self.assertRaises(PixelForgeError):
+            load_batch(self.work)
+
+    def test_set_keeper_marks_and_records(self):
+        bdir = self._batch()
+        batch = load_batch(bdir)
+        batch["candidates"] = [
+            {"file": "cand-01.png", "seed": 1, "status": "pending"},
+            {"file": "cand-02.png", "seed": 2, "status": "pending"},
+        ]
+        from pixel_forge.imagegen import save_batch
+        save_batch(bdir, batch)
+        batch = set_keeper(bdir, "cand-02.png")
+        self.assertEqual(batch["keeper"], "cand-02.png")
+        kept = [c for c in batch["candidates"]
+                if c["status"] == "kept"]
+        self.assertEqual([c["file"] for c in kept], ["cand-02.png"])
+        # Picking another keeper un-keeps the first.
+        batch = set_keeper(bdir, "cand-01.png")
+        self.assertEqual(batch["keeper"], "cand-01.png")
+        self.assertEqual(batch["candidates"][1]["status"], "pending")
+
+    def test_set_keeper_unknown_or_failed_refuses(self):
+        bdir = self._batch()
+        batch = load_batch(bdir)
+        batch["candidates"] = [
+            {"file": "cand-01.png", "seed": 1, "status": "failed",
+             "error": "boom"},
+        ]
+        from pixel_forge.imagegen import save_batch
+        save_batch(bdir, batch)
+        with self.assertRaises(PixelForgeError):
+            set_keeper(bdir, "cand-99.png")
+        with self.assertRaises(PixelForgeError):
+            set_keeper(bdir, "cand-01.png")
+
+
+class CommandTests(ImageGenBase):
+    def test_build_command_pins(self):
+        cmd = build_command("/opt/sd.cpp/bin/sd-cli", "/m/model.gguf",
+                            "a knight", "blurry", 42, 512,
+                            "/out/cand-01.png")
+        self.assertEqual(cmd[0], "/opt/sd.cpp/bin/sd-cli")
+        self.assertEqual(cmd[cmd.index("-m") + 1], "/m/model.gguf")
+        self.assertEqual(cmd[cmd.index("-p") + 1], "a knight")
+        self.assertEqual(cmd[cmd.index("-n") + 1], "blurry")
+        self.assertEqual(cmd[cmd.index("--steps") + 1], "4")
+        self.assertEqual(cmd[cmd.index("--cfg-scale") + 1], "1.5")
+        self.assertEqual(cmd[cmd.index("--sampling-method") + 1], "lcm")
+        self.assertEqual(cmd[cmd.index("-W") + 1], "512")
+        self.assertEqual(cmd[cmd.index("-H") + 1], "512")
+        self.assertEqual(cmd[cmd.index("-s") + 1], "42")
+        self.assertEqual(cmd[cmd.index("-o") + 1], "/out/cand-01.png")
+
+
+class GenerateTests(ImageGenBase):
+    def test_generate_three_candidates(self):
+        bdir = self._batch()
+        with stub_env(self.stub, self.model):
+            batch = generate(bdir)
+        self.assertEqual(len(batch["candidates"]), 3)
+        seeds = [c["seed"] for c in batch["candidates"]]
+        self.assertEqual(len(set(seeds)), 3)
+        for index, record in enumerate(batch["candidates"], start=1):
+            self.assertEqual(record["file"], "cand-%02d.png" % index)
+            self.assertEqual(record["status"], "pending")
+            path = bdir / record["file"]
+            self.assertTrue(path.is_file())
+            self.assertGreater(path.stat().st_size, 0)
+        self.assertEqual(batch["engine"], self.stub)
+        self.assertEqual(batch["model"], "dummy.gguf")
+        # The batch on disk matches — a keeper stays reproducible.
+        self.assertEqual(load_batch(bdir)["candidates"],
+                         batch["candidates"])
+
+    def test_generate_command_received_by_stub(self):
+        bdir = self._batch()
+        log = os.path.join(self.work, "argv.log")
+        with stub_env(self.stub, self.model, {"STUB_LOG": log}):
+            generate(bdir)
+        lines = Path(log).read_text().splitlines()
+        self.assertEqual(len(lines), 3)
+        for line in lines:
+            self.assertIn("--steps 4", line)
+            self.assertIn("--cfg-scale 1.5", line)
+            self.assertIn("--sampling-method lcm", line)
+            self.assertIn("-W 512 -H 512", line)
+            self.assertIn("-m %s" % self.model, line)
+            self.assertIn("-p a knight", line)
+        seeds = [line.split("-s ")[1].split(" ")[0] for line in lines]
+        self.assertEqual(len(set(seeds)), 3)
+
+    def test_generate_progress_callback(self):
+        bdir = self._batch()
+        calls = []
+        with stub_env(self.stub, self.model):
+            generate(bdir, progress=lambda d, t, r:
+                     calls.append((d, t, r["file"])))
+        self.assertEqual(calls, [(1, 3, "cand-01.png"),
+                                 (2, 3, "cand-02.png"),
+                                 (3, 3, "cand-03.png")])
+
+    def test_generate_missing_engine_refuses(self):
+        bdir = self._batch()
+        with mock.patch.object(imagegen, "find_engine",
+                               return_value=None):
+            with self.assertRaises(PixelForgeError) as ctx:
+                generate(bdir)
+        self.assertIn("--with-image-engine", str(ctx.exception))
+        self.assertEqual(load_batch(bdir)["candidates"], [])
+
+    def test_generate_missing_model_refuses(self):
+        bdir = self._batch()
+        with stub_env(self.stub, self.model):
+            with mock.patch.object(imagegen, "find_model",
+                                   return_value=None):
+                with self.assertRaises(PixelForgeError) as ctx:
+                    generate(bdir)
+        self.assertIn(MODEL_FILENAME, str(ctx.exception))
+        self.assertEqual(load_batch(bdir)["candidates"], [])
+
+    def test_generate_failed_candidate_recorded(self):
+        bdir = self._batch()
+        with stub_env(self.stub, self.model, {"STUB_FAIL": "1"}):
+            batch = generate(bdir)
+        self.assertEqual(len(batch["candidates"]), 3)
+        self.assertTrue(all(c["status"] == "failed"
+                            for c in batch["candidates"]))
+        self.assertIn("failing on purpose",
+                      batch["candidates"][0]["error"])
+        self.assertFalse((bdir / "cand-01.png").exists())
+
+    def test_generate_cancel_before_start(self):
+        bdir = self._batch()
+        event = threading.Event()
+        event.set()
+        with stub_env(self.stub, self.model):
+            with self.assertRaises(GenerationCancelled):
+                generate(bdir, cancel_event=event)
+        batch = load_batch(bdir)
+        self.assertTrue(batch["cancelled"])
+        self.assertEqual(batch["candidates"], [])
+
+    def test_generate_cancel_mid_run(self):
+        bdir = self._batch()
+        event = threading.Event()
+        timer = threading.Timer(1.6, event.set)
+        with stub_env(self.stub, self.model, {"STUB_DELAY": "1"}):
+            timer.start()
+            try:
+                with self.assertRaises(GenerationCancelled):
+                    generate(bdir, cancel_event=event)
+            finally:
+                timer.cancel()
+        batch = load_batch(bdir)
+        self.assertTrue(batch["cancelled"])
+        landed = [c for c in batch["candidates"]
+                  if c["status"] == "pending"]
+        self.assertEqual(len(landed), 1)
+
+    def test_generate_timeout_marks_failed(self):
+        bdir = self._batch()
+        with stub_env(self.stub, self.model, {"STUB_DELAY": "3"}):
+            batch = generate(bdir, count=1, timeout_s=1)
+        self.assertEqual(batch["candidates"][0]["status"], "failed")
+        self.assertIn("timed out", batch["candidates"][0]["error"])
+
+    def test_pixelize_candidates(self):
+        from PySide6.QtGui import QImage
+
+        bdir = self._batch()
+        with stub_env(self.stub, self.model):
+            generate(bdir)
+        pairs = pixelize_candidates(bdir, width=32, max_colors=16)
+        self.assertEqual(len(pairs), 3)
+        for _cand, pixel in pairs:
+            path = bdir / pixel
+            self.assertTrue(path.is_file())
+            image = QImage(str(path))
+            self.assertEqual((image.width(), image.height()), (32, 32))
+        batch = load_batch(bdir)
+        self.assertTrue(all("pixel_file" in c
+                            for c in batch["candidates"]))
+
+    def test_pixelize_candidates_skips_failed(self):
+        bdir = self._batch()
+        with stub_env(self.stub, self.model, {"STUB_FAIL": "1"}):
+            generate(bdir)
+        pairs = pixelize_candidates(bdir)
+        self.assertEqual(pairs, [])
+
+    def test_prompt_to_sprites_end_to_end(self):
+        out_dir = os.path.join(self.work, "out")
+        with stub_env(self.stub, self.model):
+            batch, bdir = prompt_to_sprites("a knight", out_dir,
+                                            width=32)
+        self.assertEqual(len(batch["candidates"]), 3)
+        self.assertEqual(batch["prompt"], "a knight")
+        for index in (1, 2, 3):
+            self.assertTrue(
+                (bdir / ("cand-%02d.png" % index)).is_file())
+            self.assertTrue(
+                (bdir / ("cand-%02d-pixel.png" % index)).is_file())
+        self.assertTrue((bdir / "batch.json").is_file())
+
+    def test_prompt_to_sprites_all_failed_raises(self):
+        out_dir = os.path.join(self.work, "out-fail")
+        with stub_env(self.stub, self.model, {"STUB_FAIL": "1"}):
+            with self.assertRaises(PixelForgeError) as ctx:
+                prompt_to_sprites("a knight", out_dir)
+        self.assertIn("all 3 candidates failed", str(ctx.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()
