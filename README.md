@@ -310,13 +310,15 @@ A preset needs all six keys: `width` and `height` (1–512),
 (true/false). A hand-edited file with a bad preset fails loudly
 instead of applying nonsense.
 
-## What v0.6 does and does not do
+## What v0.7 does and does not do
 
-v0.6 is Items 1–6 of the plan: image to pixel sprite core, video to
+v0.7 is Items 1–6 of the plan: image to pixel sprite core, video to
 sprite frames, prompt-to-sprite with a local image model,
 spritesheets + animation export, a sprite library with presets,
-and code + game-asset input. The MIMIK merge is the one remaining
-planned item — none of that is in this build.
+and code + game-asset input — plus the window-fit fix: every tab's
+control column scrolls, so the window fits a 768 px screen. The
+MIMIK merge is the one remaining planned item — none of that is in
+this build.
 
 ## Requirements
 

@@ -1,5 +1,18 @@
 # Pixel Forge changelog
 
+## 0.7 — 2026-11-12
+
+Window fit — the #1 finding of the v0.6 internal review (W1).
+
+- Every tab's control column now lives in a vertical scroll area,
+  so the window is no longer forced taller than the screen: it
+  opens at 1020x640 with a minimum height of ~305 px (was 872),
+  and a resize to 800x600 takes effect on every tab. The Video
+  column alone needed 817 px, so its Export buttons sat off-screen
+  on a 1366x768 display. Every control is still in the same place
+  — the tall columns just scroll. No other changes in this
+  release.
+
 ## 0.6 — 2026-11-12
 
 Item 6 of the plan: code + game-asset input.

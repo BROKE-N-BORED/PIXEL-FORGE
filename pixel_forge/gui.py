@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
                                QInputDialog, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMainWindow,
                                QMessageBox, QProgressBar, QPushButton,
-                               QScrollArea, QSizePolicy, QSlider,
+                               QScrollArea, QSlider,
                                QSpinBox, QSplitter, QStatusBar,
                                QTabWidget, QVBoxLayout, QWidget)
 
@@ -442,6 +442,33 @@ class MainWindow(QMainWindow):
         label.setObjectName("heading")
         return label
 
+    @staticmethod
+    def _scrollable_column(controls):
+        """Wrap a tab's control column in a vertical scroll area.
+
+        v0.7: the columns are taller than the 768 px target screen
+        (the Video column alone needs 817 px), and a bare column
+        forced the whole window taller than the screen, putting
+        the Export buttons out of reach. Inside a scroll area the
+        window can shrink to ~700 px or less and every control
+        stays reachable by scrolling. The scroll area is fixed at
+        268 px wide — 250 px of controls plus room for the
+        vertical scrollbar and the frame — so the column keeps
+        its v0.6 width; the inner widget stretches to the
+        viewport width, so it renders a few px wider than v0.6
+        when no scrollbar is showing. Horizontal scrolling is
+        off: the column never scrolls sideways.
+        """
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(controls)
+        scroll.setFixedWidth(268)
+        return scroll
+
     def _build_preset_section(self, form, tab):
         """The preset picker + Save/Delete buttons for one tab.
 
@@ -480,10 +507,11 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(10, 10, 10, 10)
 
         # ------------------------------------------------ controls
+        # No fixed width here: the column lives in a scroll
+        # area (see _scrollable_column), which sets the 268 px
+        # width and lets the window shrink below the column's
+        # height.
         controls = QWidget()
-        controls.setFixedWidth(250)
-        controls.setSizePolicy(QSizePolicy.Policy.Fixed,
-                               QSizePolicy.Policy.Preferred)
         form = QVBoxLayout(controls)
         form.setContentsMargins(0, 0, 0, 0)
 
@@ -573,7 +601,8 @@ class MainWindow(QMainWindow):
             self._on_save_image_to_library)
         form.addWidget(self.save_library_btn)
 
-        main_layout.addWidget(controls)
+        main_layout.addWidget(
+            self._scrollable_column(controls))
 
         # ------------------------------------------------ previews
         previews = QSplitter(Qt.Orientation.Horizontal)
@@ -765,10 +794,11 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(10, 10, 10, 10)
 
         # ------------------------------------------------ controls
+        # No fixed width here: the column lives in a scroll
+        # area (see _scrollable_column), which sets the 268 px
+        # width and lets the window shrink below the column's
+        # height.
         controls = QWidget()
-        controls.setFixedWidth(250)
-        controls.setSizePolicy(QSizePolicy.Policy.Fixed,
-                               QSizePolicy.Policy.Preferred)
         form = QVBoxLayout(controls)
         form.setContentsMargins(0, 0, 0, 0)
 
@@ -948,7 +978,8 @@ class MainWindow(QMainWindow):
             self._on_save_sheet_to_library)
         form.addWidget(self.sheet_library_btn)
 
-        main_layout.addWidget(controls)
+        main_layout.addWidget(
+            self._scrollable_column(controls))
 
         # ------------------------------------------- preview and strip
         right = QSplitter(Qt.Orientation.Vertical)
@@ -1426,10 +1457,11 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(10, 10, 10, 10)
 
         # ------------------------------------------------ controls
+        # No fixed width here: the column lives in a scroll
+        # area (see _scrollable_column), which sets the 268 px
+        # width and lets the window shrink below the column's
+        # height.
         controls = QWidget()
-        controls.setFixedWidth(250)
-        controls.setSizePolicy(QSizePolicy.Policy.Fixed,
-                               QSizePolicy.Policy.Preferred)
         form = QVBoxLayout(controls)
         form.setContentsMargins(0, 0, 0, 0)
 
@@ -1558,7 +1590,8 @@ class MainWindow(QMainWindow):
             self._on_save_prompt_keeper_to_library)
         form.addWidget(self.prompt_save_library_btn)
 
-        main_layout.addWidget(controls)
+        main_layout.addWidget(
+            self._scrollable_column(controls))
 
         # ------------------------------------------- preview and strip
         right = QSplitter(Qt.Orientation.Vertical)
@@ -1961,10 +1994,11 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(10, 10, 10, 10)
 
         # ------------------------------------------------ controls
+        # No fixed width here: the column lives in a scroll
+        # area (see _scrollable_column), which sets the 268 px
+        # width and lets the window shrink below the column's
+        # height.
         controls = QWidget()
-        controls.setFixedWidth(250)
-        controls.setSizePolicy(QSizePolicy.Policy.Fixed,
-                               QSizePolicy.Policy.Preferred)
         form = QVBoxLayout(controls)
         form.setContentsMargins(0, 0, 0, 0)
 
@@ -2042,7 +2076,8 @@ class MainWindow(QMainWindow):
             self._on_save_code_to_library)
         form.addWidget(self.code_save_library_btn)
 
-        main_layout.addWidget(controls)
+        main_layout.addWidget(
+            self._scrollable_column(controls))
 
         # ------------------------------------------------ preview
         preview_pane = QWidget()
@@ -2560,10 +2595,9 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(left, 1)
 
         # ------------------------------------------------------ preview
+        # No fixed width here: the column lives in a scroll
+        # area (see _scrollable_column), like the other tabs.
         right = QWidget()
-        right.setFixedWidth(250)
-        right.setSizePolicy(QSizePolicy.Policy.Fixed,
-                            QSizePolicy.Policy.Preferred)
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.addWidget(self._section("Preview"))
@@ -2604,7 +2638,8 @@ class MainWindow(QMainWindow):
             self._on_library_export)
         right_layout.addWidget(self.library_export_btn)
 
-        main_layout.addWidget(right)
+        main_layout.addWidget(
+            self._scrollable_column(right))
         return root
 
     def _on_tab_changed(self, index):

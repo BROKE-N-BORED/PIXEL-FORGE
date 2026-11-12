@@ -68,6 +68,32 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(self.win.isVisible())
         self.assertEqual(self.win.windowTitle(), "Pixel Forge")
 
+    def test_window_fits_a_768px_screen(self):
+        # Regression (v0.6 review, W1): the window opened 1020x872
+        # with a 872 px minimum — taller than the 1366x768 target
+        # screen, so the Export buttons were out of reach. Every
+        # tab's control column now lives in a scroll area, so the
+        # window must shrink to 700 px or less, and a resize to
+        # 800x600 must actually take effect — and hold — on every
+        # tab.
+        self.win.show()
+        self.app.processEvents()
+        min_height = self.win.minimumSizeHint().height()
+        self.assertLessEqual(min_height, 700,
+                             "window minimum height %d px" % min_height)
+        self.win.resize(800, 600)
+        self.app.processEvents()
+        self.assertEqual(self.win.height(), 600,
+                         "resize to 800x600 refused: window is "
+                         "%d px tall" % self.win.height())
+        for index in range(self.win.tabs.count()):
+            self.win.tabs.setCurrentIndex(index)
+            self.app.processEvents()
+            self.assertEqual(
+                self.win.height(), 600,
+                "tab %s grew the window to %d px"
+                % (self.win.tabs.tabText(index), self.win.height()))
+
     def test_no_bare_ampersand_in_visible_text(self):
         # Qt eats a bare & in visible widget text (mnemonic marker —
         # it rendered as "_" while text() still returned the raw
