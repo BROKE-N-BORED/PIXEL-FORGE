@@ -291,6 +291,137 @@ class MetadataTests(unittest.TestCase):
             load_metadata(os.path.join(tmp, "missing.json"))
 
 
+class LoadMetadataValidationTests(unittest.TestCase):
+    """B10: load_metadata validates every frame entry at load —
+    bad metadata fails here with a plain named error, never later
+    as a TypeError in extract_frame or a silently blank frame."""
+
+    def _write_meta(self, frames, **overrides):
+        meta = {"format": "pixel-forge-spritesheet", "version": 1,
+                "sheet": "sheet.png", "sheet_width": 64,
+                "sheet_height": 32, "frame_width": 32,
+                "frame_height": 32, "columns": 2, "rows": 1,
+                "padding": 0, "fps": 8, "frames": frames}
+        meta.update(overrides)
+        path = os.path.join(tempfile.mkdtemp(), "sheet.json")
+        with open(path, "w") as handle:
+            json.dump(meta, handle)
+        return path
+
+    def _frame(self, **overrides):
+        frame = {"name": "frame_001.png", "index": 0,
+                 "x": 0, "y": 0, "w": 32, "h": 32,
+                 "duration_ms": 125}
+        frame.update(overrides)
+        return frame
+
+    def test_null_frame_rejected_without_type_error(self):
+        path = self._write_meta([None, self._frame(index=1, x=32)])
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_metadata(path)
+        self.assertIn("frame 0", str(ctx.exception))
+        self.assertIn("null", str(ctx.exception))
+
+    def test_non_dict_frame_rejected(self):
+        path = self._write_meta(["frame_001.png"])
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_metadata(path)
+        self.assertIn("frame 0", str(ctx.exception))
+        self.assertIn("not an object", str(ctx.exception))
+
+    def test_string_coords_rejected(self):
+        path = self._write_meta([self._frame(x="12")])
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_metadata(path)
+        self.assertIn("frame 0 (frame_001.png)", str(ctx.exception))
+        self.assertIn("'x'", str(ctx.exception))
+        self.assertIn("whole number", str(ctx.exception))
+
+    def test_missing_field_rejected(self):
+        frame = self._frame()
+        del frame["h"]
+        path = self._write_meta([frame])
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_metadata(path)
+        self.assertIn("frame 0", str(ctx.exception))
+        self.assertIn("'h'", str(ctx.exception))
+
+    def test_missing_name_rejected(self):
+        frame = self._frame()
+        del frame["name"]
+        path = self._write_meta([frame])
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_metadata(path)
+        self.assertIn("frame 0", str(ctx.exception))
+        self.assertIn("'name'", str(ctx.exception))
+
+    def test_bool_coord_rejected(self):
+        # bool is an int subclass — a plain isinstance check
+        # would let True through as 1.
+        path = self._write_meta([self._frame(x=True)])
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_metadata(path)
+        self.assertIn("frame 0 (frame_001.png)", str(ctx.exception))
+        self.assertIn("'x'", str(ctx.exception))
+
+    def test_out_of_bounds_rect_rejected(self):
+        path = self._write_meta(
+            [self._frame(name="frame_002.png", index=1, x=48)])
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_metadata(path)
+        # The label uses the frame's position in the list (0) —
+        # the index field itself is untrusted input.
+        self.assertIn("frame 0 (frame_002.png)", str(ctx.exception))
+        self.assertIn("80, 32", str(ctx.exception))
+        self.assertIn("64 x 32", str(ctx.exception))
+
+    def test_negative_origin_rejected(self):
+        path = self._write_meta([self._frame(x=-8)])
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_metadata(path)
+        self.assertIn("frame 0 (frame_001.png)", str(ctx.exception))
+        self.assertIn("x=-8", str(ctx.exception))
+
+    def test_zero_size_rejected(self):
+        path = self._write_meta([self._frame(w=0)])
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_metadata(path)
+        self.assertIn("frame 0 (frame_001.png)", str(ctx.exception))
+        self.assertIn("0 x 32", str(ctx.exception))
+
+    def test_string_duration_rejected(self):
+        path = self._write_meta([self._frame(duration_ms="125")])
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_metadata(path)
+        self.assertIn("duration_ms", str(ctx.exception))
+
+    def test_duration_optional(self):
+        frame = self._frame()
+        del frame["duration_ms"]
+        loaded = load_metadata(self._write_meta([frame]))
+        self.assertEqual(len(loaded["frames"]), 1)
+
+    def test_frames_not_a_list_rejected(self):
+        path = self._write_meta(
+            {"0": self._frame()})
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_metadata(path)
+        self.assertIn("not a list", str(ctx.exception))
+
+    def test_string_sheet_size_rejected(self):
+        path = self._write_meta([self._frame()], sheet_width="64")
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_metadata(path)
+        self.assertIn("'sheet_width'", str(ctx.exception))
+
+    def test_valid_hand_written_sheet_loads(self):
+        frames = [self._frame(),
+                  self._frame(name="frame_002.png", index=1, x=32)]
+        loaded = load_metadata(self._write_meta(frames))
+        self.assertEqual(loaded["frames"], frames)
+        self.assertEqual(loaded["sheet_width"], 64)
+
+
 class FrameDirTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

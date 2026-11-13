@@ -1,5 +1,36 @@
 # Pixel Forge changelog
 
+## 0.26 — 2026-11-13
+
+`load_metadata` now validates every frame entry at load time —
+task-list item #14 (bug B10). Bad metadata used to pass here and
+fail later and confusingly: a null frame raised TypeError, string
+coordinates passed validation and crashed in `extract_frame`, and
+out-of-bounds rects silently cut blank frames. Every rejection is
+now a plain PixelForgeError naming the file, the frame (index and
+name), and what's wrong with it.
+
+- Each frame must be an object with `name` (text), `index`,
+  `x`, `y`, `w`, `h` (whole numbers — a bool is not one) and,
+  when present, `duration_ms` (a whole number of 0 or more).
+  The sheet and frame sizes must be whole numbers of at least 1.
+- Rects must lie inside the metadata's own declared sheet size:
+  no negative origin, no zero-size frame, no rect ending past
+  the sheet's edge. The PNG is never loaded — this stays a
+  JSON-only read. A valid sheet loads exactly as before.
+- Callers checked: no product code loads sheet metadata from
+  disk — the GUI preview dialog builds its metadata in memory
+  from the frames, the Library tab previews a sheet from its
+  PNG only, the `sheet` CLI only writes metadata, and the
+  library's meta copy rewrites the "sheet" field without
+  interpreting frames. Nothing else needed changing.
+
+- Tests: fourteen new B10 tests — null and non-dict frames,
+  string coords, missing field and missing name, bool coord,
+  out-of-bounds rect, negative origin, zero size, string
+  duration, duration optional, frames not a list, string
+  sheet size, and a valid hand-written sheet loading unchanged.
+
 ## 0.25 — 2026-11-13
 
 A stray PNG in a frames folder no longer becomes frame 0 —

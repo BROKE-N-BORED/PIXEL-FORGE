@@ -225,10 +225,27 @@ def write_sheet(images, names, out_png, out_json, cols=None,
     return metadata
 
 
+def _is_whole(value):
+    """An int that is not a bool — bool is an int subclass, so
+    isinstance(True, int) is True and a bool coord would pass a
+    plain int check, then confuse everything downstream."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def load_metadata(path):
     """Read + validate a spritesheet JSON. Raises PixelForgeError
     on a missing file, bad JSON, or a missing/wrong field — never a
-    traceback, never a half-loaded dict."""
+    traceback, never a half-loaded dict.
+
+    Every frame entry is validated here, at load time, so bad
+    metadata fails with a plain error naming the file, the frame,
+    and the problem — instead of failing later and confusingly
+    (a null frame used to raise TypeError; string coords passed
+    here and crashed in extract_frame; out-of-bounds rects
+    silently cut blank frames — review B10). Rects are checked
+    against the metadata's own declared sheet size; the PNG is
+    never loaded, so this stays a JSON-only read.
+    """
     meta_path = Path(path)
     if not meta_path.is_file():
         raise PixelForgeError("not found: %s" % path)
@@ -251,18 +268,65 @@ def load_metadata(path):
             "%s is spritesheet version %r, this build reads version "
             "%d" % (path, metadata.get("version"), FORMAT_VERSION))
     frames = metadata.get("frames")
+    if not isinstance(frames, list):
+        raise PixelForgeError(
+            "%s frames is not a list (got %s)"
+            % (path, type(frames).__name__))
     if not frames:
         raise PixelForgeError("%s has no frames" % path)
-    for index, frame in enumerate(frames):
-        for key in ("x", "y", "w", "h"):
-            if key not in frame:
-                raise PixelForgeError(
-                    "%s frame %d is missing %r" % (path, index, key))
     for key in ("sheet_width", "sheet_height",
                 "frame_width", "frame_height"):
         if key not in metadata:
             raise PixelForgeError(
                 "%s is missing %r" % (path, key))
+        if not _is_whole(metadata[key]) or metadata[key] < 1:
+            raise PixelForgeError(
+                "%s %r must be a whole number of at least 1 (got %r)"
+                % (path, key, metadata[key]))
+    sheet_w = metadata["sheet_width"]
+    sheet_h = metadata["sheet_height"]
+    for index, frame in enumerate(frames):
+        if not isinstance(frame, dict):
+            raise PixelForgeError(
+                "%s frame %d is not an object (got %s)"
+                % (path, index,
+                   "null" if frame is None
+                   else type(frame).__name__))
+        for key in ("name", "index", "x", "y", "w", "h"):
+            if key not in frame:
+                raise PixelForgeError(
+                    "%s frame %d is missing %r" % (path, index, key))
+        if not isinstance(frame["name"], str):
+            raise PixelForgeError(
+                "%s frame %d name must be text (got %r)"
+                % (path, index, frame["name"]))
+        label = "frame %d (%s)" % (index, frame["name"])
+        for key in ("index", "x", "y", "w", "h"):
+            if not _is_whole(frame[key]):
+                raise PixelForgeError(
+                    "%s %s %r must be a whole number (got %r)"
+                    % (path, label, key, frame[key]))
+        if "duration_ms" in frame:
+            duration = frame["duration_ms"]
+            if not _is_whole(duration) or duration < 0:
+                raise PixelForgeError(
+                    "%s %s duration_ms must be a whole number of "
+                    "0 or more (got %r)" % (path, label, duration))
+        x, y, w, h = (frame["x"], frame["y"],
+                      frame["w"], frame["h"])
+        if x < 0 or y < 0:
+            raise PixelForgeError(
+                "%s %s starts outside the sheet (x=%d, y=%d)"
+                % (path, label, x, y))
+        if w < 1 or h < 1:
+            raise PixelForgeError(
+                "%s %s is %d x %d — a frame must be at least "
+                "1 pixel" % (path, label, w, h))
+        if x + w > sheet_w or y + h > sheet_h:
+            raise PixelForgeError(
+                "%s %s ends at (%d, %d) but the sheet is only "
+                "%d x %d" % (path, label, x + w, y + h,
+                             sheet_w, sheet_h))
     return metadata
 
 
