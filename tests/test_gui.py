@@ -20,6 +20,7 @@ from helpers import (make_gradient_image, make_noisy_image,  # noqa: E402
                      write_image, write_stub_engine)
 
 try:
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, \
         QFileDialog, QInputDialog, QLabel, QMessageBox, QPushButton, \
         QTabWidget, QWidget
@@ -1064,6 +1065,76 @@ class LibraryGuiTests(unittest.TestCase):
         self.assertFalse(self.win.library_export_btn.isEnabled())
         self.assertIn("Library is empty",
                       self.win.library_count_label.text())
+
+    def test_empty_library_shows_no_sprites_yet(self):
+        # v0.13 (review B1): an empty library shows a centered
+        # "No sprites yet" label in the grid area, and the preview
+        # pane shows its text instead of a blank void.
+        self.win.show()
+        self.app.processEvents()
+        self.app.processEvents()
+        self.assertEqual(self.win.library_empty_label.text(),
+                         "No sprites yet")
+        self.assertIs(self.win.library_stack.currentWidget(),
+                      self.win.library_empty_label)
+        self.assertTrue(self.win.library_empty_label.isVisible())
+        self.assertFalse(self.win.library_list.isVisible())
+        self.assertTrue(self.win.library_empty_label.alignment()
+                        & Qt.AlignmentFlag.AlignHCenter)
+        self.assertEqual(self.win.library_preview_label.text(),
+                         "Select a sprite to preview it")
+        pixmap = self.win.library_preview_label.pixmap()
+        self.assertTrue(pixmap is None or pixmap.isNull())
+
+    def test_preview_text_shows_with_sprites_but_no_selection(self):
+        # v0.13 (review B1): with sprites in the library but none
+        # selected, the preview still shows its text — the null
+        # pixmap used to wipe it.
+        self._add("Knight")
+        self.win._refresh_library()
+        self.assertEqual(self.win.library_preview_label.text(),
+                         "Select a sprite to preview it")
+        pixmap = self.win.library_preview_label.pixmap()
+        self.assertTrue(pixmap is None or pixmap.isNull())
+        self.assertIs(self.win.library_stack.currentWidget(),
+                      self.win.library_list)
+
+    def test_selecting_sprite_shows_preview_and_hides_empty_label(self):
+        # v0.13 (review B1): selecting a sprite shows the real
+        # preview and the empty label is gone.
+        self._add("Knight")
+        self.win._refresh_library()
+        self.win.show()
+        self.app.processEvents()
+        self.app.processEvents()
+        self._select(0)
+        pixmap = self.win.library_preview_label.pixmap()
+        self.assertIsNotNone(pixmap)
+        self.assertFalse(pixmap.isNull())
+        self.assertIs(self.win.library_stack.currentWidget(),
+                      self.win.library_list)
+        self.assertFalse(self.win.library_empty_label.isVisible())
+
+    def test_deleting_last_sprite_brings_empty_label_back(self):
+        # v0.13 (review B1): deleting the last sprite returns the
+        # grid area to "No sprites yet" and the preview to text.
+        from unittest import mock
+        self._add("Knight")
+        self.win._refresh_library()
+        self._select(0)
+        self.assertIs(self.win.library_stack.currentWidget(),
+                      self.win.library_list)
+        with mock.patch.object(
+                QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.Yes):
+            self.win._on_library_delete()
+        self.assertEqual(self.win.library.entries(), [])
+        self.assertIs(self.win.library_stack.currentWidget(),
+                      self.win.library_empty_label)
+        self.assertEqual(self.win.library_empty_label.text(),
+                         "No sprites yet")
+        self.assertEqual(self.win.library_preview_label.text(),
+                         "Select a sprite to preview it")
 
     def test_no_bare_ampersand_on_library_tab(self):
         for text in visible_texts(self.win):

@@ -45,8 +45,9 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
                                QListWidget, QListWidgetItem, QMainWindow,
                                QMessageBox, QProgressBar, QPushButton,
                                QScrollArea, QSlider,
-                               QSpinBox, QSplitter, QStatusBar,
-                               QTabWidget, QVBoxLayout, QWidget)
+                               QSpinBox, QSplitter, QStackedWidget,
+                               QStatusBar, QTabWidget, QVBoxLayout,
+                               QWidget)
 
 from .codeinput import CODE_EXTENSIONS, parse_paths
 from .imagegen import (DEFAULT_COUNT, DEFAULT_NEGATIVE,
@@ -2859,7 +2860,17 @@ class MainWindow(QMainWindow):
         self.library_list.setMovement(QListWidget.Movement.Static)
         self.library_list.itemClicked.connect(
             self._on_library_item_clicked)
-        left_layout.addWidget(self.library_list, 1)
+        # The grid area is a stack: the list, or — when the
+        # library is empty — a centered "No sprites yet" label,
+        # so the tab is never a void (review B1).
+        self.library_stack = QStackedWidget()
+        self.library_stack.addWidget(self.library_list)
+        self.library_empty_label = QLabel("No sprites yet")
+        self.library_empty_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter)
+        self.library_empty_label.setWordWrap(True)
+        self.library_stack.addWidget(self.library_empty_label)
+        left_layout.addWidget(self.library_stack, 1)
 
         self.library_count_label = QLabel("")
         left_layout.addWidget(self.library_count_label)
@@ -2935,6 +2946,10 @@ class MainWindow(QMainWindow):
         except PixelForgeError as exc:
             self.library_list.clear()
             self.library_count_label.setText(str(exc))
+            # Not empty — unreadable. Keep the list page (blank)
+            # so the "No sprites yet" label never claims an
+            # unreadable library has nothing in it.
+            self.library_stack.setCurrentWidget(self.library_list)
             self._clear_library_selection()
             return
         selected = self._selected_library_id()
@@ -3003,6 +3018,14 @@ class MainWindow(QMainWindow):
         else:
             self.library_count_label.setText(
                 "%d of %d sprite(s)%s" % (len(entries), total, note))
+        # The grid area shows a centered "No sprites yet" label
+        # while the library is empty (review B1); once sprites
+        # exist, the list shows instead.
+        if total == 0:
+            self.library_stack.setCurrentWidget(
+                self.library_empty_label)
+        else:
+            self.library_stack.setCurrentWidget(self.library_list)
         if selected is not None:
             for row in range(self.library_list.count()):
                 item = self.library_list.item(row)
@@ -3025,9 +3048,12 @@ class MainWindow(QMainWindow):
         return self.library.find(entry_id)
 
     def _clear_library_selection(self):
+        # Order matters: setting a pixmap — even a null one —
+        # wipes the label's text, so clear the pixmap FIRST and
+        # set the text after it (review B1).
+        self.library_preview_label.setPixmap(QPixmap())
         self.library_preview_label.setText(
             "Select a sprite to preview it")
-        self.library_preview_label.setPixmap(QPixmap())
         self.library_info_label.setText("")
         self.library_load_btn.setEnabled(False)
         self.library_rename_btn.setEnabled(False)

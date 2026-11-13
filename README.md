@@ -322,9 +322,9 @@ A preset needs all six keys: `width` and `height` (1–512),
 (true/false). A hand-edited file with a bad preset fails loudly
 instead of applying nonsense.
 
-## What v0.12 does and does not do
+## What v0.13 does and does not do
 
-v0.12 is Items 1–6 of the plan: image to pixel sprite core, video to
+v0.13 is Items 1–6 of the plan: image to pixel sprite core, video to
 sprite frames, prompt-to-sprite with a local image model,
 spritesheets + animation export, a sprite library with presets,
 and code + game-asset input — plus the window-fit fix (every tab's
@@ -342,7 +342,11 @@ the Launch button only enables once the venv GUI actually
 imports), and the nothing-selected-by-default fix (the ffmpeg
 option is unticked by default in the GUI installer and
 defaults to No in the terminal installer — ffmpeg only
-installs when the user chooses it). The MIMIK merge is the one remaining planned item —
+installs when the user chooses it), and the empty-library
+fix (the Library tab shows a centered "No sprites yet"
+label while the library is empty, and the preview pane
+reads "Select a sprite to preview it" when nothing is
+selected instead of showing blank). The MIMIK merge is the one remaining planned item —
 none of that is in this build.
 
 ## Requirements

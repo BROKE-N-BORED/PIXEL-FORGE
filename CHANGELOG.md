@@ -1,5 +1,24 @@
 # Pixel Forge changelog
 
+## 0.13 — 2026-11-12
+
+The empty Library tab is no longer a void — task-list item #7
+(review bug B1). The preview pane was supposed to read "Select a
+sprite to preview it" when nothing was selected, but clearing the
+selection set the text and then set a null pixmap, and a pixmap —
+even a null one — wipes the label's text, so the pane showed
+blank.
+
+- The clear-selection order is fixed (pixmap cleared first,
+  text set after), so the preview pane reads "Select a sprite
+  to preview it" whenever nothing is selected.
+- The grid area now shows a centered "No sprites yet" label
+  while the library is empty. It disappears as soon as sprites
+  exist and comes back when the last sprite is deleted. An
+  unreadable library still shows the error in the count label
+  instead — the label never claims an unreadable library is
+  empty.
+
 ## 0.12 — 2026-11-12
 
 Nothing selected by default, ever — task-list item #6. The
