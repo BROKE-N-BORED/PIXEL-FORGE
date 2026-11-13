@@ -217,6 +217,10 @@ class VideoGuiTests(unittest.TestCase):
             raise unittest.SkipTest("ffmpeg not installed")
         # 2 seconds at 24 fps, 8 fps extraction = 16 frames.
         cls.clip = make_test_video(os.path.join(cls.tmp, "clip.mp4"))
+        # 30 seconds, for the B7 range tests: a range set on this
+        # clip sits beyond the 2-second clip's length.
+        cls.long_clip = make_test_video(
+            os.path.join(cls.tmp, "long.mp4"), duration=30)
 
     def setUp(self):
         from pixel_forge.gui import MainWindow
@@ -277,6 +281,77 @@ class VideoGuiTests(unittest.TestCase):
         self.assertTrue(self.win.video_play_btn.isEnabled())
         self.assertIn("32 x 32", self.win.video_info_label.text())
         self.assertIn("Frame 1 of", self.win.video_counter_label.text())
+
+    def test_range_cleared_on_new_import(self):
+        # B7: the start/end range belongs to the old clip. Set a
+        # range on the 30-second clip, load the 2-second clip, and
+        # the range must be back to the whole clip (empty edits)
+        # with frames extracted from the new clip.
+        self.assertTrue(self.win.load_video(self.long_clip))
+        self.assertTrue(self._wait_for_video(timeout=60))
+        self.win.video_start_edit.setText("5")
+        self.win.video_end_edit.setText("10")
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        self.assertEqual(self.win.video_start_edit.text(), "")
+        self.assertEqual(self.win.video_end_edit.text(), "")
+        self.assertEqual(self.win.video_path, self.clip)
+        self.assertIn(len(self.win.video_frames), (15, 16))
+
+    def test_stale_range_beyond_new_clip_yields_frames(self):
+        # B7 pre-fix repro: a range entirely beyond the new clip's
+        # length used to yield "no frames extracted" and a failed
+        # import. The new import must clear the range and land
+        # frames instead.
+        self.assertTrue(self.win.load_video(self.long_clip))
+        self.assertTrue(self._wait_for_video(timeout=60))
+        self.win.video_start_edit.setText("25")
+        self.win.video_end_edit.setText("28")
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        self.assertEqual(self.win.video_start_edit.text(), "")
+        self.assertEqual(self.win.video_end_edit.text(), "")
+        self.assertEqual(self.win.video_path, self.clip)
+        self.assertIn(len(self.win.video_frames), (15, 16))
+        self.assertTrue(self.win.video_export_btn.isEnabled())
+
+    def test_other_video_settings_survive_new_import(self):
+        # B7 clears the range only — fps, size, palette, colors,
+        # dither, every-Nth, and the preset picker are the user's
+        # working choices and must be unchanged by a new import.
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        self.win.video_fps_combo.setCurrentIndex(
+            self.win.video_fps_combo.findData(4))
+        self.win.video_every_spin.setValue(2)
+        self.win.video_width_spin.setValue(48)
+        self.win.video_height_spin.setValue(48)
+        self.win.video_palette_combo.setCurrentIndex(
+            self.win.video_palette_combo.findData("gameboy"))
+        self.win.video_colors_spin.setValue(4)
+        self.win.video_dither_check.setChecked(False)
+        self.assertTrue(self._wait_for_video())
+        before = (self.win.video_fps_combo.currentData(),
+                  self.win.video_every_spin.value(),
+                  self.win.video_width_spin.value(),
+                  self.win.video_height_spin.value(),
+                  self.win.video_palette_combo.currentData(),
+                  self.win.video_colors_spin.value(),
+                  self.win.video_dither_check.isChecked(),
+                  self.win.video_preset_combo.currentText())
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        after = (self.win.video_fps_combo.currentData(),
+                 self.win.video_every_spin.value(),
+                 self.win.video_width_spin.value(),
+                 self.win.video_height_spin.value(),
+                 self.win.video_palette_combo.currentData(),
+                 self.win.video_colors_spin.value(),
+                 self.win.video_dither_check.isChecked(),
+                 self.win.video_preset_combo.currentText())
+        self.assertEqual(after, before)
+        self.assertEqual(self.win.video_start_edit.text(), "")
+        self.assertEqual(self.win.video_end_edit.text(), "")
 
     def test_strip_thumbnails_are_not_blank(self):
         from PySide6.QtCore import Qt

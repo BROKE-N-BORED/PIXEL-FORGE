@@ -1230,6 +1230,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Pixel Forge", str(exc))
             return False
         self.video_path = str(path)
+        # B7: the start/end range belongs to the OLD clip — a stale
+        # range beyond the new clip's length used to yield "no frames
+        # extracted" with no visible reason. Clear it so the new
+        # import always starts from the whole clip (empty = full
+        # range, the fresh-tab default). The other settings (fps,
+        # size, palette, colors, dither, every-Nth, preset) are the
+        # user's working choices and stay.
+        self.video_start_edit.clear()
+        self.video_end_edit.clear()
         self._reload_video_frames(fresh=True)
         return True
 

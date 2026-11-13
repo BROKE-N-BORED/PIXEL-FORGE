@@ -1,5 +1,25 @@
 # Pixel Forge changelog
 
+## 0.23 — 2026-11-13
+
+The Video tab's start/end range resets on a new import — task-list
+item #11 (bug B7). The range used to persist across video loads, so
+loading a shorter clip after a longer one could yield "no frames
+extracted" with no visible reason (the old range sat beyond the new
+clip's length). The range now clears to the whole clip on every new
+import; the other Video settings stay put.
+
+- GUI: `load_video` clears the start/end edits before the worker
+  run starts, so the new import is never filtered by the old
+  range. Empty edits are the fresh-tab default (full range). All
+  import paths go through `load_video` — Import button,
+  drag-and-drop, and a video file passed on the command line.
+- The reset covers the range only. fps, size, palette, colors,
+  dither, every-Nth, and the preset picker are the user's working
+  choices and are untouched. The other per-video state already
+  reset per import (keep/drop choices, playback, preview, raw
+  frames), so no further fix was needed there.
+
 ## 0.22 — 2026-11-13
 
 Re-Generate asks before discarding a batch — task-list item #10
