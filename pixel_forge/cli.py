@@ -393,6 +393,12 @@ def _describe_asset(asset):
 def cmd_code(args):
     result = parse_paths([args.file])
     assets = result["assets"]
+    # Files that failed to parse are reported, never swallowed:
+    # one line each, path + reason, on stderr — the exit code
+    # stays 0 because the good files did import.
+    for skip in result["skipped"]:
+        print("pixel-forge: skipped %s: %s"
+              % (skip["file"], skip["reason"]), file=sys.stderr)
     if args.list:
         if not assets:
             print("No pixel-art assets found in %s "

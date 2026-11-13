@@ -559,6 +559,7 @@ class MainWindow(QMainWindow):
         # the window.
         self.code_assets = []
         self.code_not_rendered = []
+        self.code_skipped = []
         self.code_source = None
         self.code_kind = None  # "code", "skin", or "texture"
         self.code_current = None
@@ -2391,15 +2392,19 @@ class MainWindow(QMainWindow):
             return False
         self.code_assets = result["assets"]
         self.code_not_rendered = result["not_rendered"]
+        self.code_skipped = result["skipped"]
         self.code_source = ", ".join(str(p) for p in paths)
         self.code_kind = "code"
         self.code_skin_path = None
         self.code_skin_layout = None
         self.code_export_parts_btn.setEnabled(False)
         self._rebuild_code_list()
-        self.statusBar().showMessage(
-            "%d asset(s) from %d file(s)"
-            % (len(result["assets"]), len(result["files"])))
+        message = ("%d asset(s) from %d file(s)"
+                   % (len(result["assets"]), len(result["files"])))
+        if result["skipped"]:
+            message += (", %d file(s) skipped"
+                        % len(result["skipped"]))
+        self.statusBar().showMessage(message)
         return True
 
     def load_game_asset(self, path):
@@ -2417,6 +2422,7 @@ class MainWindow(QMainWindow):
         layout = detect_skin(image)
         self.code_source = str(path)
         self.code_not_rendered = []
+        self.code_skipped = []
         self._stop_texture_worker()
         if layout is not None:
             try:
@@ -2550,9 +2556,12 @@ class MainWindow(QMainWindow):
                 self.code_list.addItem(item)
         finally:
             self.code_list.blockSignals(False)
-        if self.code_not_rendered:
-            lines = ["%s: %s" % (note["name"], note["reason"])
-                     for note in self.code_not_rendered]
+        lines = ["%s: %s" % (note["name"], note["reason"])
+                 for note in self.code_not_rendered]
+        lines += ["%s: %s" % (Path(skip["file"]).name,
+                              skip["reason"])
+                  for skip in self.code_skipped]
+        if lines:
             self.code_skipped_label.setText("\n".join(lines))
         elif self.code_assets:
             self.code_skipped_label.setText(

@@ -1693,6 +1693,14 @@ class CodeTabTests(unittest.TestCase):
         cls.empty_py = os.path.join(cls.tmp, "empty.py")
         with open(cls.empty_py, "w") as handle:
             handle.write("# no sprites here\n")
+        cls.mixed = os.path.join(cls.tmp, "mixed")
+        os.mkdir(cls.mixed)
+        with open(os.path.join(cls.mixed, "a.py"), "w") as handle:
+            handle.write("HERO = [[0, 1], [1, 0]]\n")
+        with open(os.path.join(cls.mixed, "b.js"), "w") as handle:
+            handle.write("const GEM = [[1, 2], [2, 1]];\n")
+        with open(os.path.join(cls.mixed, "broken.py"), "w") as handle:
+            handle.write("def broken(:\n")
         skin = make_solid_image(64, 64, 10, 20, 30)
         cls.skin = write_image(skin, os.path.join(cls.tmp,
                                                   "steve.png"))
@@ -1787,6 +1795,38 @@ class CodeTabTests(unittest.TestCase):
             self.assertFalse(self.win.load_code(self.empty_py))
         self.assertEqual(self.win.code_list.count(), 0)
         warn.assert_called_once()
+
+    def test_load_code_folder_skips_bad_file(self):
+        # Task 65: a mixed folder lists the good assets with
+        # thumbnails and reports the bad file in the skipped
+        # box — no dialog, no abort.
+        self.assertTrue(self.win.load_code(self.mixed))
+        self.assertEqual(self.win.code_list.count(), 2)
+        texts = [self.win.code_list.item(i).text()
+                 for i in range(self.win.code_list.count())]
+        self.assertTrue(any(t.startswith("HERO — map, 2 x 2")
+                            for t in texts))
+        self.assertTrue(any(t.startswith("GEM — map, 2 x 2")
+                            for t in texts))
+        label = self.win.code_skipped_label.text()
+        self.assertIn("broken.py", label)
+        self.assertIn("could not parse", label)
+        pixmap = self.win.code_preview_label.pixmap()
+        self.assertIsNotNone(pixmap)
+        self.assertFalse(pixmap.isNull())
+        self.assertIn("1 file(s) skipped",
+                      self.win.statusBar().currentMessage())
+
+    def test_load_code_clears_stale_skipped_lines(self):
+        # A later clean import must not leave the old skipped
+        # file in the reasons box.
+        self.assertTrue(self.win.load_code(self.mixed))
+        self.assertIn("broken.py",
+                      self.win.code_skipped_label.text())
+        self.assertTrue(self.win.load_code(self.game))
+        label = self.win.code_skipped_label.text()
+        self.assertNotIn("broken.py", label)
+        self.assertIn("DRAW", label)
 
     def test_load_skin_lists_parts_and_figure(self):
         self.assertTrue(self.win.load_game_asset(self.skin))

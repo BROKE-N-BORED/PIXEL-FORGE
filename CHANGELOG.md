@@ -1,5 +1,31 @@
 # Pixel Forge changelog
 
+## 0.20 — 2026-11-13
+
+Folder code import is per-file now — task-list item #65 (repo-audit
+Top 5 #4). One bad file in a folder used to abort the whole import
+(exit 1, good assets never listed); now the good files load and each
+bad file is reported with its name and reason.
+
+- `codeinput.parse_paths` catches a per-file failure, records it in
+  a new `"skipped"` list (`{"file", "reason"}`), and keeps going. A
+  file that parses but defines no assets is a success, not a skip.
+  When EVERY file fails it still raises: a single bad file raises
+  its own error unchanged (so `pixel-forge code BROKEN.py` reads
+  exactly as before), and several bad files are all named in the
+  one message.
+- CLI: `pixel-forge code FOLDER --list` prints one `skipped <path>:
+  <reason>` line per bad file on stderr and exits 0 when at least
+  one file imported; an all-bad folder exits 1 with the readable
+  message. No tracebacks either way.
+- GUI: the Code tab's skipped-reasons box now lists failed files
+  (name + reason) alongside the found-but-not-rendered notes, and
+  the status bar counts the skipped files. Loading a game asset or
+  a clean folder clears the old skipped lines — no stale state.
+- Fixed in passing: a Python syntax error with no line number
+  (a binary file's "cannot contain null bytes") used to report
+  "(line None)" — the line is left out when there is none.
+
 ## 0.19 — 2026-11-12
 
 The pixelize core no longer needs Qt — task-list item #64 (the

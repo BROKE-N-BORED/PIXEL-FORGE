@@ -322,9 +322,9 @@ A preset needs all six keys: `width` and `height` (1–512),
 (true/false). A hand-edited file with a bad preset fails loudly
 instead of applying nonsense.
 
-## What v0.19 does and does not do
+## What v0.20 does and does not do
 
-v0.19 is Items 1–6 of the plan: image to pixel sprite core, video to
+v0.20 is Items 1–6 of the plan: image to pixel sprite core, video to
 sprite frames, prompt-to-sprite with a local image model,
 spritesheets + animation export, a sprite library with presets,
 and code + game-asset input — plus the window-fit fix (every tab's
@@ -363,7 +363,11 @@ core no longer needs Qt: the CLI and the core suite run on a
 bare system python with no PySide6, on a pure-Python PNG
 codec written for this release — only PNG loads without Qt,
 and a JPG input fails with a plain message naming the fix
-instead of a traceback). The MIMIK merge is the one remaining planned item —
+instead of a traceback), and the folder code-import fix (one
+bad file in a folder no longer aborts the whole import: the
+good files still load, and each bad file is reported with its
+name and reason — in the CLI on stderr, in the Code tab's
+skipped-reasons box). The MIMIK merge is the one remaining planned item —
 none of that is in this build.
 
 ## Requirements

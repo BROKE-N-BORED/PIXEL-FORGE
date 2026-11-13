@@ -718,6 +718,14 @@ def parse_source(source, path, language):
         try:
             assignments = _python_assignments(source)
         except SyntaxError as exc:
+            # Some syntax errors carry no line number (a binary
+            # file's "source code string cannot contain null
+            # bytes" has lineno None) — "(line None)" is not a
+            # plain message, so leave the line out then.
+            if exc.lineno is None:
+                raise PixelForgeError(
+                    "could not parse %s as Python: %s"
+                    % (Path(path).name, exc.msg))
             raise PixelForgeError(
                 "could not parse %s as Python: %s (line %s)"
                 % (Path(path).name, exc.msg, exc.lineno))
@@ -791,14 +799,22 @@ def parse_file(path):
     language = "py" if ext == ".py" else "js"
     result = parse_source(source, p, language)
     result["files"] = [str(p)]
+    result["skipped"] = []
     return result
 
 
 def parse_paths(paths):
     """Parse files and/or folders (a folder contributes its
     .py/.js/.ts files, non-recursive, sorted by name). Returns
-    the merged result; raises PixelForgeError when nothing
-    parseable was given."""
+    the merged result, with a "skipped" list of {"file",
+    "reason"} for files that failed to parse — one bad file
+    never aborts the rest (a file that parses but defines no
+    assets is a success, not a skip). Raises PixelForgeError
+    when nothing parseable was given, when a path does not
+    exist, or when EVERY file failed: a single bad file raises
+    its own error unchanged, so `pixel-forge code BROKEN.py`
+    reads exactly as before; several bad files are all named in
+    the one message."""
     files = []
     for raw in paths:
         p = Path(raw)
@@ -815,10 +831,27 @@ def parse_paths(paths):
         raise PixelForgeError(
             "no .py, .js, or .ts files in %s"
             % ", ".join(str(p) for p in paths))
-    merged = {"assets": [], "not_rendered": [], "files": []}
+    merged = {"assets": [], "not_rendered": [], "files": [],
+              "skipped": []}
     for path in files:
-        result = parse_file(path)
+        try:
+            result = parse_file(path)
+        except PixelForgeError as exc:
+            merged["skipped"].append({"file": str(path),
+                                      "reason": str(exc)})
+            continue
         merged["assets"].extend(result["assets"])
         merged["not_rendered"].extend(result["not_rendered"])
         merged["files"].extend(result["files"])
+    if not merged["files"]:
+        # Nothing parsed at all. One file: its own error, word
+        # for word, so the single-file path is unchanged.
+        if len(merged["skipped"]) == 1:
+            raise PixelForgeError(merged["skipped"][0]["reason"])
+        detail = "; ".join("%s: %s" % (skip["file"],
+                                       skip["reason"])
+                           for skip in merged["skipped"])
+        raise PixelForgeError(
+            "could not parse any of %d file(s): %s"
+            % (len(files), detail))
     return merged

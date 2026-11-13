@@ -335,6 +335,86 @@ class ParseDriverTests(unittest.TestCase):
             parse_paths([folder])
         self.assertIn("no .py, .js, or .ts files", str(ctx.exception))
 
+    def test_folder_skips_bad_file_keeps_good_ones(self):
+        # Task 65: one bad file must not abort the folder import.
+        folder = os.path.join(self.tmp, "mixed")
+        os.mkdir(folder)
+        with open(os.path.join(folder, "good.py"), "w") as handle:
+            handle.write("ONE = [[1]]\n")
+        with open(os.path.join(folder, "broken.py"), "w") as handle:
+            handle.write("def broken(:\n")
+        with open(os.path.join(folder, "good.js"), "w") as handle:
+            handle.write("const TWO = [[2]];\n")
+        with open(os.path.join(folder, "junk.py"), "wb") as handle:
+            handle.write(b"\x00\x01\x02\xff\xfe binary junk")
+        with open(os.path.join(folder, "empty.py"), "w") as handle:
+            handle.write("# nothing here\n")
+        result = parse_paths([folder])
+        names = sorted(a["name"] for a in result["assets"])
+        self.assertEqual(names, ["ONE", "TWO"])
+        # The empty file parsed fine (no assets is not a failure).
+        self.assertEqual(len(result["files"]), 3)
+        skipped = sorted(s["file"] for s in result["skipped"])
+        self.assertEqual([os.path.basename(f) for f in skipped],
+                         ["broken.py", "junk.py"])
+        for skip in result["skipped"]:
+            self.assertIn("could not parse", skip["reason"])
+            # The binary file's SyntaxError has no line number —
+            # the reason must not read "(line None)".
+            self.assertNotIn("line None", skip["reason"])
+
+    def test_folder_all_bad_fails_naming_each_file(self):
+        folder = os.path.join(self.tmp, "allbad")
+        os.mkdir(folder)
+        with open(os.path.join(folder, "a.py"), "w") as handle:
+            handle.write("def a(:\n")
+        with open(os.path.join(folder, "b.py"), "w") as handle:
+            handle.write("x = \n")
+        with self.assertRaises(PixelForgeError) as ctx:
+            parse_paths([folder])
+        message = str(ctx.exception)
+        self.assertIn("could not parse any of 2 file(s)", message)
+        self.assertIn("a.py", message)
+        self.assertIn("b.py", message)
+
+    def test_single_bad_file_error_unchanged(self):
+        # Task 65 is folders only: one bad file on its own must
+        # raise exactly the error parse_file raises today.
+        path = self._write("solo.py", "def broken(:\n")
+        with self.assertRaises(PixelForgeError) as ctx_file:
+            parse_file(path)
+        with self.assertRaises(PixelForgeError) as ctx_paths:
+            parse_paths([path])
+        self.assertEqual(str(ctx_file.exception),
+                         str(ctx_paths.exception))
+
+    def test_unreadable_file_skipped(self):
+        # A file that cannot be read is skipped like a bad one.
+        # (chmod 0 does not work as root, so the OSError is
+        # simulated with a mock instead.)
+        from pathlib import Path
+        from unittest import mock
+        folder = os.path.join(self.tmp, "locked")
+        os.mkdir(folder)
+        with open(os.path.join(folder, "good.py"), "w") as handle:
+            handle.write("ONE = [[1]]\n")
+        with open(os.path.join(folder, "locked.py"), "w") as handle:
+            handle.write("TWO = [[2]]\n")
+        orig = Path.read_text
+
+        def flaky(self, *args, **kwargs):
+            if self.name == "locked.py":
+                raise OSError("permission denied")
+            return orig(self, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", flaky):
+            result = parse_paths([folder])
+        names = [a["name"] for a in result["assets"]]
+        self.assertEqual(names, ["ONE"])
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertIn("locked.py", result["skipped"][0]["file"])
+        self.assertIn("could not read", result["skipped"][0]["reason"])
+
     def test_default_int_colors_cycle_pico8(self):
         path = self._write("cycle.py", "BIG = [[17, 18]]\n")
         result = parse_file(path)

@@ -557,6 +557,56 @@ class CodeCliTests(unittest.TestCase):
         self.assertIn("not found", err)
         self.assertNotIn("Traceback", err)
 
+    def _mixed_folder(self, name):
+        folder = os.path.join(self.tmp, name)
+        os.mkdir(folder)
+        with open(os.path.join(folder, "a.py"), "w") as handle:
+            handle.write("HERO = [[0, 1], [1, 0]]\n")
+        with open(os.path.join(folder, "b.js"), "w") as handle:
+            handle.write("const GEM = [[1, 2], [2, 1]];\n")
+        with open(os.path.join(folder, "broken.py"), "w") as handle:
+            handle.write("def broken(:\n")
+        with open(os.path.join(folder, "junk.py"), "wb") as handle:
+            handle.write(b"\x00\x01\x02\xff\xfe binary junk")
+        return folder
+
+    def test_code_folder_list_skips_bad_file(self):
+        # Task 65: a mixed folder lists the good assets, reports
+        # the bad files on stderr, and still exits 0.
+        folder = self._mixed_folder("mixed")
+        code, out, err = self._run(["code", folder, "--list"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("HERO — map, 2 x 2", out)
+        self.assertIn("GEM — map, 2 x 2", out)
+        self.assertIn("skipped", err)
+        self.assertIn("broken.py", err)
+        self.assertIn("junk.py", err)
+        self.assertIn("could not parse", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_code_folder_all_bad_fails_cleanly(self):
+        folder = os.path.join(self.tmp, "allbad")
+        os.mkdir(folder)
+        with open(os.path.join(folder, "a.py"), "w") as handle:
+            handle.write("def a(:\n")
+        with open(os.path.join(folder, "b.py"), "w") as handle:
+            handle.write("x = \n")
+        code, _out, err = self._run(["code", folder, "--list"])
+        self.assertEqual(code, 1)
+        self.assertIn("could not parse any of 2 file(s)", err)
+        self.assertIn("a.py", err)
+        self.assertIn("b.py", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_code_single_bad_file_fails_cleanly(self):
+        path = os.path.join(self.tmp, "solo.py")
+        with open(path, "w") as handle:
+            handle.write("def broken(:\n")
+        code, _out, err = self._run(["code", path, "--list"])
+        self.assertEqual(code, 1)
+        self.assertIn("could not parse solo.py as Python", err)
+        self.assertNotIn("Traceback", err)
+
 
 class SkinCliTests(unittest.TestCase):
     @classmethod
