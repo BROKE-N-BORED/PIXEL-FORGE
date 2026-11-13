@@ -13,6 +13,7 @@ Raw frames live on disk (a temp dir for the GUI, a caller-chosen dir
 for the low-level calls) so RAM stays light even for long videos.
 """
 
+import math
 import os
 import re
 import shutil
@@ -26,8 +27,13 @@ FFMPEG_ENV = "PIXEL_FORGE_FFMPEG"
 FFMPEG_FIX = "sudo apt install ffmpeg"
 FPS_PRESETS = [2, 4, 8, 12, 24]
 DEFAULT_FPS = 8
+# Above this many estimated frames, the Video tab asks before
+# extracting (task 25): a long clip at 24 fps would otherwise
+# write tens of thousands of PNGs with no warning.
+FRAME_COUNT_CONFIRM = 500
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v",
-                    ".ogv", ".flv", ".wmv", ".mpg", ".mpeg", ".3gp"}
+                    ".ogv", ".flv", ".wmv", ".mpg", ".mpeg", ".3gp",
+                    ".gif"}
 
 TIME_RE = re.compile(
     r"^(?:(\d+):)?(?:(\d+):)?(\d+(?:\.\d+)?)$")
@@ -57,6 +63,67 @@ def require_ffmpeg():
             "Then try the video again. Image import works without it."
             % FFMPEG_FIX)
     return path
+
+
+def find_ffprobe():
+    """Path to the ffprobe binary, or None when it is not
+    installed. ffprobe ships with ffmpeg, so it is usually on
+    PATH next to it; when ffmpeg came from PIXEL_FORGE_FFMPEG,
+    look for ffprobe beside it too."""
+    path = shutil.which("ffprobe")
+    if path:
+        return path
+    ffmpeg = find_ffmpeg()
+    if ffmpeg:
+        sibling = Path(ffmpeg).with_name("ffprobe")
+        if sibling.is_file() and os.access(sibling, os.X_OK):
+            return str(sibling)
+    return None
+
+
+def probe_duration(video_path):
+    """Length of a video in seconds, or None when it cannot be
+    probed (no ffprobe, an unreadable file, no duration in the
+    metadata). Never raises — a missing estimate is not a
+    failure, it just means no frame-count estimate (task 25)."""
+    ffprobe = find_ffprobe()
+    if ffprobe is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries",
+             "format=duration", "-of",
+             "default=noprint_wrappers=1:nokey=1", str(video_path)],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        duration = float((proc.stdout or "").strip())
+    except ValueError:
+        return None
+    if duration <= 0:
+        return None
+    return duration
+
+
+def estimate_frame_count(duration, fps, every=1, start=None, end=None):
+    """Roughly how many frames extraction would produce: the
+    seconds in range times fps, divided by every-Nth, rounded
+    UP — an estimate that under-counts would let a huge run
+    through unchallenged. None when the count cannot be
+    estimated (no duration, or fps None = the source rate,
+    which this function does not know). start/end are seconds
+    as floats — callers parse the user's text first."""
+    if duration is None or fps is None or fps <= 0 or every < 1:
+        return None
+    span = duration - (start or 0.0)
+    if end is not None:
+        span = min(span, end - (start or 0.0))
+    if span <= 0:
+        return 0
+    return math.ceil(span * fps / every)
 
 
 def parse_time(text):

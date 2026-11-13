@@ -41,15 +41,16 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import (QAction, QDesktopServices, QImage, QImageReader,
-                           QKeySequence, QPainter, QPixmap, QShortcut)
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
-                               QDialog, QDoubleSpinBox, QFileDialog,
-                               QHBoxLayout, QInputDialog, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem,
-                               QMainWindow, QMessageBox, QProgressBar,
-                               QPushButton, QScrollArea, QSlider,
-                               QSpinBox, QSplitter, QStackedWidget,
+from PySide6.QtGui import (QAction, QDesktopServices, QIcon, QImage,
+                           QImageReader, QKeySequence, QPainter, QPixmap,
+                           QShortcut)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
+                               QComboBox, QDialog, QDoubleSpinBox,
+                               QFileDialog, QHBoxLayout, QInputDialog,
+                               QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMainWindow, QMessageBox,
+                               QProgressBar, QPushButton, QScrollArea,
+                               QSlider, QSpinBox, QSplitter, QStackedWidget,
                                QStatusBar, QTabWidget, QTextEdit,
                                QVBoxLayout, QWidget)
 
@@ -77,8 +78,10 @@ from .skins import (detect_skin, extract_skin, pixelize_texture,
 from .spritesheet import (build_metadata, extract_frame,
                           frames_from_sheet, load_metadata,
                           pack_frames, write_sheet)
-from .video import (DEFAULT_FPS, FPS_PRESETS, VIDEO_EXTENSIONS,
-                    extract_frames, require_ffmpeg)
+from .video import (DEFAULT_FPS, FPS_PRESETS, FRAME_COUNT_CONFIRM,
+                    VIDEO_EXTENSIONS, estimate_frame_count,
+                    extract_frames, parse_time, probe_duration,
+                    require_ffmpeg)
 
 SIZE_PRESETS = [16, 32, 48, 64, 128]
 MAX_DISPLAY = 1600  # longest side of a preview pixmap, in pixels
@@ -215,6 +218,19 @@ def thumb_pixmap(image, size):
     return QPixmap.fromImage(to_qimage(image).scaled(
         size, size, Qt.AspectRatioMode.KeepAspectRatio,
         Qt.TransformationMode.FastTransformation))
+
+
+def dimmed_pixmap(pixmap):
+    """A copy of a pixmap drawn at ~35% opacity — a dropped
+    frame's thumbnail (task 25), so kept and dropped read
+    apart at a glance."""
+    dimmed = QPixmap(pixmap.size())
+    dimmed.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(dimmed)
+    painter.setOpacity(0.35)
+    painter.drawPixmap(0, 0, pixmap)
+    painter.end()
+    return dimmed
 
 
 class PromptWorker(QThread):
@@ -742,6 +758,14 @@ class MainWindow(QMainWindow):
         self.video_raw_frames = []
         self.video_frames = []
         self.video_keep = []
+        # Strip order: frame indices in the order the strip shows
+        # them. A drag-reorder rewrites this, and the export and
+        # the sheet follow it (task 25) — _kept_indices reads it,
+        # never plain range().
+        self.video_order = []
+        # The clip's length in seconds, probed with ffprobe at
+        # import (None = unknown — no estimate, no confirm).
+        self.video_duration = None
         self.video_current = 0
         self._updating_video_size = False
         self.video_timer = QTimer(self)
@@ -1669,6 +1693,14 @@ class MainWindow(QMainWindow):
         end_row.addWidget(self.video_end_edit)
         form.addLayout(end_row)
 
+        # Frame-count estimate (task 25): "about 240 frames" at
+        # the current settings, blank until a video is loaded or
+        # when the clip's length could not be probed.
+        self.video_estimate_label = QLabel("")
+        self.video_estimate_label.setToolTip(
+            "Estimated frames to extract at the current settings")
+        form.addWidget(self.video_estimate_label)
+
         form.addWidget(self._section("Size"))
         self.video_size_combo = QComboBox()
         self.video_size_combo.setToolTip("Frame size in pixels")
@@ -1905,22 +1937,51 @@ class MainWindow(QMainWindow):
         self.video_drop_all_btn.setEnabled(False)
         self.video_drop_all_btn.clicked.connect(self._on_drop_all)
         strip_head.addWidget(self.video_drop_all_btn)
+        self.video_keep_selected_btn = QPushButton("Keep selected")
+        self.video_keep_selected_btn.setToolTip(
+            "Keep the selected frames")
+        self.video_keep_selected_btn.setEnabled(False)
+        self.video_keep_selected_btn.clicked.connect(
+            self._on_keep_selected)
+        strip_head.addWidget(self.video_keep_selected_btn)
+        self.video_drop_selected_btn = QPushButton("Drop selected")
+        self.video_drop_selected_btn.setToolTip(
+            "Drop the selected frames")
+        self.video_drop_selected_btn.setEnabled(False)
+        self.video_drop_selected_btn.clicked.connect(
+            self._on_drop_selected)
+        strip_head.addWidget(self.video_drop_selected_btn)
         strip_layout.addLayout(strip_head)
         self.video_strip = QListWidget()
         self.video_strip.setToolTip(
-            "Frames — click one to preview it, uncheck to drop it")
+            "Frames — click one to preview it, uncheck to drop "
+            "it, drag to reorder")
         self.video_strip.setIconSize(
             QSize(STRIP_THUMB, STRIP_THUMB))
         self.video_strip.setFlow(QListWidget.Flow.LeftToRight)
         self.video_strip.setWrapping(True)
         self.video_strip.setResizeMode(
             QListWidget.ResizeMode.Adjust)
+        # Multi-select + drag reorder (task 25): ExtendedSelection
+        # gives Ctrl+click and Shift+click ranges; InternalMove
+        # with Snap movement lets a frame be dragged to a new
+        # position, and rowsMoved records the new strip order.
+        # Nothing is selected by default — a rebuild leaves the
+        # strip with no selection, as before.
+        self.video_strip.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.video_strip.setDragDropMode(
+            QAbstractItemView.DragDropMode.InternalMove)
         self.video_strip.setMovement(
-            QListWidget.Movement.Static)
+            QListWidget.Movement.Snap)
         self.video_strip.itemClicked.connect(
             self._on_strip_item_clicked)
         self.video_strip.itemChanged.connect(
             self._on_strip_item_changed)
+        self.video_strip.itemSelectionChanged.connect(
+            self._on_strip_selection_changed)
+        self.video_strip.model().rowsMoved.connect(
+            self._on_strip_reordered)
         strip_layout.addWidget(self.video_strip, 1)
         right.addWidget(strip_pane)
 
@@ -1936,16 +1997,23 @@ class MainWindow(QMainWindow):
         while the frames land in _on_video_run_done. Returns False
         (with a message box) when ffmpeg is missing; that check is
         cheap and stays synchronous so a missing ffmpeg still fails
-        fast, exactly as before.
+        fast, exactly as before. Also False when the user declines
+        the big-extraction confirm (task 25).
         """
         self._stop_playback()
         try:
             require_ffmpeg()
         except PixelForgeError as exc:
             self.video_path = None
+            self.video_duration = None
+            self._refresh_video_estimate()
             warn_dialog(self, "Could not import video", str(exc))
             return False
         self.video_path = str(path)
+        # The clip's length, for the frame-count estimate (task
+        # 25) — ffprobe answers in milliseconds, and a failed
+        # probe just means no estimate, never a failure.
+        self.video_duration = probe_duration(path)
         # B7: the start/end range belongs to the OLD clip — a stale
         # range beyond the new clip's length used to yield "no frames
         # extracted" with no visible reason. Clear it so the new
@@ -1955,8 +2023,8 @@ class MainWindow(QMainWindow):
         # user's working choices and stay.
         self.video_start_edit.clear()
         self.video_end_edit.clear()
-        self._reload_video_frames(fresh=True)
-        return True
+        self._refresh_video_estimate()
+        return self._reload_video_frames(fresh=True)
 
     def _on_video_import(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1982,15 +2050,69 @@ class MainWindow(QMainWindow):
             "dither": self.video_dither_check.isChecked(),
         }
 
+    def _video_estimate(self):
+        """The frame-count estimate at the current settings, or
+        None when the clip's length is unknown or the time range
+        is unreadable (task 25)."""
+        if self.video_path is None or self.video_duration is None:
+            return None
+        try:
+            start_text = self.video_start_edit.text().strip()
+            end_text = self.video_end_edit.text().strip()
+            start = parse_time(start_text) if start_text else None
+            end = parse_time(end_text) if end_text else None
+        except PixelForgeError:
+            return None
+        return estimate_frame_count(
+            self.video_duration,
+            self.video_fps_combo.currentData(),
+            every=self.video_every_spin.value(),
+            start=start, end=end)
+
+    def _refresh_video_estimate(self):
+        """Show the frame-count estimate ("about 240 frames") or
+        clear it when there is nothing to estimate (task 25)."""
+        estimate = self._video_estimate()
+        if estimate is None:
+            self.video_estimate_label.setText("")
+        else:
+            self.video_estimate_label.setText(
+                "about %s" % plural(estimate, "frame"))
+
     def _reload_video_frames(self, fresh=False):
         """Start a background re-extract with the current
         fps/every/range, then re-pixelize. Returns False when
-        there is no video to re-extract; otherwise True — the
-        frames land in _on_video_run_done, and a failure lands
-        in _on_video_run_failed with a message box, the old
-        frames still in place."""
+        there is no video to re-extract, or when the user
+        declines the big-extraction confirm; otherwise True —
+        the frames land in _on_video_run_done, and a failure
+        lands in _on_video_run_failed with a message box, the
+        old frames still in place."""
         if self.video_path is None:
             return False
+        # Guardrail (task 25): a long clip at a high fps would
+        # write tens of thousands of PNGs — ask first when the
+        # estimate is over the threshold. Default No: declining
+        # a fresh import clears the path (nothing landed yet);
+        # declining a re-extract keeps the old frames in place.
+        estimate = self._video_estimate()
+        if estimate is not None and estimate > FRAME_COUNT_CONFIRM:
+            answer = QMessageBox.question(
+                self, "Extract %s?" % plural(estimate, "frame"),
+                "About %s would be extracted as PNG files. That "
+                "is a lot of files — lower the fps, keep every "
+                "Nth frame, or shorten the range to extract "
+                "fewer. Extract them anyway?"
+                % plural(estimate, "frame"),
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                if fresh:
+                    self.video_path = None
+                    self.video_duration = None
+                    self._refresh_video_estimate()
+                self.statusBar().showMessage("Extraction cancelled")
+                return False
         self._stop_playback()
         settings = self._video_pixelize_settings()
         settings.update({
@@ -2082,8 +2204,13 @@ class MainWindow(QMainWindow):
             # fps into another; each control is read only where
             # it applies (extraction, playback, sheet metadata).
             self.video_keep = [True] * len(result["frames"])
+            # A new extraction: the strip starts in natural
+            # order (task 25). A re-pixelize keeps the user's
+            # order — the frame count is unchanged there.
+            self.video_order = list(range(len(result["frames"])))
         elif len(self.video_keep) != len(result["frames"]):
             self.video_keep = [True] * len(result["frames"])
+            self.video_order = list(range(len(result["frames"])))
         self.video_frames = result["frames"]
         kept = self._kept_indices()
         self.video_current = kept[0] if kept else 0
@@ -2151,6 +2278,8 @@ class MainWindow(QMainWindow):
         warn_dialog(self, "Video import failed", message)
         if settings.get("fresh"):
             self.video_path = None
+            self.video_duration = None
+            self._refresh_video_estimate()
 
     def _stop_video_worker(self):
         if self.video_worker is not None:
@@ -2166,7 +2295,10 @@ class MainWindow(QMainWindow):
 
     def _on_video_extract_changed(self):
         """fps, every-Nth, or time range changed — re-extract,
-        debounced: the run starts 300 ms after the last change."""
+        debounced: the run starts 300 ms after the last change.
+        The frame-count estimate updates at once, not debounced
+        (task 25)."""
+        self._refresh_video_estimate()
         if self.video_path is not None:
             self._schedule_video_run(reload=True)
 
@@ -2204,25 +2336,78 @@ class MainWindow(QMainWindow):
 
     # ----------------------------------------------------- strip + preview
 
+    def _set_strip_item_dimmed(self, item, dimmed):
+        """Swap a strip item's icon between its bright thumbnail
+        and a dimmed copy (task 25): a dropped frame reads as
+        dropped at a glance. The bright thumbnail rides in the
+        item's data, so the swap never re-renders anything."""
+        thumb = item.data(Qt.ItemDataRole.UserRole + 1)
+        if thumb is None:
+            return
+        # setIcon emits itemChanged — block the strip's signals
+        # so dimming never re-enters _on_strip_item_changed (that
+        # recursion blew the stack: the handler sets the icon,
+        # the icon change fires the handler again, forever).
+        blocked = self.video_strip.signalsBlocked()
+        self.video_strip.blockSignals(True)
+        try:
+            if dimmed:
+                item.setIcon(QIcon(dimmed_pixmap(thumb)))
+            else:
+                item.setIcon(QIcon(thumb))
+        finally:
+            self.video_strip.blockSignals(blocked)
+
     def _rebuild_strip(self):
+        if len(self.video_order) != len(self.video_frames):
+            # A stale order (or none yet) — natural order.
+            self.video_order = list(range(len(self.video_frames)))
         self.video_strip.blockSignals(True)
         try:
             self.video_strip.clear()
-            for index, frame in enumerate(self.video_frames):
+            # In strip order (task 25), not natural order — the
+            # label keeps the ORIGINAL frame number, so a moved
+            # frame is still identifiable after a drag.
+            for index in self.video_order:
+                frame = self.video_frames[index]
                 thumb = thumb_pixmap(frame, STRIP_THUMB)
                 item = QListWidgetItem(thumb, "Frame %03d" % (index + 1))
                 item.setData(Qt.ItemDataRole.UserRole, index)
+                item.setData(Qt.ItemDataRole.UserRole + 1, thumb)
                 item.setFlags(item.flags()
                               | Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(
                     Qt.CheckState.Checked if self.video_keep[index]
                     else Qt.CheckState.Unchecked)
+                self._set_strip_item_dimmed(
+                    item, not self.video_keep[index])
                 self.video_strip.addItem(item)
         finally:
             self.video_strip.blockSignals(False)
 
     def _kept_indices(self):
-        return [i for i, keep in enumerate(self.video_keep) if keep]
+        """Kept frame indices, in STRIP order — a reordered strip
+        reorders the frame export, the sheet, and the playback
+        (task 25)."""
+        if len(self.video_order) != len(self.video_frames):
+            return [i for i, keep in enumerate(self.video_keep)
+                    if keep]
+        return [i for i in self.video_order if self.video_keep[i]]
+
+    def _on_strip_reordered(self, _parent, _start, _end,
+                            _destination, _row):
+        """The strip was drag-reordered — record the new strip
+        order (task 25). The frame labels keep their original
+        numbers; only the order changes."""
+        self.video_order = [
+            self.video_strip.item(row).data(Qt.ItemDataRole.UserRole)
+            for row in range(self.video_strip.count())]
+
+    def _on_strip_selection_changed(self):
+        """Keep/Drop selected need a selection to act on."""
+        has_selection = bool(self.video_strip.selectedItems())
+        self.video_keep_selected_btn.setEnabled(has_selection)
+        self.video_drop_selected_btn.setEnabled(has_selection)
 
     def _refresh_video_preview(self):
         if not self.video_frames:
@@ -2257,6 +2442,7 @@ class MainWindow(QMainWindow):
             return
         self.video_keep[index] = (
             item.checkState() == Qt.CheckState.Checked)
+        self._set_strip_item_dimmed(item, not self.video_keep[index])
         kept = self._kept_indices()
         self.video_export_btn.setEnabled(bool(kept))
         self.video_play_btn.setEnabled(bool(kept))
@@ -2270,17 +2456,9 @@ class MainWindow(QMainWindow):
         self._refresh_video_preview()
         self._update_video_info()
 
-    def _set_all_keep(self, keep):
-        self.video_keep = [keep] * len(self.video_frames)
-        self.video_strip.blockSignals(True)
-        try:
-            for row in range(self.video_strip.count()):
-                item = self.video_strip.item(row)
-                item.setCheckState(
-                    Qt.CheckState.Checked if keep
-                    else Qt.CheckState.Unchecked)
-        finally:
-            self.video_strip.blockSignals(False)
+    def _refresh_after_keep_change(self):
+        """Buttons, playback, and preview after any keep/drop
+        change — shared by Keep/Drop all and Keep/Drop selected."""
         kept = self._kept_indices()
         self.video_export_btn.setEnabled(bool(kept))
         self.video_play_btn.setEnabled(bool(kept))
@@ -2294,11 +2472,51 @@ class MainWindow(QMainWindow):
         self._refresh_video_preview()
         self._update_video_info()
 
+    def _set_all_keep(self, keep):
+        self.video_keep = [keep] * len(self.video_frames)
+        self.video_strip.blockSignals(True)
+        try:
+            for row in range(self.video_strip.count()):
+                item = self.video_strip.item(row)
+                item.setCheckState(
+                    Qt.CheckState.Checked if keep
+                    else Qt.CheckState.Unchecked)
+                self._set_strip_item_dimmed(item, not keep)
+        finally:
+            self.video_strip.blockSignals(False)
+        self._refresh_after_keep_change()
+
     def _on_keep_all(self):
         self._set_all_keep(True)
 
     def _on_drop_all(self):
         self._set_all_keep(False)
+
+    def _set_selected_keep(self, keep):
+        """Keep or drop just the selected frames (task 25)."""
+        selected = self.video_strip.selectedItems()
+        if not selected:
+            return
+        self.video_strip.blockSignals(True)
+        try:
+            for item in selected:
+                index = item.data(Qt.ItemDataRole.UserRole)
+                if index is None:
+                    continue
+                self.video_keep[index] = keep
+                item.setCheckState(
+                    Qt.CheckState.Checked if keep
+                    else Qt.CheckState.Unchecked)
+                self._set_strip_item_dimmed(item, not keep)
+        finally:
+            self.video_strip.blockSignals(False)
+        self._refresh_after_keep_change()
+
+    def _on_keep_selected(self):
+        self._set_selected_keep(True)
+
+    def _on_drop_selected(self):
+        self._set_selected_keep(False)
 
     # -------------------------------------------------------- playback
 

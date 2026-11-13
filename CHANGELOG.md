@@ -1,5 +1,35 @@
 # Pixel Forge changelog
 
+## 0.36 — 2026-11-13
+
+Video guardrails — task-list item #25, five sub-items in one
+release:
+
+- The Video tab shows a frame-count estimate ("about 240
+  frames") under the time range, from the clip's length
+  (probed with ffprobe) and the current fps / every-Nth /
+  range settings. It updates the moment a setting changes.
+  When the estimate is over 500 frames, extraction asks
+  Yes/No (default No) naming the count — a long clip at 24
+  fps would otherwise write tens of thousands of PNGs with
+  no warning. Under the threshold, nothing asks. When the
+  length cannot be probed, there is no estimate and no
+  confirm, never a failure.
+- GIFs import as video now: the import dialog, drag-and-drop,
+  and the Video tab all accept .gif, and extraction runs
+  through the same ffmpeg path as any other clip.
+- Dropped frames render dimmed in the strip, so kept and
+  dropped read apart at a glance; re-checking a frame
+  restores its bright thumbnail.
+- The strip reorders by drag: drag a frame to a new position
+  and the frame export, the spritesheet, and the playback all
+  follow the strip order. Frame labels keep their original
+  numbers, so a moved frame is still identifiable.
+- Multi-select: Ctrl+click toggles frames, Shift+click picks
+  a range, and "Keep selected" / "Drop selected" act on the
+  selection. Keep all / Drop all work as before. No frame is
+  ever pre-selected.
+
 ## 0.35 — 2026-11-13
 
 Library depth — task-list item #24, nine sub-items in one

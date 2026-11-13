@@ -59,17 +59,24 @@ bash uninstall.sh
 - **Image tab:** import an image (or drop one on the window), adjust
   the size, palette, and dithering, and press Export PNG. Conversion
   is live — every change re-pixelizes at once.
-- **Video tab:** import a video (or drop one on the window), pick how
-  many frames per second to keep, then keep or drop frames in the
-  strip, watch the animation play, and press Export frames to save
-  the kept frames as numbered PNGs. Changing the size, palette, or
-  dithering re-pixelizes every frame at once; changing the fps or
-  time range re-extracts the frames. The Spritesheet section packs
-  the kept frames into one sheet PNG + a metadata JSON: pick the
-  columns (Auto makes a square-ish grid), the padding between
-  frames, and the playback fps, then Preview spritesheet to see
-  the sheet and play the animation from it before you export, or
-  Export spritesheet to write the pair straight away.
+- **Video tab:** import a video or a GIF (or drop one on the window),
+  pick how many frames per second to keep, then keep or drop frames
+  in the strip, watch the animation play, and press Export frames to
+  save the kept frames as numbered PNGs. Changing the size, palette,
+  or dithering re-pixelizes every frame at once; changing the fps or
+  time range re-extracts the frames. The tab shows how many frames
+  the current settings would extract, and asks first when that
+  number is over 500 — a long clip at a high fps would otherwise
+  write tens of thousands of PNGs. Dropped frames show dimmed in
+  the strip; Ctrl+click and Shift+click select several at once
+  (Keep selected / Drop selected act on the selection), and frames
+  drag to reorder — the export, the sheet, and the playback all
+  follow the strip order. The Spritesheet section packs the kept
+  frames into one sheet PNG + a metadata JSON: pick the columns
+  (Auto makes a square-ish grid), the padding between frames, and
+  the playback fps, then Preview spritesheet to see the sheet and
+  play the animation from it before you export, or Export
+  spritesheet to write the pair straight away.
 - **Prompt tab:** type what you want (and what to avoid), press
   Generate, and 3 candidates appear in the strip — each takes a
   few minutes on CPU, and the window stays usable while they

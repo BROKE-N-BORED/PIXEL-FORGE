@@ -4293,5 +4293,258 @@ class LibraryDepthGuiTests(unittest.TestCase):
                          (32, 32))
 
 
+class VideoGuardrailsTests(unittest.TestCase):
+    """Task 25: the frame-count estimate + confirm, GIF input,
+    dimmed dropped frames, strip reorder, multi-select."""
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        from pixel_forge import video as video_mod
+        if video_mod.find_ffmpeg() is None:
+            raise unittest.SkipTest("ffmpeg not installed")
+        # 2 seconds at 24 fps, 8 fps extraction = 16 frames.
+        cls.clip = make_test_video(os.path.join(cls.tmp, "clip.mp4"))
+        # The same clip as a GIF, 8 fps — GIF is a video input
+        # now, not just a still image.
+        cls.gif = os.path.join(cls.tmp, "clip.gif")
+        subprocess.run(["ffmpeg", "-y", "-v", "error",
+                        "-i", cls.clip, "-vf", "fps=8,scale=64:48",
+                        cls.gif], check=True, timeout=60)
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.win = MainWindow()
+        self.win.tabs.setCurrentIndex(1)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _wait_for_video(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.video_worker is None
+                    and not self.win._video_debounce_timer.isActive()):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _set_fps(self, fps):
+        combo = self.win.video_fps_combo
+        combo.setCurrentIndex(combo.findData(fps))
+
+    def _expected_label(self):
+        # The label the estimate should show at the current
+        # settings — computed through the same pure function the
+        # window uses, so the test pins the wiring, not a number
+        # baked in by hand.
+        from pixel_forge import video as video_mod
+        estimate = video_mod.estimate_frame_count(
+            self.win.video_duration,
+            self.win.video_fps_combo.currentData(),
+            every=self.win.video_every_spin.value())
+        return "about %d frames" % estimate
+
+    def test_estimate_label_empty_without_video(self):
+        self.assertEqual(self.win.video_estimate_label.text(), "")
+
+    def test_estimate_label_shows_frame_count(self):
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        self.assertEqual(self.win.video_estimate_label.text(),
+                         self._expected_label())
+        self.assertIn("16 frames",
+                      self.win.video_estimate_label.text())
+
+    def test_estimate_updates_with_fps_and_every(self):
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        self._set_fps(4)
+        self.app.processEvents()
+        self.assertEqual(self.win.video_estimate_label.text(),
+                         "about 8 frames")
+        self.win.video_every_spin.setValue(2)
+        self.app.processEvents()
+        self.assertEqual(self.win.video_estimate_label.text(),
+                         "about 4 frames")
+        # Let the debounced re-extract settle before tearDown.
+        self.assertTrue(self._wait_for_video())
+
+    def test_no_confirm_below_threshold(self):
+        from PySide6.QtCore import QTimer
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        seen = []
+
+        def watch():
+            dialog = QApplication.activeModalWidget()
+            if dialog is not None:
+                seen.append(dialog.windowTitle())
+                dialog.accept()
+
+        watcher = QTimer()
+        watcher.timeout.connect(watch)
+        watcher.start(50)
+        try:
+            self._set_fps(4)
+            self.assertTrue(self._wait_for_video())
+        finally:
+            watcher.stop()
+        self.assertEqual(seen, [])
+        self.assertEqual(len(self.win.video_frames), 8)
+
+    def test_confirm_above_threshold_declined(self):
+        from PySide6.QtCore import QTimer
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        # Stub a long clip: 100 seconds at 8 fps = 800 frames,
+        # over the 500-frame threshold.
+        self.win.video_duration = 100.0
+        self._set_fps(8)
+        frames_before = list(self.win.video_frames)
+        seen = []
+
+        def watch():
+            dialog = QApplication.activeModalWidget()
+            if dialog is not None and isinstance(dialog, QMessageBox):
+                seen.append((dialog.windowTitle(), dialog.text()))
+                no = dialog.button(QMessageBox.StandardButton.No)
+                no.click()
+
+        watcher = QTimer()
+        watcher.timeout.connect(watch)
+        watcher.start(50)
+        try:
+            self.assertFalse(self.win._reload_video_frames())
+        finally:
+            watcher.stop()
+        self.assertEqual(len(seen), 1)
+        self.assertIn("800 frames", seen[0][0])
+        self.assertIn("800 frames", seen[0][1])
+        self.assertIsNone(self.win.video_worker)
+        self.assertEqual(self.win.video_frames, frames_before)
+        self.assertIn("cancelled",
+                      self.win.statusBar().currentMessage())
+
+    def test_confirm_above_threshold_accepted(self):
+        from PySide6.QtCore import QTimer
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        self.win.video_duration = 100.0
+        self._set_fps(8)
+        seen = []
+
+        def watch():
+            dialog = QApplication.activeModalWidget()
+            if dialog is not None and isinstance(dialog, QMessageBox):
+                seen.append(dialog.windowTitle())
+                yes = dialog.button(QMessageBox.StandardButton.Yes)
+                yes.click()
+
+        watcher = QTimer()
+        watcher.timeout.connect(watch)
+        watcher.start(50)
+        try:
+            self.assertTrue(self.win._reload_video_frames())
+        finally:
+            watcher.stop()
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(self._wait_for_video())
+        self.assertIn(len(self.win.video_frames), (15, 16))
+
+    def test_gif_imports_as_video(self):
+        from pixel_forge.gui import video_filter
+        self.assertEqual(self.win._classify_drop("clip.gif"), "video")
+        self.assertIn("*.gif", video_filter())
+        self.assertTrue(self.win.load_video(self.gif))
+        self.assertTrue(self._wait_for_video())
+        self.assertIn(len(self.win.video_frames), (15, 16))
+        self.assertEqual(self.win.video_strip.count(),
+                         len(self.win.video_frames))
+
+    def test_dropped_frame_is_dimmed(self):
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+
+        def center_alpha(item):
+            image = item.icon().pixmap(64, 64).toImage()
+            return image.pixelColor(32, 32).alpha()
+
+        kept = self.win.video_strip.item(1)
+        dropped = self.win.video_strip.item(0)
+        self.assertGreater(center_alpha(kept), 200)
+        dropped.setCheckState(Qt.CheckState.Unchecked)
+        self.app.processEvents()
+        self.assertLess(center_alpha(dropped), 150)
+        self.assertGreater(center_alpha(kept), 200)
+        # Re-checking restores the bright thumbnail.
+        dropped.setCheckState(Qt.CheckState.Checked)
+        self.app.processEvents()
+        self.assertGreater(center_alpha(dropped), 200)
+
+    def test_reorder_changes_export_and_sheet_order(self):
+        from PySide6.QtCore import QModelIndex
+        from pixel_forge.pixelize import load_image
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        self.assertEqual(self.win.video_order,
+                         list(range(len(self.win.video_frames))))
+        # Drag row 0 to position 2, through the model (the same
+        # rowsMoved path a real drag takes).
+        model = self.win.video_strip.model()
+        self.assertTrue(model.moveRows(
+            QModelIndex(), 0, 1, QModelIndex(), 3))
+        self.app.processEvents()
+        self.assertEqual(self.win.video_order[2], 0)
+        self.assertEqual(self.win.video_order[0], 1)
+        # The label keeps the ORIGINAL frame number.
+        self.assertEqual(self.win.video_strip.item(2).text(),
+                         "Frame 001")
+        # Frame export follows the strip: the first file is the
+        # frame now first in the strip (original frame 2).
+        out = os.path.join(self.tmp, "reordered-export")
+        self.assertTrue(self.win.export_frames(out))
+        first = load_image(os.path.join(out, "frame_001.png"))
+        self.assertEqual(first.data, self.win.video_frames[1].data)
+        # The sheet follows the strip too.
+        images, _names = self.win._kept_sheet_frames()
+        self.assertIs(images[0], self.win.video_frames[1])
+
+    def test_multi_select_keep_and_drop_selected(self):
+        from PySide6.QtWidgets import QAbstractItemView
+        self.assertEqual(
+            self.win.video_strip.selectionMode(),
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        self.assertFalse(self.win.video_keep_selected_btn.isEnabled())
+        self.assertFalse(self.win.video_drop_selected_btn.isEnabled())
+        self.win.video_strip.item(0).setSelected(True)
+        self.win.video_strip.item(2).setSelected(True)
+        self.app.processEvents()
+        self.assertTrue(self.win.video_keep_selected_btn.isEnabled())
+        self.assertTrue(self.win.video_drop_selected_btn.isEnabled())
+        self.win.video_drop_selected_btn.click()
+        self.app.processEvents()
+        self.assertFalse(self.win.video_keep[0])
+        self.assertTrue(self.win.video_keep[1])
+        self.assertFalse(self.win.video_keep[2])
+        self.win.video_keep_selected_btn.click()
+        self.app.processEvents()
+        self.assertTrue(all(self.win.video_keep))
+
+    def test_no_frame_preselected(self):
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        self.assertEqual(self.win.video_strip.selectedItems(), [])
+        self.assertEqual(self.win.video_strip.currentRow(), -1)
+
+
 if __name__ == "__main__":
     unittest.main()

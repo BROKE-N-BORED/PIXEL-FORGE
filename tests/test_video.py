@@ -10,6 +10,7 @@ import io
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -351,6 +352,83 @@ class FramesCliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("bad --size", err)
         self.assertNotIn("Traceback", err)
+
+
+class VideoGuardrailTests(unittest.TestCase):
+    """Task 25: the frame-count estimate (pure math, no ffmpeg
+    needed) and the confirm threshold."""
+
+    def test_gif_is_a_video_extension(self):
+        self.assertIn(".gif", video_mod.VIDEO_EXTENSIONS)
+
+    def test_estimate_duration_times_fps(self):
+        self.assertEqual(
+            video_mod.estimate_frame_count(30, 8), 240)
+
+    def test_estimate_every_nth_divides(self):
+        self.assertEqual(
+            video_mod.estimate_frame_count(30, 24, every=2), 360)
+
+    def test_estimate_honors_start_and_end(self):
+        self.assertEqual(
+            video_mod.estimate_frame_count(30, 8, start=5, end=10),
+            40)
+
+    def test_estimate_end_clamps_to_duration(self):
+        self.assertEqual(
+            video_mod.estimate_frame_count(30, 8, start=25, end=99),
+            40)
+
+    def test_estimate_zero_span_is_zero(self):
+        self.assertEqual(
+            video_mod.estimate_frame_count(30, 8, start=40), 0)
+
+    def test_estimate_rounds_up(self):
+        # An estimate that under-counts would let a huge run
+        # through unchallenged.
+        self.assertEqual(
+            video_mod.estimate_frame_count(0.1, 8), 1)
+
+    def test_estimate_unknown_is_none(self):
+        self.assertIsNone(video_mod.estimate_frame_count(None, 8))
+        self.assertIsNone(video_mod.estimate_frame_count(30, None))
+
+    def test_confirm_threshold_is_500(self):
+        self.assertEqual(video_mod.FRAME_COUNT_CONFIRM, 500)
+
+
+@unittest.skipUnless(HAS_FFMPEG, "ffmpeg not installed")
+class VideoProbeTests(unittest.TestCase):
+    """Task 25: ffprobe duration + GIF extraction (real ffmpeg)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.clip = make_test_video(os.path.join(cls.tmp, "clip.mp4"))
+
+    def test_probe_duration_reads_a_real_clip(self):
+        duration = video_mod.probe_duration(self.clip)
+        self.assertIsNotNone(duration)
+        self.assertAlmostEqual(duration, 2.0, delta=0.1)
+
+    def test_probe_duration_missing_file_is_none(self):
+        self.assertIsNone(video_mod.probe_duration(
+            os.path.join(self.tmp, "nope.mp4")))
+
+    def test_probe_duration_garbage_is_none(self):
+        junk = os.path.join(self.tmp, "junk.mp4")
+        with open(junk, "wb") as handle:
+            handle.write(b"not a video at all")
+        self.assertIsNone(video_mod.probe_duration(junk))
+
+    def test_gif_extracts_frames(self):
+        gif = os.path.join(self.tmp, "clip.gif")
+        subprocess.run(["ffmpeg", "-y", "-v", "error",
+                        "-i", self.clip, "-vf", "fps=8,scale=64:48",
+                        gif], check=True, timeout=60)
+        out = os.path.join(self.tmp, "gif-frames")
+        frames = video_mod.extract_frames(gif, out, fps=8)
+        self.assertIn(len(frames), (15, 16))
 
 
 if __name__ == "__main__":
