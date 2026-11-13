@@ -481,6 +481,28 @@ class LibraryCliTests(unittest.TestCase):
         self.assertIn("My Look — 48 x 48, pico8, 8 colors", out)
         self.assertNotIn("My Look (built-in)", out)
 
+    def test_presets_list_warns_about_skipped_preset(self):
+        # Task 61: one bad entry must not hide the good presets —
+        # they list, and the bad one warns on stderr, name + reason.
+        os.makedirs(self.lib_dir, exist_ok=True)
+        good = {"width": 48, "height": 48, "keep_aspect": True,
+                "palette": "pico8", "max_colors": 8, "dither": False}
+        with open(os.path.join(self.lib_dir, "presets.json"),
+                  "w") as handle:
+            json.dump({"format": "pixel-forge-presets", "version": 1,
+                       "presets": {"Good One": good,
+                                   "Broken": dict(good, width=0),
+                                   "Good Two": dict(good, width=16)}},
+                      handle)
+        code, out, err = self._run(["presets", "list"])
+        self.assertEqual(code, 0)
+        self.assertIn("Good One — 48 x 48, pico8, 8 colors", out)
+        self.assertIn("Good Two — 16 x 48, pico8, 8 colors", out)
+        self.assertNotIn("Broken", out)
+        self.assertIn("pixel-forge: skipped preset 'Broken'", err)
+        self.assertIn("size", err)
+        self.assertNotIn("Traceback", err)
+
 
 class CodeCliTests(unittest.TestCase):
     @classmethod

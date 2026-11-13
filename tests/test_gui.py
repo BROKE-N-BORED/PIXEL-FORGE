@@ -1591,6 +1591,75 @@ class PresetGuiTests(unittest.TestCase):
             self.assertNotIn("&", text, "bare & in visible text: %r"
                              % text)
 
+    def _window_with_presets(self, presets):
+        """A fresh window whose library already holds `presets`
+        (a name -> settings dict) in presets.json. The setUp
+        window is closed first; tearDown closes this one."""
+        from pixel_forge.gui import MainWindow
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        os.makedirs(lib_dir)
+        with open(os.path.join(lib_dir, "presets.json"), "w") as f:
+            json.dump({"format": "pixel-forge-presets", "version": 1,
+                       "presets": presets}, f)
+        self.win = MainWindow(library_dir=lib_dir)
+        self.app.processEvents()
+        return self.win
+
+    def _warning_labels(self):
+        return (self.win.preset_warning_label,
+                self.win.video_preset_warning_label,
+                self.win.prompt_preset_warning_label)
+
+    def test_skipped_preset_warning_visible_on_all_tabs(self):
+        # Task 61: the warning must be VISIBLE, not just the
+        # status bar — one label under each picker, naming the
+        # skipped preset, while the good presets still list.
+        good = {"width": 32, "height": 32, "keep_aspect": False,
+                "palette": "pico8", "max_colors": 8, "dither": True}
+        self._window_with_presets(
+            {"My Look": good,
+             "Game Boy 32": dict(good, palette="gameboy"),
+             "Broken": dict(good, width=0)})
+        for label in self._warning_labels():
+            self.assertFalse(label.isHidden())
+            self.assertIn("Preset 'Broken' skipped", label.text())
+            self.assertIn("size", label.text())
+        for combo in (self.win.preset_combo,
+                      self.win.video_preset_combo,
+                      self.win.prompt_preset_combo):
+            items = [combo.itemText(i)
+                     for i in range(combo.count())]
+            self.assertIn("My Look", items)
+            self.assertIn("Game Boy 32 (custom)", items)
+            self.assertNotIn("Broken", items)
+
+    def test_all_bad_presets_show_warning_and_builtins_only(self):
+        good = {"width": 32, "height": 32, "keep_aspect": False,
+                "palette": "pico8", "max_colors": 8, "dither": True}
+        self._window_with_presets(
+            {"Broken": dict(good, width=0),
+             "Also Broken": dict(good, palette="sepia")})
+        for label in self._warning_labels():
+            self.assertFalse(label.isHidden())
+            self.assertIn("Preset 'Broken' skipped", label.text())
+            self.assertIn("Preset 'Also Broken' skipped",
+                          label.text())
+        for combo in (self.win.preset_combo,
+                      self.win.video_preset_combo,
+                      self.win.prompt_preset_combo):
+            items = [combo.itemText(i)
+                     for i in range(combo.count())]
+            self.assertEqual(items, ["Custom", "Game Boy 32",
+                                     "PICO-8 64", "Detailed 64"])
+
+    def test_no_warning_label_when_no_skips(self):
+        for label in self._warning_labels():
+            self.assertTrue(label.isHidden())
+            self.assertEqual(label.text(), "")
+
 
 class SheetLibraryGuiTests(unittest.TestCase):
     """Saving a spritesheet to the library needs a real video."""

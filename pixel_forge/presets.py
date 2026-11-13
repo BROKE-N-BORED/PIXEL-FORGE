@@ -99,6 +99,12 @@ class PresetStore:
         self.directory = (Path(directory) if directory is not None
                           else default_library_dir())
         self._user = None
+        # The presets dict exactly as loaded (valid + skipped, in
+        # file order), so a save can keep skipped entries verbatim;
+        # and one (name, reason) pair per skipped preset, in file
+        # order. Same shape as the library's skipped entries.
+        self._raw_presets = None
+        self._skipped = None
 
     @property
     def presets_path(self):
@@ -110,6 +116,8 @@ class PresetStore:
         path = self.presets_path
         if not path.exists():
             self._user = {}
+            self._raw_presets = {}
+            self._skipped = []
             return
         try:
             data = json.loads(path.read_text())
@@ -124,23 +132,61 @@ class PresetStore:
         if not isinstance(stored, dict):
             raise PixelForgeError(
                 "presets file is malformed: %s" % path)
-        clean = {}
+        # A bad preset is skipped, not fatal — one invalid entry
+        # used to drop every user preset. The skipped entries
+        # stay in the file (see _save); their reasons are
+        # reported through skipped_presets().
+        self._raw_presets = stored
+        self._user = {}
+        self._skipped = []
         for name, settings in stored.items():
             try:
-                clean[name] = validate_settings(settings)
+                self._user[name] = validate_settings(settings)
             except PixelForgeError as exc:
-                raise PixelForgeError(
-                    "preset %r is invalid: %s" % (name, exc))
-        self._user = clean
+                self._skipped.append((name, str(exc)))
 
     def _save(self):
         self.directory.mkdir(parents=True, exist_ok=True)
         tmp = self.presets_path.with_suffix(".json.tmp")
+        # Skipped entries stay in the file, verbatim and in their
+        # original positions — a save never deletes data the load
+        # could not use. A name that is now valid (the user saved
+        # over a skipped preset) takes the current settings at
+        # the skipped entry's position; a deleted name drops out;
+        # brand-new presets go at the end.
+        out = {}
+        for name, raw in (self._raw_presets or {}).items():
+            if name in self._user:
+                out[name] = self._user[name]
+                continue
+            try:
+                validate_settings(raw)
+            except PixelForgeError:
+                out[name] = raw
+        for name, settings in self._user.items():
+            if name not in out:
+                out[name] = settings
         payload = {"format": PRESETS_FORMAT,
                    "version": PRESETS_VERSION,
-                   "presets": self._user}
+                   "presets": out}
         tmp.write_text(json.dumps(payload, indent=2) + "\n")
         os.replace(tmp, self.presets_path)
+        self._raw_presets = out
+        self._skipped = []
+        for name, settings in out.items():
+            try:
+                validate_settings(settings)
+            except PixelForgeError as exc:
+                self._skipped.append((name, str(exc)))
+
+    def skipped_presets(self):
+        """Why each skipped user preset was skipped, in file
+        order — a list of (name, reason) pairs, e.g. ("Broken",
+        "preset size must be whole numbers from 1 to 512").
+        Skipped presets stay in presets.json — they are never
+        deleted or rewritten."""
+        self._load()
+        return list(self._skipped)
 
     def user_presets(self):
         """Name -> settings for user presets only (copies)."""

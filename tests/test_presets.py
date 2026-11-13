@@ -159,17 +159,85 @@ class PresetStoreTests(unittest.TestCase):
             PresetStore(lib_dir).all_presets()
         self.assertIn("unreadable", str(ctx.exception))
 
-    def test_invalid_stored_preset_raises_with_name(self):
+    def _write_presets(self, presets):
+        """A presets.json holding exactly `presets` (a name ->
+        settings dict, kept in order). Returns the library dir."""
         lib_dir = os.path.join(self.tmp, "lib")
-        os.makedirs(lib_dir)
+        os.makedirs(lib_dir, exist_ok=True)
         with open(os.path.join(lib_dir, "presets.json"), "w") as f:
             json.dump({"format": "pixel-forge-presets",
-                       "version": 1,
-                       "presets": {"Broken": dict(GOOD, width=0)}},
-                      f)
-        with self.assertRaises(PixelForgeError) as ctx:
-            PresetStore(lib_dir).all_presets()
-        self.assertIn("Broken", str(ctx.exception))
+                       "version": 1, "presets": presets}, f, indent=2)
+        return lib_dir
+
+    def test_one_bad_preset_skipped_good_ones_load(self):
+        # Task 61: one bad entry used to drop EVERY user preset.
+        lib_dir = self._write_presets(
+            {"Apple": dict(GOOD), "Broken": dict(GOOD, width=0),
+             "Zebra": dict(GOOD, width=64)})
+        store = PresetStore(lib_dir)
+        self.assertEqual(sorted(store.user_presets()),
+                         ["Apple", "Zebra"])
+        self.assertEqual(store.get("Apple"), GOOD)
+        skipped = store.skipped_presets()
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0][0], "Broken")
+        self.assertIn("size", skipped[0][1])
+        # The built-ins still list ahead of the good user presets.
+        self.assertEqual(
+            [(name, builtin)
+             for name, _s, builtin in store.all_presets()],
+            [("Game Boy 32", True), ("PICO-8 64", True),
+             ("Detailed 64", True), ("Apple", False),
+             ("Zebra", False)])
+
+    def test_all_bad_presets_fall_back_to_builtins(self):
+        lib_dir = self._write_presets(
+            {"Broken": dict(GOOD, width=0),
+             "Also Broken": dict(GOOD, palette="sepia")})
+        store = PresetStore(lib_dir)
+        self.assertEqual(store.user_presets(), {})
+        self.assertEqual([name for name, _r in store.skipped_presets()],
+                         ["Broken", "Also Broken"])
+        self.assertEqual([name for name, _s, _b in store.all_presets()],
+                         ["Game Boy 32", "PICO-8 64", "Detailed 64"])
+
+    def test_save_preserves_skipped_entry_verbatim(self):
+        bad = dict(GOOD, width=0)
+        lib_dir = self._write_presets(
+            {"Apple": dict(GOOD), "Broken": bad,
+             "Zebra": dict(GOOD, width=64)})
+        path = os.path.join(lib_dir, "presets.json")
+        with open(path, "rb") as handle:
+            before = handle.read()
+        store = PresetStore(lib_dir)
+        store.user_presets()
+        # Loading alone never rewrites the file.
+        with open(path, "rb") as handle:
+            self.assertEqual(handle.read(), before)
+        # And a later save keeps the bad entry verbatim, in its
+        # original position — nothing lost.
+        store.save("Newcomer", dict(GOOD, width=16))
+        with open(path) as f:
+            saved = json.load(f)["presets"]
+        self.assertEqual(list(saved),
+                         ["Apple", "Broken", "Zebra", "Newcomer"])
+        self.assertEqual(saved["Broken"], bad)
+        self.assertEqual(saved["Newcomer"], dict(GOOD, width=16))
+        # The skip survives the save, still reported.
+        self.assertEqual([name for name, _r in store.skipped_presets()],
+                         ["Broken"])
+
+    def test_save_same_name_as_skipped_replaces_it(self):
+        lib_dir = self._write_presets(
+            {"Broken": dict(GOOD, width=0)})
+        store = PresetStore(lib_dir)
+        self.assertEqual(len(store.skipped_presets()), 1)
+        store.save("Broken", dict(GOOD, width=16))
+        self.assertEqual(store.skipped_presets(), [])
+        self.assertEqual(store.get("Broken"), dict(GOOD, width=16))
+        with open(os.path.join(lib_dir, "presets.json")) as f:
+            saved = json.load(f)["presets"]
+        self.assertEqual(saved["Broken"], dict(GOOD, width=16))
 
 
 if __name__ == "__main__":

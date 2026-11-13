@@ -631,6 +631,17 @@ class MainWindow(QMainWindow):
             lambda _i, t=tab: self._on_library_preset(t))
         form.addWidget(combo)
         setattr(self, prefix + "preset_combo", combo)
+        # A skipped user preset warns HERE, in the open — the old
+        # status-bar-only message was easy to miss, and the
+        # pickers silently dropping to built-ins-only looked like
+        # the user's presets had vanished. Hidden when there is
+        # nothing to warn about; updated by _refresh_preset_combos.
+        warning = QLabel()
+        warning.setStyleSheet("color: #ffb066;")
+        warning.setWordWrap(True)
+        warning.setVisible(False)
+        form.addWidget(warning)
+        setattr(self, prefix + "preset_warning_label", warning)
         button_row = QHBoxLayout()
         save_btn = QPushButton("Save current as preset")
         save_btn.clicked.connect(
@@ -2682,6 +2693,8 @@ class MainWindow(QMainWindow):
             "colors": getattr(self, prefix + "colors_spin"),
             "dither": getattr(self, prefix + "dither_check"),
             "preset_combo": getattr(self, prefix + "preset_combo"),
+            "preset_warning": getattr(
+                self, prefix + "preset_warning_label"),
             "delete_btn": getattr(self, prefix + "preset_delete_btn"),
         }
 
@@ -2748,15 +2761,27 @@ class MainWindow(QMainWindow):
     def _refresh_preset_combos(self):
         """Rebuild all three preset pickers from the store,
         keeping each tab's selection when the preset still
-        exists. A corrupt presets file shows in the status bar
-        and leaves the pickers with Custom only."""
+        exists. A skipped user preset shows in the warning label
+        under each picker; only a wholly unreadable presets file
+        shows in the status bar and leaves the pickers with
+        Custom only."""
         try:
             presets = self.preset_store.all_presets()
+            skipped = self.preset_store.skipped_presets()
         except PixelForgeError as exc:
             self.statusBar().showMessage(str(exc))
             presets = []
+            skipped = []
         for tab in ("image", "video", "prompt"):
             controls = self._tab_controls(tab)
+            warning = controls["preset_warning"]
+            if skipped:
+                warning.setText("\n".join(
+                    "Preset %r skipped: %s" % (name, reason)
+                    for name, reason in skipped))
+                warning.setVisible(True)
+            else:
+                warning.setVisible(False)
             combo = controls["preset_combo"]
             current = combo.currentData()
             combo.blockSignals(True)

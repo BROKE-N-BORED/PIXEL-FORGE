@@ -1,6 +1,6 @@
 [project]
 name = "pixel-forge"
-version = "0.20"
+version = "0.21"
 description = "Turn images, videos, and prompts into pixel art and sprites — standalone Linux program, local models only, no network at run time."
 requires-python = ">=3.10"
 authors = [{ name = "Broke n' Bored Studio" }]

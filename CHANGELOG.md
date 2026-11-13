@@ -1,5 +1,35 @@
 # Pixel Forge changelog
 
+## 0.21 — 2026-11-13
+
+User presets are fail-soft now — task-list item #61 (repo-audit
+Top 5 #5). One invalid entry in presets.json used to drop EVERY
+user preset (the load raised on the first bad one, and the pickers
+fell back to built-ins only); now the bad preset is skipped, the
+good ones load, and the skip is warned about where the user can
+see it.
+
+- `PresetStore._load` validates each user preset on its own and
+  collects the failures in a new `skipped_presets()` list of
+  (name, reason) pairs, same shape as the library's skipped
+  entries. A wholly unparseable presets.json still raises, exactly
+  like the library's unparseable index — only per-entry failures
+  go fail-soft.
+- `_save` preserves skipped entries verbatim, in their original
+  positions — saving a good preset never deletes or rewrites the
+  bad entry. Saving over a skipped preset's name replaces it with
+  the good settings (the user fixed it).
+- CLI: `pixel-forge presets list` prints one `skipped preset
+  'Name': <reason>` line per bad preset on stderr and still lists
+  the good ones.
+- GUI: a warning label under the preset picker on the Image, Video,
+  and Prompt tabs names each skipped preset and why — the old
+  status-bar-only message was easy to miss, and the pickers
+  silently dropping to built-ins-only looked like the presets had
+  vanished. No modal dialog: a bad preset is not worth
+  interrupting the user. The label hides when there is nothing to
+  warn about.
+
 ## 0.20 — 2026-11-13
 
 Folder code import is per-file now — task-list item #65 (repo-audit

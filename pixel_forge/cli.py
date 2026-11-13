@@ -378,6 +378,12 @@ def cmd_presets_list(_args):
                   settings["palette"], settings["max_colors"],
                   "on" if settings["dither"] else "off",
                   "on" if settings["keep_aspect"] else "off"))
+    # Files that failed to parse are reported, never swallowed:
+    # one line each, name + reason, on stderr — the good presets
+    # still listed above.
+    for name, reason in store.skipped_presets():
+        print("pixel-forge: skipped preset %r: %s"
+              % (name, reason), file=sys.stderr)
     return 0
 
 
