@@ -132,6 +132,14 @@ bash uninstall.sh
   detects, and Library location (with an Open folder button).
   Every control has a one-line tooltip — hover to see what it
   does.
+- **Polish:** preview zoom fits the pane when something loads,
+  with a Fit button beside every zoom slider; the status bar
+  says what each tab is for when you switch to it; error
+  dialogs say what failed in their title; the prompt field has
+  a character counter ("N / 1000"); exports default to a
+  filename next to the source file, or the last-used export
+  folder when there is no source; and the window title shows
+  the version.
 
 **Command line:**
 

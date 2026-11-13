@@ -1,5 +1,79 @@
 # Pixel Forge changelog
 
+## 0.33 — 2026-11-13
+
+Polish pass — task-list item #22, thirteen sub-items in one
+release. Nothing here changes what Pixel Forge does; everything
+here makes what it does easier to read, find, and trust:
+
+- Export button contrast now meets WCAG AA: the export buttons'
+  text (#e8e6e3) on their background measured 3.84:1 — under the
+  4.5:1 bar. The background is now #8a4513 (5.73:1) with a
+  #9a4c15 hover (4.93:1). The disabled state is unchanged:
+  WCAG exempts disabled controls.
+- The "Found but not rendered" box on the Code tab is taller
+  (110 px, about five lines before scrolling, up from 72) and
+  its heading carries a skip count — "Found but not rendered
+  (3 skipped)" — so a long list reads at a glance.
+- No more "(s)" programmer phrasing anywhere a user can see it:
+  "7 asset(s)" is "7 assets", "1 asset" for one, in the GUI,
+  the CLI, and the installer alike — via a shared plural()
+  helper in pixelize.py. A test forbids "(s)" in every string
+  literal in the package.
+- The status bar updates on every tab switch, one plain line
+  per tab saying what it shows and what to do next.
+- Preview zoom now fits the pane on load — Image, Video,
+  Prompt, and Code tabs alike — with a Fit button beside every
+  zoom slider to return to it. A re-pixelize or a control
+  change never snaps the zoom back; only a new load fits.
+- The Library tab shows display labels, not stored keys: a
+  sprite's info reads "Palette: From image" and "From: Skin",
+  not "image" and "skin". Unknown keys still show as-is rather
+  than vanishing.
+- The disabled Export parts button's tooltip now says WHY it
+  is disabled — "Load a Minecraft skin to export its parts"
+  before anything is loaded, "Only Minecraft skins have parts
+  to export" for code or a texture — instead of only describing
+  what the button would do. (This Qt build shows tooltips on
+  disabled widgets; verified live, so no workaround was needed.)
+- Every error/warning dialog's title says what failed —
+  "Could not import video", "Generation failed", "Batch folder
+  missing" — instead of the generic "Pixel Forge", and messages
+  start with a capital letter, via a shared warn_dialog()
+  helper. The two overwrite/regenerate questions got real titles
+  too ("Overwrite frames?", "Generate a new batch?").
+- The model download is one click away: an "Open download
+  page" button under the Prompt status line, visible only while
+  no model is found, opening the pinned model's Hugging Face
+  page (MODEL_URL, the same URL the installer downloads from).
+- A prompt character counter sits under the prompt field —
+  "N / 1000", turning warning-orange past the limit, which is
+  the same MAX_PROMPT_LEN validate_prompt() enforces.
+- Consistent export filename defaults: every export dialog
+  defaults to a filename next to the source file; with no
+  source file it defaults to the last-used export folder,
+  remembered in export-folders.json in the library folder
+  (fail-soft if unreadable). The prompt keeper and library
+  exports use the last-used folder — the batch folder is
+  internal storage and the library folder is the store, so
+  neither is a sensible default.
+- The spritesheet preview dialog's sheet no longer sits hard
+  against the scrollbar: 8 px of breathing room around it.
+- The window title shows the version: "Pixel Forge 0.33",
+  from __version__, never hardcoded.
+- Fixed in place while polishing: the preset button row (Save
+  current as preset + Delete preset, side by side) measured
+  269 px at the dark stylesheet's button padding — wider than
+  the control column's 252 px viewport whenever the scrollbar
+  shows — so the whole column overflowed and the right edge of
+  every widget clipped (the new counter read "0 / 10", the
+  Prompt status lines broke mid-word). The two buttons now use
+  slimmer horizontal padding, the row is 237 px, and everything
+  fits. Every earlier screenshot ran without the stylesheet,
+  where the default padding is smaller and the row fit — which
+  is why the clip was never seen before. A test pins the row
+  against the real viewport width, with the stylesheet applied.
+
 ## 0.32 — 2026-11-13
 
 Shortcuts + menus + help — task-list item #21:

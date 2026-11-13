@@ -49,6 +49,17 @@ INDEX_NAME = "library.json"
 KINDS = ("sprite", "sheet")
 SOURCES = ("image", "video", "prompt", "code", "skin", "file")
 
+# What the Library tab shows for each source key — the stored key
+# ("image") never reaches the user, the label does (task 22).
+SOURCE_LABELS = {
+    "image": "Image",
+    "video": "Video",
+    "prompt": "Prompt",
+    "code": "Code",
+    "skin": "Skin",
+    "file": "File",
+}
+
 
 def default_library_dir():
     """Where the library lives: PIXELFORGE_LIBRARY, or

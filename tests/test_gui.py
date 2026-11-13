@@ -72,10 +72,14 @@ class GuiTests(unittest.TestCase):
         self.app.processEvents()
 
     def test_window_shows_with_title(self):
+        # Task 22: the title carries the version, from
+        # __version__ — never hardcoded, so it cannot drift.
+        from pixel_forge import __version__
         self.win.show()
         self.app.processEvents()
         self.assertTrue(self.win.isVisible())
-        self.assertEqual(self.win.windowTitle(), "Pixel Forge")
+        self.assertEqual(self.win.windowTitle(),
+                         "Pixel Forge %s" % __version__)
 
     def test_window_fits_a_768px_screen(self):
         # Regression (v0.6 review, W1): the window opened 1020x872
@@ -145,12 +149,16 @@ class GuiTests(unittest.TestCase):
     def test_original_preview_fits_whole_image(self):
         # The Original preview fits its pane whole; zoom applies to
         # the Pixel art side only. (A 200x100 source at 8x zoom would
-        # otherwise show just one corner of sky.)
+        # otherwise show just one corner of sky.) The Pixel art side
+        # is the 32x32 result at the current zoom — the fit zoom
+        # since task 22, not the old fixed 8x.
         self.win.load_image(self.src)
         before = self.win.before_label.pixmap()
         self.assertLessEqual(max(before.width(), before.height()), 352)
         after = self.win.after_label.pixmap()
-        self.assertEqual((after.width(), after.height()), (256, 256))
+        zoom = self.win.zoom_slider.value()
+        self.assertEqual((after.width(), after.height()),
+                         (32 * zoom, 32 * zoom))
 
     def test_palette_change_repixelizes(self):
         self.win.load_image(self.src)
@@ -1093,7 +1101,8 @@ class PromptGuiTests(unittest.TestCase):
         with mock.patch.object(gui_mod.QMessageBox, "warning") as warn:
             self.win._on_prompt_generate()
         self.assertTrue(warn.called)
-        self.assertIn("type a prompt first", warn.call_args[0][2])
+        # Task 22: messages start with a capital letter.
+        self.assertIn("Type a prompt first", warn.call_args[0][2])
         self.assertIsNone(self.win.prompt_worker)
 
     def test_prompt_cancel_with_corrupt_batch_shows_dialog(self):
@@ -1183,7 +1192,7 @@ class PromptGuiTests(unittest.TestCase):
             self.win._on_prompt_generate()
         self.assertTrue(ask.called)
         text = ask.call_args[0][2]
-        self.assertIn("3 candidate(s)", text)
+        self.assertIn("3 candidates", text)
         self.assertIn("keeper", text)
         self.assertEqual(ask.call_args[0][4],
                          QMessageBox.StandardButton.No)
@@ -1254,7 +1263,7 @@ class PromptGuiTests(unittest.TestCase):
             self.win._on_prompt_generate()
         self.assertTrue(ask.called)
         text = ask.call_args[0][2]
-        self.assertIn("3 candidate(s)", text)
+        self.assertIn("3 candidates", text)
         self.assertNotIn("keeper", text)
 
     def test_generation_does_not_block_gui(self):
@@ -1866,7 +1875,7 @@ class LibraryGuiTests(unittest.TestCase):
         self.assertEqual(self.win.library_list.count(), 1)
         self.assertEqual(self.win.library_list.item(0).text(),
                          "Red Knight")
-        self.assertIn("1 sprite(s)",
+        self.assertIn("1 sprite",
                       self.win.library_count_label.text())
 
     def test_save_prompt_keeper_to_library(self):
@@ -2498,7 +2507,7 @@ class CodeTabTests(unittest.TestCase):
         pixmap = self.win.code_preview_label.pixmap()
         self.assertIsNotNone(pixmap)
         self.assertFalse(pixmap.isNull())
-        self.assertIn("1 file(s) skipped",
+        self.assertIn("1 file skipped",
                       self.win.statusBar().currentMessage())
 
     def test_load_code_clears_stale_skipped_lines(self):
@@ -3153,6 +3162,317 @@ class ShortcutsMenusTests(unittest.TestCase):
                          "controls without a tooltip: %r" % missing)
         self.assertGreaterEqual(total, 80,
                                 "only %d controls audited" % total)
+
+
+class PolishTests(unittest.TestCase):
+    """Task 22 polish pass. Contrast and the "(s)" ban are in
+    test_polish.py (bare python); everything here needs the real
+    window."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        cls.src = write_image(make_gradient_image(),
+                              os.path.join(cls.tmp, "photo.png"))
+        skin = make_solid_image(64, 64, 10, 20, 30)
+        cls.skin = write_image(skin,
+                               os.path.join(cls.tmp, "skin.png"))
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self.win = MainWindow(library_dir=self.lib_dir)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def test_status_bar_updates_on_tab_switch(self):
+        hints = {
+            "Image": "Import an image to turn it into a pixel sprite.",
+            "Video": "Import a video to turn its frames into sprites.",
+            "Prompt": "Describe a sprite and press Generate.",
+            "Code": ("Import code or a game asset to see the sprites "
+                     "it defines."),
+            "Library": "Your saved sprites — click one to preview it.",
+        }
+        # Tab 0 is already current at startup, so currentChanged
+        # never fires for it until another tab is visited first —
+        # visit it last.
+        for index in [1, 2, 3, 4, 0]:
+            self.win.tabs.setCurrentIndex(index)
+            self.app.processEvents()
+            name = self.win.tabs.tabText(index)
+            self.assertEqual(self.win.statusBar().currentMessage(),
+                             hints[name], "tab %s" % name)
+
+    def test_fit_zoom_on_image_load(self):
+        self.win.show()
+        self.app.processEvents()
+        self.app.processEvents()
+        self.assertTrue(self.win.load_image(self.src))
+        self.app.processEvents()
+        result = self.win.result_image
+        viewport = self.win.after_scroll.viewport()
+        fit = min(viewport.width() / result.width(),
+                  viewport.height() / result.height())
+        expected = max(1, min(16, int(fit)))
+        self.assertEqual(self.win.zoom_slider.value(), expected,
+                         "viewport %d x %d, result %d x %d"
+                         % (viewport.width(), viewport.height(),
+                            result.width(), result.height()))
+
+    def test_fit_button_refits_after_manual_change(self):
+        self.win.show()
+        self.app.processEvents()
+        self.app.processEvents()
+        self.assertTrue(self.win.load_image(self.src))
+        fitted = self.win.zoom_slider.value()
+        other = 1 if fitted != 1 else 16
+        self.win.zoom_slider.setValue(other)
+        self.assertEqual(self.win.zoom_slider.value(), other)
+        self.win.zoom_fit_btn.click()
+        self.assertEqual(self.win.zoom_slider.value(), fitted)
+
+    def test_repixelize_keeps_zoom(self):
+        # A control change re-pixelizes but must not snap the
+        # zoom back — only a new load fits.
+        self.win.show()
+        self.app.processEvents()
+        self.app.processEvents()
+        self.assertTrue(self.win.load_image(self.src))
+        self.win.zoom_slider.setValue(3)
+        self.win.colors_spin.setValue(4)
+        self.app.processEvents()
+        self.assertEqual(self.win.zoom_slider.value(), 3)
+
+    def test_library_shows_display_labels(self):
+        self.win.library.add_image(
+            make_solid_image(32, 32, 255, 0, 0), "Knight",
+            source="skin", palette="pico8")
+        self.win.tabs.setCurrentIndex(4)
+        self.app.processEvents()
+        item = self.win.library_list.item(0)
+        self.win.library_list.setCurrentItem(item)
+        self.win._on_library_item_clicked(item)
+        text = self.win.library_info_label.text()
+        self.assertIn("PICO-8", text)
+        self.assertIn("Skin", text)
+        self.assertNotIn("Palette: pico8", text)
+        self.assertNotIn("From: skin", text)
+
+    def test_error_dialog_title_names_the_failure(self):
+        # The real dialog, opened by a real failure — a QTimer
+        # watcher reads its title and closes it.
+        from PySide6.QtCore import QTimer
+        bad = os.path.join(self.tmp, "bad.png")
+        with open(bad, "wb") as handle:
+            handle.write(b"not a png at all")
+        seen = []
+
+        def watch():
+            dialog = QApplication.activeModalWidget()
+            if dialog is not None and isinstance(dialog, QMessageBox):
+                seen.append((dialog.windowTitle(), dialog.text()))
+                dialog.accept()
+
+        watcher = QTimer()
+        watcher.timeout.connect(watch)
+        watcher.start(50)
+        try:
+            self.assertFalse(self.win.load_image(bad))
+        finally:
+            watcher.stop()
+        self.assertEqual(len(seen), 1)
+        title, message = seen[0]
+        self.assertEqual(title, "Could not import image")
+        self.assertTrue(message[:1].isupper(),
+                        "message starts lowercase: %r" % message)
+
+    def test_prompt_counter(self):
+        from pixel_forge.imagegen import MAX_PROMPT_LEN
+        self.assertEqual(self.win.prompt_counter_label.text(),
+                         "0 / 1000")
+        self.win.prompt_edit.setText("hello")
+        self.assertEqual(self.win.prompt_counter_label.text(),
+                         "5 / 1000")
+        self.assertEqual(self.win.prompt_counter_label.styleSheet(),
+                         "")
+        self.win.prompt_edit.setText("x" * (MAX_PROMPT_LEN + 1))
+        self.assertEqual(self.win.prompt_counter_label.text(),
+                         "1001 / 1000")
+        self.assertIn("#ffb066",
+                      self.win.prompt_counter_label.styleSheet())
+
+    def test_export_default_next_to_source(self):
+        from unittest import mock
+        self.assertTrue(self.win.load_image(self.src))
+        seen = []
+
+        def fake_dialog(*args, **kwargs):
+            seen.append(args[2])
+            return ("", "")
+
+        with mock.patch.object(QFileDialog, "getSaveFileName",
+                               side_effect=fake_dialog):
+            self.win._on_export()
+        self.assertEqual(seen, [os.path.join(self.tmp,
+                                             "photo-pixel.png")])
+
+    def test_export_default_uses_last_used_folder(self):
+        folder = tempfile.mkdtemp()
+        self.assertIsNone(self.win._last_export_dir())
+        self.win._remember_export_dir(folder)
+        self.assertEqual(self.win._last_export_dir(), folder)
+        self.assertEqual(
+            self.win._export_default("sprite.png"),
+            os.path.join(folder, "sprite.png"))
+        # A source file beats the remembered folder.
+        self.assertEqual(
+            self.win._export_default("sprite.png", "/src/photo.png"),
+            "/src/sprite.png")
+        # The folder survives a new window on the same library.
+        from pixel_forge.gui import MainWindow
+        other = MainWindow(library_dir=self.lib_dir)
+        try:
+            self.assertEqual(other._last_export_dir(), folder)
+        finally:
+            other.close()
+            other.deleteLater()
+            self.app.processEvents()
+        # A corrupt record falls back silently.
+        self.win._export_folders_path().write_text(
+            "not json", encoding="utf-8")
+        self.assertIsNone(self.win._last_export_dir())
+        self.assertEqual(self.win._export_default("sprite.png"),
+                         "sprite.png")
+        # A remembered folder that no longer exists is ignored.
+        gone = os.path.join(tempfile.mkdtemp(), "gone")
+        self.win._remember_export_dir(gone)
+        self.assertIsNone(self.win._last_export_dir())
+
+    def test_skipped_box_is_taller_and_counts_skips(self):
+        # A folder with one good file and one unparseable file:
+        # the good assets import, the bad file is counted.
+        from PySide6.QtWidgets import QScrollArea
+        good = os.path.join(self.tmp, "good.py")
+        with open(good, "w", encoding="utf-8") as handle:
+            handle.write("HERO = [[1, 0], [0, 1]]\n")
+        bad = os.path.join(self.tmp, "bad.py")
+        with open(bad, "w", encoding="utf-8") as handle:
+            handle.write("this is not python (\n")
+        self.assertTrue(self.win.load_code([good, bad]))
+        self.assertEqual(
+            self.win.code_skipped_heading.text(),
+            "Found but not rendered (1 skipped)")
+        scrolls = [w for w in self.win.findChildren(QScrollArea)
+                   if w.widget() is self.win.code_skipped_label]
+        self.assertEqual(len(scrolls), 1)
+        self.assertEqual(scrolls[0].minimumHeight(), 110)
+        self.assertEqual(scrolls[0].maximumHeight(), 110)
+
+    def test_download_button_visible_without_model(self):
+        from unittest import mock
+        from pathlib import Path
+        from pixel_forge import imagegen as imagegen_mod
+        with mock.patch.object(imagegen_mod, "find_engine",
+                               return_value=None), \
+                mock.patch.object(imagegen_mod, "find_model",
+                                  return_value=None):
+            self.win._refresh_prompt_status()
+        self.assertFalse(self.win.prompt_download_btn.isHidden())
+        # A model found: the button hides — nothing to download.
+        model = Path(self.tmp) / "model.gguf"
+        model.write_bytes(b"gguf")
+        with mock.patch.object(imagegen_mod, "find_engine",
+                               return_value=None), \
+                mock.patch.object(imagegen_mod, "find_model",
+                                  return_value=model):
+            self.win._refresh_prompt_status()
+        self.assertTrue(self.win.prompt_download_btn.isHidden())
+
+    def test_export_parts_tooltip_explains_disabled_state(self):
+        btn = self.win.code_export_parts_btn
+        self.assertFalse(btn.isEnabled())
+        self.assertEqual(btn.toolTip(),
+                         "Load a Minecraft skin to export its parts")
+        # Code, not a skin: still disabled, with the reason.
+        code = os.path.join(self.tmp, "hero.py")
+        with open(code, "w", encoding="utf-8") as handle:
+            handle.write("HERO = [[1, 0], [0, 1]]\n")
+        self.assertTrue(self.win.load_code(code))
+        self.assertFalse(btn.isEnabled())
+        self.assertEqual(btn.toolTip(),
+                         "Only Minecraft skins have parts to export")
+        # A skin: enabled, tooltip describes the action.
+        self.assertTrue(self.win.load_game_asset(self.skin))
+        self.assertTrue(btn.isEnabled())
+        self.assertEqual(btn.toolTip(),
+                         "Export the skin's parts as separate PNGs")
+
+    def test_no_programmer_phrasing_in_visible_text(self):
+        for text in visible_texts(self.win):
+            self.assertNotIn("(s)", text,
+                             "programmer phrasing in visible text: %r"
+                             % text)
+
+    def test_preset_button_row_fits_the_column(self):
+        # The preset row (Save + Delete side by side) measured
+        # 269 px at the stylesheet's button padding — wider than
+        # the column's viewport whenever the scrollbar shows, so
+        # the whole column overflowed and the right edge of every
+        # widget clipped (the counter read "0 / 10", the status
+        # lines broke mid-word). The dark stylesheet must be
+        # applied: without it the default padding is smaller and
+        # the row fits, which is why no earlier screenshot caught
+        # it.
+        from pixel_forge.gui import DARK_STYLESHEET
+        from PySide6.QtWidgets import QScrollArea
+        self.app.setStyleSheet(DARK_STYLESHEET)
+        try:
+            self.win.show()
+            self.app.processEvents()
+            self.app.processEvents()
+            for prefix in ("", "video_", "prompt_"):
+                save = getattr(self.win, prefix + "preset_save_btn")
+                delete = getattr(self.win,
+                                 prefix + "preset_delete_btn")
+                row = (save.minimumSizeHint().width()
+                       + delete.minimumSizeHint().width() + 6)
+                # Button -> inner widget -> viewport -> scroll
+                # area: the viewport is the width that matters.
+                scroll = (save.parentWidget().parentWidget()
+                          .parentWidget())
+                self.assertIsInstance(scroll, QScrollArea)
+                viewport = scroll.viewport().width()
+                self.assertLessEqual(
+                    row, viewport,
+                    "%spreset row is %d px, wider than the %d px "
+                    "viewport — the column clips on the right"
+                    % (prefix, row, viewport))
+        finally:
+            self.app.setStyleSheet("")
+
+    def test_spritesheet_dialog_has_scrollbar_slack(self):
+        from pixel_forge.gui import SpritesheetDialog
+        frames = [make_solid_image(16, 16, 255, 0, 0),
+                  make_solid_image(16, 16, 0, 255, 0)]
+        dialog = SpritesheetDialog(
+            self.win, frames, ["frame_001.png", "frame_002.png"],
+            cols=2, padding=0, fps=8, default_name="sheet.png")
+        try:
+            holder = dialog.sheet_label.parentWidget()
+            margins = holder.layout().contentsMargins()
+            self.assertEqual((margins.left(), margins.top(),
+                              margins.right(), margins.bottom()),
+                             (8, 8, 8, 8))
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self.app.processEvents()
 
 
 if __name__ == "__main__":

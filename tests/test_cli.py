@@ -204,7 +204,7 @@ class CliTests(unittest.TestCase):
                 ["prompt", "a knight", "--out", out_dir,
                  "--size", "32", "--colors", "16"])
         self.assertEqual(code, 0, err)
-        self.assertIn("3 candidate(s)", out)
+        self.assertIn("3 candidates", out)
         # One batch folder under the out dir.
         batches = [d for d in os.listdir(out_dir)
                    if os.path.isdir(os.path.join(out_dir, d))]
@@ -694,7 +694,7 @@ class CodeCliTests(unittest.TestCase):
             handle.write("x = \n")
         code, _out, err = self._run(["code", folder, "--list"])
         self.assertEqual(code, 1)
-        self.assertIn("could not parse any of 2 file(s)", err)
+        self.assertIn("could not parse any of 2 files", err)
         self.assertIn("a.py", err)
         self.assertIn("b.py", err)
         self.assertNotIn("Traceback", err)
@@ -740,7 +740,7 @@ class SkinCliTests(unittest.TestCase):
         code, out, err = self._run(["skin", self.skin,
                                     "--out", out_dir])
         self.assertEqual(code, 0, err)
-        self.assertIn("12 part(s) + figure", out)
+        self.assertIn("12 parts + figure", out)
         self.assertTrue(os.path.isfile(
             os.path.join(out_dir, "head.png")))
         self.assertTrue(os.path.isfile(

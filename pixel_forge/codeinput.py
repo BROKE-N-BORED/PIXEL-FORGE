@@ -51,7 +51,7 @@ from pathlib import Path
 
 from .image import Image, argb
 from .palettes import PICO8
-from .pixelize import PixelForgeError
+from .pixelize import PixelForgeError, plural
 
 CODE_EXTENSIONS = {".py", ".js", ".ts"}
 MAX_MAP_WIDTH = 512
@@ -852,6 +852,6 @@ def parse_paths(paths):
                                        skip["reason"])
                            for skip in merged["skipped"])
         raise PixelForgeError(
-            "could not parse any of %d file(s): %s"
-            % (len(files), detail))
+            "could not parse any of %s: %s"
+            % (plural(len(files), "file"), detail))
     return merged

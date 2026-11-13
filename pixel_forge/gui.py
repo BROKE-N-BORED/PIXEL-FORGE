@@ -30,6 +30,7 @@ underlying text() still returns "&", so a string check alone would
 stay green on a wrong label. Write "and" instead.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -39,9 +40,9 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import (QAction, QImage, QImageReader, QKeySequence,
-                           QPainter, QPixmap, QShortcut)
+from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import (QAction, QDesktopServices, QImage, QImageReader,
+                           QKeySequence, QPainter, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
                                QDialog, QDoubleSpinBox, QFileDialog,
                                QHBoxLayout, QInputDialog, QLabel,
@@ -57,15 +58,17 @@ from .codeinput import CODE_EXTENSIONS, parse_paths
 from .history import (batches_dir, load_history, record_batch,
                       record_prompt, save_history)
 from .imagegen import (DEFAULT_COUNT, DEFAULT_NEGATIVE, DEFAULT_SIZE,
-                       LCM_CFG, LCM_STEPS, NEGATIVE_PRESETS,
-                       GenerationCancelled, MODEL_FILENAME,
-                       engine_status, generate, load_batch, new_batch,
+                       LCM_CFG, LCM_STEPS, MAX_PROMPT_LEN,
+                       NEGATIVE_PRESETS, GenerationCancelled,
+                       MODEL_FILENAME, MODEL_URL, engine_status,
+                       generate, load_batch, new_batch,
                        regenerate_candidate, require_engine,
                        require_model, set_keeper, validate_prompt)
-from .library import Library
+from .library import SOURCE_LABELS, Library
 from .palettes import PALETTE_LABELS
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
-                       count_opaque_colors, load_image, pixelize_image)
+                       count_opaque_colors, load_image, pixelize_image,
+                       plural)
 from .presets import BUILTIN_PRESETS, PresetStore
 from .qtimage import to_qimage
 from .skins import (detect_skin, extract_skin, pixelize_texture,
@@ -85,6 +88,14 @@ VIDEO_DEBOUNCE_MS = 300  # ms of no control changes before a Video
 # tab re-extract / re-pixelize runs — a dragged slider fires
 # dozens of changes, and only the settled one needs a run.
 
+# Export-button contrast (task 22): the text is #e8e6e3 on the
+# button background. The old orange (#b35a1b) measured 3.84:1 —
+# under WCAG AA's 4.5:1 for normal text (review W19). The darker
+# orange below measures 5.73:1, the hover 4.93:1 — both pass.
+# (The disabled state is exempt from the ratio: WCAG does not
+# require contrast for inactive controls.) This comment lives
+# OUTSIDE the stylesheet string: Qt stylesheets have no # comments,
+# and a # line inside the string would be parsed as a selector.
 DARK_STYLESHEET = """
 QMainWindow, QWidget { background-color: #232329; color: #e8e6e3; }
 QLabel { background-color: transparent; }
@@ -94,9 +105,9 @@ QPushButton { background-color: #3a3a42; border: 1px solid #55555e;
 QPushButton:hover { background-color: #4a4a54; }
 QPushButton:pressed { background-color: #2e2e35; }
 QPushButton:disabled { color: #77777f; border-color: #3a3a42; }
-QPushButton#export { background-color: #b35a1b; border-color: #d97a2e;
+QPushButton#export { background-color: #8a4513; border-color: #d97a2e;
     font-weight: bold; }
-QPushButton#export:hover { background-color: #c9681f; }
+QPushButton#export:hover { background-color: #9a4c15; }
 QPushButton#export:disabled { background-color: #4a3226; color: #77777f; }
 QComboBox, QSpinBox, QLineEdit { background-color: #2e2e35;
     border: 1px solid #55555e; border-radius: 4px; padding: 4px; }
@@ -114,6 +125,20 @@ QStatusBar { background-color: #1a1a1f; color: #b8b5b0; }
 
 
 _IMAGE_EXTENSIONS = None
+
+
+def warn_dialog(parent, title, message):
+    """A warning dialog whose title names the failure (task 22).
+
+    The title says what failed — never the generic "Pixel Forge"
+    — and the message starts with a capital letter. Exception
+    text is usually lowercase, so the first letter is raised
+    here rather than at every call site.
+    """
+    text = str(message)
+    if text:
+        text = text[0].upper() + text[1:]
+    QMessageBox.warning(parent, title, text)
 
 
 def image_extensions():
@@ -402,7 +427,15 @@ class SpritesheetDialog(QDialog):
         self.sheet_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sheet_scroll = QScrollArea()
         sheet_scroll.setWidgetResizable(True)
-        sheet_scroll.setWidget(self.sheet_label)
+        # The sheet used to sit hard against the scrollbar (task
+        # 22): the label was the scroll area's widget directly,
+        # with zero margins. A container with 8 px of breathing
+        # room around the label instead.
+        sheet_holder = QWidget()
+        holder_layout = QVBoxLayout(sheet_holder)
+        holder_layout.setContentsMargins(8, 8, 8, 8)
+        holder_layout.addWidget(self.sheet_label)
+        sheet_scroll.setWidget(sheet_holder)
         layout.addWidget(sheet_scroll, 1)
         longest = max(self.sheet.width(), self.sheet.height())
         if longest > 480:
@@ -484,7 +517,7 @@ class SpritesheetDialog(QDialog):
                         cols=self.cols, padding=self.padding,
                         fps=self.fps)
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not export spritesheet", str(exc))
             return
         parent = self.parent()
         if parent is not None and hasattr(parent, "statusBar"):
@@ -492,6 +525,10 @@ class SpritesheetDialog(QDialog):
                 "Exported spritesheet: %d frames, %d x %d grid, %s"
                 % (len(self.images), self.layout["columns"],
                    self.layout["rows"], png_path.name))
+            # The sheet's folder becomes the last-used export
+            # folder, like every other export (task 22).
+            if hasattr(parent, "_remember_export_dir"):
+                parent._remember_export_dir(png_path.parent)
         self.accept()
 
 
@@ -540,7 +577,7 @@ class SaveToLibraryDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self, library_dir=None):
         super().__init__()
-        self.setWindowTitle("Pixel Forge")
+        self.setWindowTitle("Pixel Forge %s" % __version__)
         self.resize(1020, 640)
         self.setAcceptDrops(True)
         # Library + presets. library_dir is a test hook — the real
@@ -615,6 +652,10 @@ class MainWindow(QMainWindow):
         self.code_not_rendered = []
         self.code_skipped = []
         self.code_source = None
+        # The first source file of the current import — code_source
+        # is a joined display string, so exports default next to
+        # this one instead (task 22).
+        self.code_source_first = None
         self.code_kind = None  # "code", "skin", or "texture"
         self.code_current = None
         self.code_image = None
@@ -881,7 +922,20 @@ class MainWindow(QMainWindow):
         form.addWidget(warning)
         setattr(self, prefix + "preset_warning_label", warning)
         button_row = QHBoxLayout()
+        # Slimmer horizontal padding than the stylesheet's 14 px:
+        # at full padding these two buttons measure 156 + 107 px,
+        # and the row (269 px with spacing) is wider than the
+        # column's 252 px viewport whenever the scrollbar shows —
+        # so the whole column overflowed and the right edge of
+        # every widget clipped (the counter read "0 / 10", the
+        # status lines broke mid-word). At 6 px the row is 237 px
+        # and everything fits. Found live in the v0.33 polish
+        # pass: every earlier screenshot ran without the dark
+        # stylesheet, where the default padding is smaller and
+        # the row fit.
         save_btn = QPushButton("Save current as preset")
+        save_btn.setStyleSheet(
+            "padding-left: 6px; padding-right: 6px;")
         save_btn.setToolTip(
             "Save the current controls as a named preset")
         save_btn.clicked.connect(
@@ -889,6 +943,8 @@ class MainWindow(QMainWindow):
         button_row.addWidget(save_btn)
         setattr(self, prefix + "preset_save_btn", save_btn)
         delete_btn = QPushButton("Delete preset")
+        delete_btn.setStyleSheet(
+            "padding-left: 6px; padding-right: 6px;")
         delete_btn.setToolTip("Delete the selected preset")
         delete_btn.setEnabled(False)
         delete_btn.clicked.connect(
@@ -992,6 +1048,10 @@ class MainWindow(QMainWindow):
         self.zoom_label = QLabel("8x")
         self.zoom_label.setFixedWidth(32)
         zoom_row.addWidget(self.zoom_label)
+        self.zoom_fit_btn = QPushButton("Fit")
+        self.zoom_fit_btn.setToolTip("Zoom to fit the preview pane")
+        self.zoom_fit_btn.clicked.connect(self._on_fit_image_zoom)
+        zoom_row.addWidget(self.zoom_fit_btn)
         form.addLayout(zoom_row)
 
         form.addStretch(1)
@@ -1042,10 +1102,10 @@ class MainWindow(QMainWindow):
         self.after_label = QLabel("Your pixel sprite appears here")
         self.after_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.after_label.setWordWrap(True)
-        after_scroll = QScrollArea()
-        after_scroll.setWidgetResizable(True)
-        after_scroll.setWidget(self.after_label)
-        after_layout.addWidget(after_scroll)
+        self.after_scroll = QScrollArea()
+        self.after_scroll.setWidgetResizable(True)
+        self.after_scroll.setWidget(self.after_label)
+        after_layout.addWidget(self.after_scroll)
         previews.addWidget(after_pane)
 
         previews.setSizes([500, 500])
@@ -1063,11 +1123,15 @@ class MainWindow(QMainWindow):
         try:
             image = load_image(path)
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not import image", str(exc))
             return False
         self.source_image = image
         self.source_path = str(path)
         self.update_preview()
+        # The preview zoom fits the pane on load (task 22) — the
+        # old fixed 8x left a 16x16 sprite tiny and a 128x128 one
+        # overflowing. A later control change does not re-fit.
+        self._on_fit_image_zoom()
         self.statusBar().showMessage("Loaded %s (%d x %d)"
                                      % (Path(path).name, image.width(),
                                         image.height()))
@@ -1141,15 +1205,15 @@ class MainWindow(QMainWindow):
         if code:
             self.tabs.setCurrentIndex(3)
             if self.load_code(code):
-                imported.append("%d code file(s)" % len(code))
+                imported.append(plural(len(code), "code file"))
         for path in unsupported:
             skipped.append("%s (unsupported file)" % Path(path).name)
         if not imported:
             # Nothing landed. A failed load already showed its own
             # warning; only the unsupported files need one here.
             if skipped:
-                QMessageBox.warning(
-                    self, "Pixel Forge",
+                warn_dialog(
+                    self, "Nothing to import",
                     "nothing to import: %s" % "; ".join(skipped))
             return
         message = "Imported " + "; ".join(imported)
@@ -1196,6 +1260,55 @@ class MainWindow(QMainWindow):
         self.zoom_label.setText("%dx" % value)
         if self.source_image is not None:
             self._refresh_pixmaps()
+
+    def _fit_zoom(self, slider, scroll, image):
+        """Set a zoom slider so the image fits its preview pane.
+
+        The fit is the largest whole zoom that fits the scroll
+        area's viewport, clamped to the slider's range — a 32x32
+        sprite in a 400 px pane fits at 12x, a 512x512 one at 1x.
+        Called on load only: a re-pixelize or a control change
+        must not snap the user's chosen zoom back (task 22).
+        """
+        if image is None:
+            return
+        viewport = scroll.viewport()
+        width = viewport.width()
+        height = viewport.height()
+        if width < 10 or height < 10:
+            # No pane to fit to yet — the window has not been laid
+            # out (an offscreen test, a hidden tab). The slider
+            # keeps its value; Fit works once the pane has a size.
+            return
+        fit = min(width / image.width(), height / image.height())
+        value = max(slider.minimum(),
+                    min(slider.maximum(), int(fit)))
+        slider.setValue(value)
+
+    def _on_fit_image_zoom(self):
+        """Fit the pixel preview to its pane (task 22)."""
+        self._fit_zoom(self.zoom_slider, self.after_scroll,
+                       self.result_image)
+
+    def _on_fit_video_zoom(self):
+        """Fit the frame preview to its pane (task 22)."""
+        if not self.video_frames:
+            return
+        self._fit_zoom(self.video_zoom_slider,
+                       self.video_preview_scroll,
+                       self.video_frames[self.video_current])
+
+    def _on_fit_prompt_zoom(self):
+        """Fit the keeper's pixel preview to its pane (task 22)."""
+        self._fit_zoom(self.prompt_zoom_slider,
+                       self.prompt_pixel_scroll,
+                       self.prompt_result_image)
+
+    def _on_fit_code_zoom(self):
+        """Fit the sprite preview to its pane (task 22)."""
+        self._fit_zoom(self.code_zoom_slider,
+                       self.code_preview_scroll,
+                       self.code_image)
 
     # -------------------------------------------------------- preview
 
@@ -1247,23 +1360,77 @@ class MainWindow(QMainWindow):
         if not str(path).lower().endswith(".png"):
             path = "%s.png" % path
         if not self.result_image.save(str(path), "PNG"):
-            QMessageBox.warning(self, "Pixel Forge",
+            warn_dialog(self, "Could not export PNG",
                                 "could not write: %s" % path)
             return False
         self.statusBar().showMessage("Exported %s" % Path(path).name)
         return True
 
+    # ------------------------------------------- export filename defaults
+    # Task 22: every export dialog defaults to a filename next to
+    # the source file; when there is no source file, it defaults
+    # to the last-used export folder. The folder is remembered in
+    # a small JSON file in the library folder, read and written
+    # fail-soft — a corrupt or unwritable file just means the
+    # dialog falls back to the current directory.
+
+    def _export_folders_path(self):
+        """Where the last-used export folder is remembered."""
+        return Path(self.library.directory) / "export-folders.json"
+
+    def _last_export_dir(self):
+        """The last folder an export wrote to, or None."""
+        try:
+            data = json.loads(
+                self._export_folders_path().read_text(
+                    encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        folder = data.get("last_export_dir")
+        if not folder or not Path(folder).is_dir():
+            return None
+        return folder
+
+    def _remember_export_dir(self, folder):
+        """Record the folder an export just wrote to."""
+        try:
+            record = self._export_folders_path()
+            record.parent.mkdir(parents=True, exist_ok=True)
+            record.write_text(
+                json.dumps({"last_export_dir": str(folder)}),
+                encoding="utf-8")
+        except OSError:
+            pass
+
+    def _export_default(self, filename, source_path=None):
+        """The default path for an export dialog.
+
+        Next to the source file when there is one; else the
+        last-used export folder; else just the filename (the
+        dialog opens in the current directory).
+        """
+        if source_path is not None:
+            return str(Path(source_path).parent / filename)
+        last = self._last_export_dir()
+        if last is not None:
+            return str(Path(last) / filename)
+        return filename
+
     def _on_export(self):
         if self.result_image is None:
             return
-        default = ""
         if self.source_path:
             src = Path(self.source_path)
-            default = str(src.with_name(src.stem + "-pixel.png"))
+            default = self._export_default(
+                src.stem + "-pixel.png", self.source_path)
+        else:
+            default = self._export_default("sprite-pixel.png")
         path, _ = QFileDialog.getSaveFileName(
             self, "Export PNG", default, "PNG image (*.png)")
-        if path:
-            self.export_image(path)
+        if path and self.export_image(path):
+            self._remember_export_dir(Path(path).parent)
 
     # ============================================================ video tab
 
@@ -1417,6 +1584,12 @@ class MainWindow(QMainWindow):
         self.video_zoom_label = QLabel("8x")
         self.video_zoom_label.setFixedWidth(32)
         video_zoom_row.addWidget(self.video_zoom_label)
+        self.video_zoom_fit_btn = QPushButton("Fit")
+        self.video_zoom_fit_btn.setToolTip(
+            "Zoom to fit the preview pane")
+        self.video_zoom_fit_btn.clicked.connect(
+            self._on_fit_video_zoom)
+        video_zoom_row.addWidget(self.video_zoom_fit_btn)
         form.addLayout(video_zoom_row)
 
         form.addWidget(self._section("Spritesheet"))
@@ -1506,10 +1679,10 @@ class MainWindow(QMainWindow):
         self.video_preview_label.setAlignment(
             Qt.AlignmentFlag.AlignCenter)
         self.video_preview_label.setWordWrap(True)
-        preview_scroll = QScrollArea()
-        preview_scroll.setWidgetResizable(True)
-        preview_scroll.setWidget(self.video_preview_label)
-        preview_layout.addWidget(preview_scroll, 1)
+        self.video_preview_scroll = QScrollArea()
+        self.video_preview_scroll.setWidgetResizable(True)
+        self.video_preview_scroll.setWidget(self.video_preview_label)
+        preview_layout.addWidget(self.video_preview_scroll, 1)
 
         playback_row = QHBoxLayout()
         self.video_play_btn = QPushButton("Play")
@@ -1593,7 +1766,7 @@ class MainWindow(QMainWindow):
             require_ffmpeg()
         except PixelForgeError as exc:
             self.video_path = None
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not import video", str(exc))
             return False
         self.video_path = str(path)
         # B7: the start/end range belongs to the OLD clip — a stale
@@ -1739,6 +1912,10 @@ class MainWindow(QMainWindow):
         self.video_current = kept[0] if kept else 0
         self._rebuild_strip()
         self._refresh_video_preview()
+        if result["mode"] == "reload":
+            # A new video: fit the frame preview to its pane
+            # (task 22). A re-pixelize keeps the user's zoom.
+            self._on_fit_video_zoom()
         self._update_video_info()
         self.video_export_btn.setEnabled(bool(kept))
         self.video_play_btn.setEnabled(bool(kept))
@@ -1794,7 +1971,7 @@ class MainWindow(QMainWindow):
         # alone, so a drop summary is still showing — drop the
         # flag without re-showing it.
         self._drop_summary = None
-        QMessageBox.warning(self, "Pixel Forge", message)
+        warn_dialog(self, "Video import failed", message)
         if settings.get("fresh"):
             self.video_path = None
 
@@ -2000,13 +2177,13 @@ class MainWindow(QMainWindow):
         try:
             out.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            QMessageBox.warning(self, "Pixel Forge",
+            warn_dialog(self, "Could not export frames",
                                 "could not create %s: %s" % (out, exc))
             return False
         for number, index in enumerate(kept, start=1):
             dest = out / ("frame_%03d.png" % number)
             if not self.video_frames[index].save(str(dest), "PNG"):
-                QMessageBox.warning(self, "Pixel Forge",
+                warn_dialog(self, "Could not export frames",
                                     "could not write: %s" % dest)
                 return False
         self.statusBar().showMessage(
@@ -2021,10 +2198,12 @@ class MainWindow(QMainWindow):
     def _on_export_frames(self):
         if not self._kept_indices():
             return
-        start_dir = ""
+        # Next to the video, else the last-used export folder
+        # (task 22) — the old "" opened wherever Qt felt like.
         if self.video_path:
-            src = Path(self.video_path)
-            start_dir = str(src.parent)
+            start_dir = str(Path(self.video_path).parent)
+        else:
+            start_dir = self._last_export_dir() or ""
         directory = QFileDialog.getExistingDirectory(
             self, "Export frames to folder", start_dir)
         if not directory:
@@ -2038,17 +2217,26 @@ class MainWindow(QMainWindow):
             names = ", ".join(p.name for p in existing[:3])
             if len(existing) > 3:
                 names += ", …"
+            # One file or many, the sentence agrees with the
+            # count — never a parenthesized s.
+            if len(existing) == 1:
+                question = ("1 frame file already exists in %s (%s). "
+                            "Overwrite it?"
+                            % (Path(directory).name, names))
+            else:
+                question = ("%d frame files already exist in %s (%s). "
+                            "Overwrite them?"
+                            % (len(existing), Path(directory).name,
+                               names))
             answer = QMessageBox.question(
-                self, "Pixel Forge",
-                "%d frame file(s) already exist in %s (%s). "
-                "Overwrite them?"
-                % (len(existing), Path(directory).name, names),
+                self, "Overwrite frames?", question,
                 QMessageBox.StandardButton.Yes
                 | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No)
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        self.export_frames(directory)
+        if self.export_frames(directory):
+            self._remember_export_dir(directory)
 
     # ---------------------------------------------------- spritesheet
 
@@ -2072,7 +2260,10 @@ class MainWindow(QMainWindow):
         if self.video_path:
             src = Path(self.video_path)
             return str(src.with_name(src.stem + "-sheet.png"))
-        return "sheet.png"
+        # No video (a sheet from the preview dialog with no source
+        # in hand): the last-used export folder, else "sheet.png"
+        # in the current directory (task 22).
+        return self._export_default("sheet.png")
 
     def export_spritesheet(self, png_path):
         """Pack the kept frames and write the PNG + JSON pair (the
@@ -2093,7 +2284,7 @@ class MainWindow(QMainWindow):
                                    str(meta_path), cols=cols,
                                    padding=padding, fps=fps)
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not export spritesheet", str(exc))
             return False
         self.statusBar().showMessage(
             "Exported spritesheet: %d frames, %d x %d grid, %s"
@@ -2120,7 +2311,7 @@ class MainWindow(QMainWindow):
                 self, images, names, cols, padding, fps,
                 self._sheet_default_name())
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not preview spritesheet", str(exc))
             return
         dialog.exec()
 
@@ -2154,6 +2345,21 @@ class MainWindow(QMainWindow):
         self.prompt_edit.returnPressed.connect(
             self._on_prompt_generate)
         form.addWidget(self.prompt_edit)
+
+        # Character counter (task 22): the prompt limit is 1000
+        # (MAX_PROMPT_LEN, enforced by validate_prompt), and until
+        # now the only sign of it was a refusal at Generate time.
+        # Right-aligned, under the field, orange past the limit.
+        self.prompt_counter_label = QLabel(
+            "0 / %d" % MAX_PROMPT_LEN)
+        self.prompt_counter_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight)
+        self.prompt_counter_label.setToolTip(
+            "Prompt length — the limit is %d characters"
+            % MAX_PROMPT_LEN)
+        self.prompt_edit.textChanged.connect(
+            self._on_prompt_text_changed)
+        form.addWidget(self.prompt_counter_label)
 
         # Past prompts, most recent first (task 20) — picking one
         # fills the prompt field. Nothing is selected: the combo
@@ -2240,6 +2446,18 @@ class MainWindow(QMainWindow):
         self.prompt_status_label.setWordWrap(True)
         form.addWidget(self.prompt_status_label)
 
+        # The model download, one click away (task 22): a button
+        # under the status line, visible only while no model is
+        # found. A plain-text status line cannot carry a link, and
+        # an HTML link would fight the label's heightForWidth
+        # sizing — so the button is the link.
+        self.prompt_download_btn = QPushButton("Open download page")
+        self.prompt_download_btn.setToolTip(
+            "Open the model download page in your browser")
+        self.prompt_download_btn.clicked.connect(
+            self._on_open_model_download)
+        form.addWidget(self.prompt_download_btn)
+
         # Generation settings (task 20): the LCM pins are the
         # defaults — these let the user change them. This is the
         # GENERATED picture's size; the "Size" section below is
@@ -2285,7 +2503,7 @@ class MainWindow(QMainWindow):
         form.addWidget(self._section("History"))
         self.prompt_history_list = QListWidget()
         self.prompt_history_list.setFixedHeight(120)
-        # Items wrap: "prompt — 3 candidate(s), timestamp" is
+        # Items wrap: "prompt — 3 candidates, timestamp" is
         # wider than the 230 px column, and a horizontal scrollbar
         # hid the timestamp — the part that tells two batches with
         # the same prompt apart.
@@ -2380,6 +2598,12 @@ class MainWindow(QMainWindow):
         self.prompt_zoom_label = QLabel("8x")
         self.prompt_zoom_label.setFixedWidth(32)
         prompt_zoom_row.addWidget(self.prompt_zoom_label)
+        self.prompt_zoom_fit_btn = QPushButton("Fit")
+        self.prompt_zoom_fit_btn.setToolTip(
+            "Zoom to fit the preview pane")
+        self.prompt_zoom_fit_btn.clicked.connect(
+            self._on_fit_prompt_zoom)
+        prompt_zoom_row.addWidget(self.prompt_zoom_fit_btn)
         form.addLayout(prompt_zoom_row)
 
         form.addStretch(1)
@@ -2440,10 +2664,10 @@ class MainWindow(QMainWindow):
         self.prompt_after_label.setAlignment(
             Qt.AlignmentFlag.AlignCenter)
         self.prompt_after_label.setWordWrap(True)
-        pixel_scroll = QScrollArea()
-        pixel_scroll.setWidgetResizable(True)
-        pixel_scroll.setWidget(self.prompt_after_label)
-        pixel_layout.addWidget(pixel_scroll)
+        self.prompt_pixel_scroll = QScrollArea()
+        self.prompt_pixel_scroll.setWidgetResizable(True)
+        self.prompt_pixel_scroll.setWidget(self.prompt_after_label)
+        pixel_layout.addWidget(self.prompt_pixel_scroll)
         previews.addWidget(pixel_pane)
         previews.setSizes([500, 500])
         right.addWidget(previews)
@@ -2510,6 +2734,10 @@ class MainWindow(QMainWindow):
         self.prompt_status_label.setText(
             "%s\n%s" % (engine_line, model_line))
         self._fit_prompt_status_label()
+        # No model yet: offer the download page. The button hides
+        # once a model is found — nothing to download then.
+        self.prompt_download_btn.setVisible(
+            status["model"] is None)
 
     def _fit_prompt_status_label(self):
         """Size the status label to its wrapped text.
@@ -2546,12 +2774,12 @@ class MainWindow(QMainWindow):
             return True
         count = len(self.prompt_candidates)
         if self.prompt_keeper is not None:
-            lost = ("%d candidate(s) (including your keeper)"
-                    % count)
+            lost = ("%s (including your keeper)"
+                    % plural(count, "candidate"))
         else:
-            lost = "%d candidate(s)" % count
+            lost = plural(count, "candidate")
         answer = QMessageBox.question(
-            self, "Pixel Forge",
+            self, "Generate a new batch?",
             "Generate a new batch? The current %s will be replaced "
             "in this tab — the batch stays in History." % lost,
             QMessageBox.StandardButton.Yes
@@ -2607,7 +2835,7 @@ class MainWindow(QMainWindow):
             require_engine()
             require_model()
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not generate", str(exc))
             return
         if not self._confirm_replace_batch():
             return
@@ -2627,7 +2855,7 @@ class MainWindow(QMainWindow):
                 cfg=self.prompt_cfg_spin.value(),
                 size=self.prompt_gen_size_spin.value())
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not generate", str(exc))
             return
         self._record_prompt_text(prompt)
         self._reset_prompt_tab_for_run(bdir)
@@ -2705,9 +2933,9 @@ class MainWindow(QMainWindow):
                   if c["status"] == "failed"]
         if self.prompt_candidates:
             self._pick_prompt_keeper(self.prompt_candidates[0]["file"])
-            message = ("%d candidate(s) ready — click one to keep "
-                       "it (took %s)"
-                       % (len(self.prompt_candidates), took))
+            message = ("%s ready — click one to keep it (took %s)"
+                       % (plural(len(self.prompt_candidates),
+                                 "candidate"), took))
             if failed:
                 message += " (%d failed)" % len(failed)
             self.statusBar().showMessage(message)
@@ -2715,8 +2943,8 @@ class MainWindow(QMainWindow):
         else:
             self.prompt_info_label.setText("No candidates generated")
             detail = failed[0].get("error", "") if failed else ""
-            QMessageBox.warning(
-                self, "Pixel Forge",
+            warn_dialog(
+                self, "Generation failed",
                 "all %d candidates failed%s"
                 % (len(failed), (" — " + detail) if detail else ""))
             self.statusBar().showMessage("Generation failed")
@@ -2746,7 +2974,7 @@ class MainWindow(QMainWindow):
         self.prompt_progress.setFormat("%v of %m candidates")
         self.prompt_generate_btn.setEnabled(True)
         self.prompt_cancel_btn.setEnabled(False)
-        QMessageBox.warning(self, "Pixel Forge", message)
+        warn_dialog(self, "Generation failed", message)
         self.statusBar().showMessage("Generation failed")
         self._update_prompt_iter_buttons()
 
@@ -2767,7 +2995,7 @@ class MainWindow(QMainWindow):
                 # so plainly and leave the batch alone (review B5).
                 # The buttons are already re-enabled above, so the
                 # window stays usable.
-                QMessageBox.warning(self, "Pixel Forge", str(exc))
+                warn_dialog(self, "Could not read the batch record", str(exc))
                 self.statusBar().showMessage(
                     "Cancelled — the batch record could not be read")
                 self._update_prompt_iter_buttons()
@@ -2787,8 +3015,8 @@ class MainWindow(QMainWindow):
                         self.prompt_candidates[0]["file"])
                 self._record_current_batch()
         self.statusBar().showMessage(
-            "Cancelled — %d candidate(s) kept"
-            % len(self.prompt_candidates))
+            "Cancelled — %s kept"
+            % plural(len(self.prompt_candidates), "candidate"))
         self._update_prompt_iter_buttons()
 
     def _cleanup_prompt_batch(self):
@@ -2879,7 +3107,7 @@ class MainWindow(QMainWindow):
         try:
             batch = load_batch(self.prompt_batch_dir)
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not read the batch", str(exc))
             return
         if not self._confirm_replace_batch():
             return
@@ -2896,7 +3124,7 @@ class MainWindow(QMainWindow):
                 seeds=[keeper_seed + 1, keeper_seed + 2,
                        keeper_seed + 3])
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not generate", str(exc))
             return
         # The tab shows the batch it is generating from, not
         # whatever the user typed since.
@@ -3008,8 +3236,9 @@ class MainWindow(QMainWindow):
             self.prompt_history_list.clear()
             for index, entry in enumerate(
                     self._prompt_history["batches"]):
-                label = "%s — %d candidate(s), %s" % (
-                    entry["prompt"], len(entry.get("seeds", [])),
+                label = "%s — %s, %s" % (
+                    entry["prompt"],
+                    plural(len(entry.get("seeds", [])), "candidate"),
                     entry.get("created", ""))
                 if not Path(entry["dir"]).is_dir():
                     label += " (batch folder missing)"
@@ -3035,8 +3264,8 @@ class MainWindow(QMainWindow):
         entry = entries[index]
         bdir = Path(entry["dir"])
         if not bdir.is_dir():
-            QMessageBox.warning(
-                self, "Pixel Forge",
+            warn_dialog(
+                self, "Batch folder missing",
                 "that batch's folder is gone: %s" % bdir)
             return
         if self._prompt_generating():
@@ -3047,13 +3276,13 @@ class MainWindow(QMainWindow):
         try:
             batch = load_batch(bdir)
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not read the batch", str(exc))
             return
         landed = [c for c in batch["candidates"]
                   if c["status"] in ("pending", "kept")]
         if not landed:
-            QMessageBox.warning(
-                self, "Pixel Forge",
+            warn_dialog(
+                self, "No usable candidates",
                 "that batch has no usable candidates left")
             return
         self._cleanup_prompt_batch()
@@ -3088,6 +3317,28 @@ class MainWindow(QMainWindow):
         if self.prompt_negative_edit.text() != text:
             self.prompt_negative_edit.setText(text)
             self.prompt_negative_edit.setCursorPosition(0)
+
+    def _on_prompt_text_changed(self, text):
+        """Keep the character counter beside the prompt field."""
+        length = len(text)
+        self.prompt_counter_label.setText(
+            "%d / %d" % (length, MAX_PROMPT_LEN))
+        # Past the limit the counter turns the warning orange —
+        # the same color as the preset warning under the pickers.
+        if length > MAX_PROMPT_LEN:
+            self.prompt_counter_label.setStyleSheet(
+                "color: #ffb066;")
+        else:
+            self.prompt_counter_label.setStyleSheet("")
+
+    def _on_open_model_download(self):
+        """Open the pinned model's download page in the browser."""
+        if not QDesktopServices.openUrl(QUrl(MODEL_URL)):
+            # No browser to hand the URL to — say where it is
+            # instead of failing silently.
+            self.statusBar().showMessage(
+                "Could not open the browser — the model is at %s"
+                % MODEL_URL)
 
     def _on_negative_text_changed(self, text):
         """Mirror the field in the preset combo: a preset's exact
@@ -3150,6 +3401,9 @@ class MainWindow(QMainWindow):
         self._rebuild_prompt_strip()
         self._update_prompt_seed_label()
         self._update_prompt_preview()
+        # A new keeper: fit its pixel preview to the pane
+        # (task 22). A control change does not re-fit.
+        self._on_fit_prompt_zoom()
 
     # -------------------------------------------------------- controls
 
@@ -3235,7 +3489,7 @@ class MainWindow(QMainWindow):
         if not str(path).lower().endswith(".png"):
             path = "%s.png" % path
         if not self.prompt_result_image.save(str(path), "PNG"):
-            QMessageBox.warning(self, "Pixel Forge",
+            warn_dialog(self, "Could not export PNG",
                                 "could not write: %s" % path)
             return False
         self.statusBar().showMessage("Exported %s" % Path(path).name)
@@ -3244,14 +3498,17 @@ class MainWindow(QMainWindow):
     def _on_export_prompt_keeper(self):
         if self.prompt_result_image is None:
             return
-        default = ""
-        if self.prompt_batch_dir is not None:
-            default = str(Path.home() / (
-                "%s-pixel.png" % self.prompt_batch_dir.name))
+        # The batch folder is internal storage, not a user source
+        # — so the keeper defaults to the last-used export folder
+        # (task 22), never to the batch dir or the home folder.
+        name = "%s-pixel.png" % (
+            self.prompt_batch_dir.name
+            if self.prompt_batch_dir is not None else "sprite")
+        default = self._export_default(name)
         path, _ = QFileDialog.getSaveFileName(
             self, "Export PNG", default, "PNG image (*.png)")
-        if path:
-            self.export_prompt_keeper(path)
+        if path and self.export_prompt_keeper(path):
+            self._remember_export_dir(Path(path).parent)
 
     # ============================================================== code tab
 
@@ -3300,7 +3557,9 @@ class MainWindow(QMainWindow):
             self._on_code_item_clicked)
         form.addWidget(self.code_list, 1)
 
-        form.addWidget(self._section("Found but not rendered"))
+        self.code_skipped_heading = self._section(
+            "Found but not rendered")
+        form.addWidget(self.code_skipped_heading)
         self.code_skipped_label = QLabel(
             "Import code to see what it defines.")
         self.code_skipped_label.setWordWrap(True)
@@ -3309,9 +3568,11 @@ class MainWindow(QMainWindow):
         # the column, so the Zoom row and info label below it are
         # never squeezed out. Sizing the label to its full text
         # instead overflowed the column and hid them entirely.
+        # 110 px shows about five lines before scrolling (task 22:
+        # 72 px showed barely two).
         skipped_scroll = QScrollArea()
         skipped_scroll.setWidgetResizable(True)
-        skipped_scroll.setFixedHeight(72)
+        skipped_scroll.setFixedHeight(110)
         skipped_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         skipped_scroll.setWidget(self.code_skipped_label)
@@ -3329,6 +3590,12 @@ class MainWindow(QMainWindow):
         self.code_zoom_label = QLabel("8x")
         self.code_zoom_label.setFixedWidth(32)
         zoom_row.addWidget(self.code_zoom_label)
+        self.code_zoom_fit_btn = QPushButton("Fit")
+        self.code_zoom_fit_btn.setToolTip(
+            "Zoom to fit the preview pane")
+        self.code_zoom_fit_btn.clicked.connect(
+            self._on_fit_code_zoom)
+        zoom_row.addWidget(self.code_zoom_fit_btn)
         form.addLayout(zoom_row)
 
         self.code_info_label = QLabel("No code loaded")
@@ -3345,8 +3612,11 @@ class MainWindow(QMainWindow):
         form.addWidget(self.code_export_btn)
 
         self.code_export_parts_btn = QPushButton("Export parts")
+        # Disabled until a skin is loaded — and the tooltip says
+        # so (task 22): a disabled button that only ever describes
+        # what it would do leaves the user guessing why it won't.
         self.code_export_parts_btn.setToolTip(
-            "Export the skin's parts as separate PNGs")
+            "Load a Minecraft skin to export its parts")
         self.code_export_parts_btn.setEnabled(False)
         self.code_export_parts_btn.clicked.connect(
             self._on_export_code_parts)
@@ -3373,10 +3643,10 @@ class MainWindow(QMainWindow):
         self.code_preview_label.setAlignment(
             Qt.AlignmentFlag.AlignCenter)
         self.code_preview_label.setWordWrap(True)
-        preview_scroll = QScrollArea()
-        preview_scroll.setWidgetResizable(True)
-        preview_scroll.setWidget(self.code_preview_label)
-        preview_layout.addWidget(preview_scroll, 1)
+        self.code_preview_scroll = QScrollArea()
+        self.code_preview_scroll.setWidgetResizable(True)
+        self.code_preview_scroll.setWidget(self.code_preview_label)
+        preview_layout.addWidget(self.code_preview_scroll, 1)
         main_layout.addWidget(preview_pane, 1)
         self._fit_code_info_label()
         return root
@@ -3401,8 +3671,21 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ input
 
+    def _set_parts_button(self, enabled, tooltip):
+        """The Export parts button's state and its tooltip together.
+
+        The tooltip explains the CURRENT state: while the button
+        is disabled it says why (nothing loaded yet, or the import
+        is not a skin), so the user is never left guessing. This
+        Qt build shows tooltips on disabled widgets too (verified
+        live in v0.33), so the reason is visible exactly when the
+        button cannot be used.
+        """
+        self.code_export_parts_btn.setEnabled(enabled)
+        self.code_export_parts_btn.setToolTip(tooltip)
+
     def load_code(self, paths):
-        """Parse code file(s) or folder(s) and list the assets
+        """Parse code files or folders and list the assets
         found. Returns True on success. On failure shows a message
         box and returns False — the window stays up either way."""
         if isinstance(paths, (str, Path)):
@@ -3411,11 +3694,11 @@ class MainWindow(QMainWindow):
         try:
             result = parse_paths(paths)
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not import code", str(exc))
             return False
         if not result["assets"] and not result["not_rendered"]:
-            QMessageBox.warning(
-                self, "Pixel Forge",
+            warn_dialog(
+                self, "No pixel-art assets found",
                 "no pixel-art assets found in %s — the code "
                 "defines no pixel maps or palettes Pixel Forge "
                 "can read (see the README for what is detected)"
@@ -3425,16 +3708,19 @@ class MainWindow(QMainWindow):
         self.code_not_rendered = result["not_rendered"]
         self.code_skipped = result["skipped"]
         self.code_source = ", ".join(str(p) for p in paths)
+        self.code_source_first = str(paths[0]) if paths else None
         self.code_kind = "code"
         self.code_skin_path = None
         self.code_skin_layout = None
-        self.code_export_parts_btn.setEnabled(False)
+        self._set_parts_button(
+            False, "Only Minecraft skins have parts to export")
         self._rebuild_code_list()
-        message = ("%d asset(s) from %d file(s)"
-                   % (len(result["assets"]), len(result["files"])))
+        message = ("%s from %s"
+                   % (plural(len(result["assets"]), "asset"),
+                      plural(len(result["files"]), "file")))
         if result["skipped"]:
-            message += (", %d file(s) skipped"
-                        % len(result["skipped"]))
+            message += (", %s skipped"
+                        % plural(len(result["skipped"]), "file"))
         self.statusBar().showMessage(message)
         return True
 
@@ -3448,10 +3734,11 @@ class MainWindow(QMainWindow):
         try:
             image = load_image(path)
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not import game asset", str(exc))
             return False
         layout = detect_skin(image)
         self.code_source = str(path)
+        self.code_source_first = str(path)
         self.code_not_rendered = []
         self.code_skipped = []
         self._stop_texture_worker()
@@ -3460,7 +3747,7 @@ class MainWindow(QMainWindow):
                 parts = skin_parts(image)
                 figure = skin_figure(image)
             except PixelForgeError as exc:
-                QMessageBox.warning(self, "Pixel Forge", str(exc))
+                warn_dialog(self, "Could not split the skin", str(exc))
                 return False
             self.code_kind = "skin"
             self.code_skin_path = str(path)
@@ -3481,7 +3768,8 @@ class MainWindow(QMainWindow):
                 "colors": count_opaque_colors(figure),
                 "image": figure,
                 "detail": "combined figure, overlays included"})
-            self.code_export_parts_btn.setEnabled(True)
+            self._set_parts_button(
+                True, "Export the skin's parts as separate PNGs")
             self._rebuild_code_list()
             self.statusBar().showMessage(
                 "Minecraft skin (%s): %d parts"
@@ -3506,7 +3794,8 @@ class MainWindow(QMainWindow):
         self.code_kind = "texture"
         self.code_skin_path = None
         self.code_skin_layout = None
-        self.code_export_parts_btn.setEnabled(False)
+        self._set_parts_button(
+            False, "Only Minecraft skins have parts to export")
         src_w, src_h = (result["source_width"],
                         result["source_height"])
         capped = ((texture.width(), texture.height())
@@ -3540,7 +3829,7 @@ class MainWindow(QMainWindow):
         if self.sender() is not self.texture_worker:
             return
         self.texture_worker = None
-        QMessageBox.warning(self, "Pixel Forge", message)
+        warn_dialog(self, "Texture import failed", message)
         self.statusBar().showMessage("Texture load failed")
 
     def _stop_texture_worker(self):
@@ -3594,16 +3883,22 @@ class MainWindow(QMainWindow):
                   for skip in self.code_skipped]
         if lines:
             self.code_skipped_label.setText("\n".join(lines))
+            # The heading carries the count, so a long list reads
+            # as "3 skipped" at a glance (task 22).
+            self.code_skipped_heading.setText(
+                "Found but not rendered (%d skipped)" % len(lines))
         elif self.code_assets:
             self.code_skipped_label.setText(
                 "Everything found was rendered.")
+            self.code_skipped_heading.setText("Found but not rendered")
         else:
             self.code_skipped_label.setText(
                 "Import code to see what it defines.")
+            self.code_skipped_heading.setText("Found but not rendered")
         self.code_current = None
         self.code_image = None
         self.code_info_label.setText(
-            "%d asset(s)" % len(self.code_assets)
+            plural(len(self.code_assets), "asset")
             if self.code_assets else "No code loaded")
         self._fit_code_info_label()
         self.code_preview_label.setPixmap(QPixmap())
@@ -3626,6 +3921,10 @@ class MainWindow(QMainWindow):
         asset = self.code_assets[index]
         self.code_current = index
         self.code_image = asset["image"]
+        # A new asset: fit the sprite preview to the pane
+        # (task 22). The fit sets the slider, which refreshes
+        # the pixmap at the fit zoom.
+        self._on_fit_code_zoom()
         self._refresh_code_pixmap()
         colors = asset["colors"]
         count_text = "%d color%s" % (colors,
@@ -3670,7 +3969,7 @@ class MainWindow(QMainWindow):
         if not str(path).lower().endswith(".png"):
             path = "%s.png" % path
         if not self.code_image.save(str(path), "PNG"):
-            QMessageBox.warning(self, "Pixel Forge",
+            warn_dialog(self, "Could not export PNG",
                                 "could not write: %s" % path)
             return False
         self.statusBar().showMessage("Exported %s" % Path(path).name)
@@ -3679,31 +3978,36 @@ class MainWindow(QMainWindow):
     def _on_export_code_asset(self):
         if self.code_image is None:
             return
-        default = ""
         asset = self.code_assets[self.code_current]
-        if self.code_source:
-            default = str(Path.home() / (
-                "%s.png" % asset["name"]))
+        # Next to the first source file (task 22) — the old code
+        # defaulted to the home folder even when the source was
+        # somewhere else entirely.
+        default = self._export_default(
+            "%s.png" % asset["name"], self.code_source_first)
         path, _ = QFileDialog.getSaveFileName(
             self, "Export PNG", default, "PNG image (*.png)")
-        if path:
-            self.export_code_asset(path)
+        if path and self.export_code_asset(path):
+            self._remember_export_dir(Path(path).parent)
 
     def _on_export_code_parts(self):
         if self.code_skin_path is None:
             return
+        # Next to the skin file, else the last-used export folder
+        # (task 22).
+        start_dir = str(Path(self.code_skin_path).parent)
         folder = QFileDialog.getExistingDirectory(
-            self, "Export skin parts to folder", "")
+            self, "Export skin parts to folder", start_dir)
         if not folder:
             return
         try:
             written = extract_skin(self.code_skin_path, folder)
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not export skin parts", str(exc))
             return
+        self._remember_export_dir(folder)
         self.statusBar().showMessage(
-            "Exported %d skin part(s) to %s"
-            % (len(written), folder))
+            "Exported %s to %s"
+            % (plural(len(written), "skin part"), folder))
 
     # =========================================================== presets
 
@@ -3866,7 +4170,7 @@ class MainWindow(QMainWindow):
             settings = self.preset_store.get(
                 name, builtin=(kind == "builtin"))
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not apply preset", str(exc))
             return
         if settings is None:
             return
@@ -3882,7 +4186,7 @@ class MainWindow(QMainWindow):
             self.preset_store.save(name.strip(),
                                    self._read_tab_settings(tab))
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not save preset", str(exc))
             return
         self._refresh_preset_combos()
         self._select_preset(tab, "user:%s" % name.strip())
@@ -3906,7 +4210,7 @@ class MainWindow(QMainWindow):
         try:
             self.preset_store.delete(name)
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not delete preset", str(exc))
             return
         self._refresh_preset_combos()
         self.statusBar().showMessage("Deleted preset %s" % name)
@@ -4030,16 +4334,36 @@ class MainWindow(QMainWindow):
         # The library can change outside this tab (a save from the
         # Image tab, a CLI add) — re-read it whenever the tab is
         # opened, so the grid is never stale.
+        warned = False
         if self.tabs.tabText(index) == "Library":
-            self._refresh_library()
+            warned = self._refresh_library()
+        # And the status bar says what this tab is for (task 22):
+        # one plain line per tab, what it shows and what to do next.
+        # But never over the malformed-entry warning — while bad
+        # entries exist, the warning matters more than the hint.
+        hints = {
+            "Image": "Import an image to turn it into a pixel sprite.",
+            "Video": "Import a video to turn its frames into sprites.",
+            "Prompt": "Describe a sprite and press Generate.",
+            "Code": ("Import code or a game asset to see the sprites "
+                     "it defines."),
+            "Library": "Your saved sprites — click one to preview it.",
+        }
+        hint = hints.get(self.tabs.tabText(index))
+        if hint is not None and not warned:
+            self.statusBar().showMessage(hint)
 
     def _refresh_library(self):
         """Rebuild the Library tab grid from the index, honoring
         the search box and tag filter. The tag list rebuilds too,
         keeping the selection when the tag still exists, and the
-        selected entry stays selected when it is still visible."""
+        selected entry stays selected when it is still visible.
+        Returns True while malformed entries exist — the warning
+        shows once per window (at construction, usually), and the
+        caller (a tab switch) must not overwrite it with a tab
+        hint while it still applies."""
         if not hasattr(self, "library_list"):
-            return  # tab still being built
+            return False  # tab still being built
         try:
             entries = self.library.search(
                 text=self.library_search_edit.text().strip() or None,
@@ -4053,7 +4377,7 @@ class MainWindow(QMainWindow):
             # unreadable library has nothing in it.
             self.library_stack.setCurrentWidget(self.library_list)
             self._clear_library_selection()
-            return
+            return False
         selected = self._selected_library_id()
         skipped = self.library.skipped_entries()
         if skipped and not self._library_skip_warned:
@@ -4108,7 +4432,8 @@ class MainWindow(QMainWindow):
         if len(entries) == total:
             if total:
                 self.library_count_label.setText(
-                    "%d sprite(s) in the library%s" % (total, note))
+                    "%s in the library%s"
+                    % (plural(total, "sprite"), note))
             elif skipped:
                 self.library_count_label.setText(
                     "No usable sprites in the library%s" % note)
@@ -4118,7 +4443,8 @@ class MainWindow(QMainWindow):
                     "Image, Video, Prompt, or Code tab.")
         else:
             self.library_count_label.setText(
-                "%d of %d sprite(s)%s" % (len(entries), total, note))
+                "%d of %s%s"
+                % (len(entries), plural(total, "sprite"), note))
         # The grid area shows a centered "No sprites yet" label
         # while the library is empty (review B1); once sprites
         # exist, the list shows instead.
@@ -4133,8 +4459,9 @@ class MainWindow(QMainWindow):
                 if item.data(Qt.ItemDataRole.UserRole) == selected:
                     self.library_list.setCurrentItem(item)
                     self._show_library_entry(selected)
-                    return
+                    return bool(skipped)
         self._clear_library_selection()
+        return bool(skipped)
 
     def _selected_library_id(self):
         item = self.library_list.currentItem()
@@ -4185,10 +4512,15 @@ class MainWindow(QMainWindow):
             lines.append("%d x %d sprite" % (entry["width"],
                                              entry["height"]))
         if entry.get("palette"):
-            lines.append("Palette: %s" % entry["palette"])
+            # Display labels, not stored keys: "From image", not
+            # "image" (task 22). An unknown key still shows as-is
+            # rather than vanishing.
+            lines.append("Palette: %s" % PALETTE_LABELS.get(
+                entry["palette"], entry["palette"]))
         if entry.get("tags"):
             lines.append("Tags: %s" % ", ".join(entry["tags"]))
-        lines.append("From: %s" % entry["source"])
+        lines.append("From: %s" % SOURCE_LABELS.get(
+            entry["source"], entry["source"]))
         lines.append("Saved: %s" % entry["created"][:10])
         self.library_info_label.setText("\n".join(lines))
         self.library_load_btn.setEnabled(True)
@@ -4223,7 +4555,7 @@ class MainWindow(QMainWindow):
         try:
             self.library.rename(entry["id"], name.strip())
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not rename", str(exc))
             return
         self._refresh_library()
         self.statusBar().showMessage("Renamed to %s" % name.strip())
@@ -4244,7 +4576,7 @@ class MainWindow(QMainWindow):
         try:
             self.library.remove(entry["id"])
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not delete", str(exc))
             return
         self._refresh_library()
         self.statusBar().showMessage(
@@ -4255,7 +4587,10 @@ class MainWindow(QMainWindow):
         if entry is None:
             return
         src = self.library.path_for(entry)
-        default = str(Path.home() / entry["file"])
+        # The library folder is the store — exporting next to the
+        # stored file would pollute it. The last-used export
+        # folder instead (task 22).
+        default = self._export_default(entry["file"])
         path, _ = QFileDialog.getSaveFileName(
             self, "Export a copy", default, "PNG image (*.png)")
         if not path:
@@ -4269,9 +4604,10 @@ class MainWindow(QMainWindow):
                 shutil.copyfile(self.library.directory / entry["meta"],
                                 dest.with_suffix(".json"))
         except OSError as exc:
-            QMessageBox.warning(self, "Pixel Forge",
+            warn_dialog(self, "Could not export",
                                 "could not write: %s" % exc)
             return
+        self._remember_export_dir(dest.parent)
         self.statusBar().showMessage("Exported %s" % dest.name)
 
     # ------------------------------------------------ save to library
@@ -4330,7 +4666,7 @@ class MainWindow(QMainWindow):
         try:
             entry = saver(dialog.name_text(), dialog.tags_list())
         except PixelForgeError as exc:
-            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            warn_dialog(self, "Could not save to the library", str(exc))
             return None
         self.statusBar().showMessage(
             "Saved %s to the library" % entry["name"])

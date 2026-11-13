@@ -373,7 +373,7 @@ class ParseDriverTests(unittest.TestCase):
         with self.assertRaises(PixelForgeError) as ctx:
             parse_paths([folder])
         message = str(ctx.exception)
-        self.assertIn("could not parse any of 2 file(s)", message)
+        self.assertIn("could not parse any of 2 files", message)
         self.assertIn("a.py", message)
         self.assertIn("b.py", message)
 

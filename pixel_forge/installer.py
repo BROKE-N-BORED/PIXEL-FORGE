@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
 
-from .pixelize import PixelForgeError  # noqa: E402
+from .pixelize import PixelForgeError, plural  # noqa: E402
 
 
 # ---------------------------------------------------------------- context
@@ -907,8 +907,8 @@ class InstallerWindow(QMainWindow):
             if can_launch:
                 if warned:
                     self.statusBar().showMessage(
-                        "Installed with %d warning(s) — see the log"
-                        % len(warned))
+                        "Installed with %s — see the log"
+                        % plural(len(warned), "warning"))
                 else:
                     self.statusBar().showMessage("Installed!")
                 self.launch_btn.setEnabled(True)
@@ -927,8 +927,8 @@ class InstallerWindow(QMainWindow):
                           "Press Install again to redo the install.")
         else:
             self.statusBar().showMessage(
-                "Finished with %d failed step(s) — see the log"
-                % len(failed))
+                "Finished with %s — see the log"
+                % plural(len(failed), "failed step"))
             self._log("")
             self._log("Some steps failed. You can press Install again "
                       "— it redoes the failed steps and leaves the "

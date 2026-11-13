@@ -33,7 +33,7 @@ from .imagegen import (DEFAULT_NEGATIVE, DEFAULT_SIZE, LCM_CFG,
                        find_model, prompt_to_sprites, slugify)
 from .library import Library, normalize_tags
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
-                       load_image, pixelize_file)
+                       load_image, pixelize_file, plural)
 from .presets import PresetStore
 from .skins import extract_skin
 from .spritesheet import load_frame_dir, write_sheet
@@ -314,11 +314,11 @@ def cmd_prompt(args):
     landed = [c for c in batch["candidates"]
               if c["status"] == "pending"]
     failed = len(batch["candidates"]) - len(landed)
-    print("%d candidate(s) + pixelized versions in %s"
-          % (len(landed), bdir))
+    print("%s + pixelized versions in %s"
+          % (plural(len(landed), "candidate"), bdir))
     if failed:
-        print("%d candidate(s) failed — see batch.json in %s"
-              % (failed, bdir))
+        print("%s failed — see batch.json in %s"
+              % (plural(failed, "candidate"), bdir))
     return 0
 
 
@@ -444,8 +444,9 @@ def cmd_code(args):
     if args.list:
         if not assets:
             print("No pixel-art assets found in %s "
-                  "(parsed %d file(s))"
-                  % (args.file, len(result["files"])))
+                  "(parsed %s)"
+                  % (args.file,
+                     plural(len(result["files"]), "file")))
         for asset in assets:
             print(_describe_asset(asset))
         for note in result["not_rendered"]:
@@ -471,9 +472,10 @@ def cmd_code(args):
             return 0
     if not assets:
         raise PixelForgeError(
-            "no pixel-art assets found in %s (parsed %d file(s)) — "
+            "no pixel-art assets found in %s (parsed %s) — "
             "nothing to render" % (args.file,
-                                   len(result["files"])))
+                                   plural(len(result["files"]),
+                                          "file")))
     raise PixelForgeError(
         "no asset named %r in %s (found: %s)"
         % (args.asset, args.file,
@@ -487,8 +489,8 @@ def cmd_skin(args):
         out = str(src.with_name(src.stem + "-skin-parts"))
     written = extract_skin(args.file, out)
     parts = [p for p in written if p.name != "figure.png"]
-    print("%d part(s) + figure in %s"
-          % (len(parts), out))
+    print("%s + figure in %s"
+          % (plural(len(parts), "part"), out))
     return 0
 
 

@@ -35,6 +35,17 @@ MIN_COLORS = 2
 MAX_COLORS = 256
 
 
+def plural(count, singular, plural_form=None):
+    """'1 asset' / '7 assets' — never the programmer phrasing
+    with a parenthesized s (task 22). Lives here because every
+    module that talks to the user already imports this one."""
+    if count == 1:
+        return "1 %s" % singular
+    if plural_form is None:
+        plural_form = singular + "s"
+    return "%d %s" % (count, plural_form)
+
+
 class PixelForgeError(Exception):
     """A readable, user-facing error (bad input, unreadable file,
     failed save). Callers print the message, never a traceback."""
