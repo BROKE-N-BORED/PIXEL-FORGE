@@ -154,6 +154,19 @@ class FindTests(ImageGenBase):
         self.assertIn(MODEL_FILENAME, model_missing_text())
         self.assertIn("2.1 GB", model_missing_text())
 
+    def test_model_missing_text_names_both_homes(self):
+        # B13: the GUI status line once named only
+        # ~/pixel-forge-models/, so a user following it
+        # downloaded a second 2.1 GB copy instead of using the
+        # shared home find_model checks first. This message
+        # already named both — pin it, shared home first.
+        text = model_missing_text()
+        self.assertIn("~/design-shell-models/", text)
+        self.assertIn("~/pixel-forge-models/", text)
+        self.assertLess(text.index("~/design-shell-models/"),
+                        text.index("~/pixel-forge-models/"),
+                        "shared home first — find_model checks it first")
+
 
 class PromptTests(ImageGenBase):
     def test_validate_prompt_strips_and_accepts(self):

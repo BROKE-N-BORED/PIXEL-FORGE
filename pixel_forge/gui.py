@@ -1928,9 +1928,17 @@ class MainWindow(QMainWindow):
         if status["model"] is not None:
             model_line = "Model: found at %s" % status["model"]
         else:
+            # Both model homes, shared home first: find_model checks
+            # ~/design-shell-models/ first, so a user following a
+            # line that named only ~/pixel-forge-models/ downloaded
+            # a second 2.1 GB copy instead of using the shared one
+            # (review B13). The label wraps and _fit_prompt_status_
+            # label() sizes it from its own heightForWidth, so the
+            # longer line needs no layout change.
             model_line = ("Model: missing — download "
                           "LCM_Dreamshaper_v7-f16.gguf (about 2.1 GB) "
-                          "into ~/pixel-forge-models/")
+                          "into ~/design-shell-models/ or "
+                          "~/pixel-forge-models/")
         self.prompt_status_label.setText(
             "%s\n%s" % (engine_line, model_line))
         self._fit_prompt_status_label()

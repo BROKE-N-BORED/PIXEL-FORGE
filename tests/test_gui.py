@@ -1034,6 +1034,36 @@ class PromptGuiTests(unittest.TestCase):
         self.assertIn("Engine: missing", text)
         self.assertIn("--with-image-engine", text)
         self.assertIn("Model: missing", text)
+        # B13: the line once named only ~/pixel-forge-models/,
+        # so a user following it downloaded a second 2.1 GB copy
+        # instead of using the shared home find_model checks first.
+        self.assertIn("~/design-shell-models/", text)
+        self.assertIn("~/pixel-forge-models/", text)
+        self.assertLess(text.index("~/design-shell-models/"),
+                        text.index("~/pixel-forge-models/"),
+                        "shared home first — find_model checks it first")
+
+    def test_status_label_is_tall_enough_when_missing(self):
+        # The missing-model line is the longest status text (it
+        # names both model homes); the label must still be tall
+        # enough for its wrapped lines, not clipped into the Size
+        # section below.
+        from unittest import mock
+        from pixel_forge import imagegen as imagegen_mod
+        self.win.show()
+        self.app.processEvents()
+        with mock.patch.object(imagegen_mod, "find_engine",
+                               return_value=None), \
+                mock.patch.object(imagegen_mod, "find_model",
+                                  return_value=None):
+            self.win._refresh_prompt_status()
+        self.app.processEvents()
+        label = self.win.prompt_status_label
+        needed = label.heightForWidth(230)
+        self.assertGreaterEqual(label.height(), needed,
+                                "status label %d px tall, wrapped "
+                                "text needs %d px"
+                                % (label.height(), needed))
 
     def test_generate_without_engine_refuses(self):
         from unittest import mock

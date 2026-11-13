@@ -1,5 +1,24 @@
 # Pixel Forge changelog
 
+## 0.28 — 2026-11-13
+
+The Prompt tab's model-missing line now names both model homes —
+task-list item #17 (bug B13). It used to say only
+`~/pixel-forge-models/`, but `find_model` checks
+`~/design-shell-models/` first, so a user following the line
+downloaded a second 2.1 GB copy instead of using the shared one.
+The line now reads "into ~/design-shell-models/ or
+~/pixel-forge-models/", shared home first; the label wraps and its
+height is sized from its own text, so the longer line needs no
+layout change. Same-class audit: the installer's model-download
+failure warning named only the shared home and now names both;
+the imagegen missing-model message already named both (pinned by
+a test); the CLI prompt error goes through that message; the
+README's model line describes the installer's own download and
+names no folder to put a model in; install.sh downloads into the
+shared home and reports where it put the file. No lookup behavior
+changed — wording only.
+
 ## 0.27 — 2026-11-13
 
 `compute_target_size` now guards zero (and negative) source

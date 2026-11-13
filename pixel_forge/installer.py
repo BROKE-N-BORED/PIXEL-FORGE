@@ -414,9 +414,14 @@ def step_image_engine(ctx):
             # the next run resumes it (-C -) instead of starting
             # over. Only a completed-but-wrong file is deleted,
             # below.
+            # Both homes: find_model checks the shared home first
+            # and Pixel Forge's own home second, so a model in
+            # either one makes prompt import work (review B13 —
+            # the old line named only the shared home).
             ctx.log("WARNING: the model download failed (exit %s) — "
                     "prompt import will stay unavailable until the "
-                    "model is in ~/design-shell-models/." % code)
+                    "model is in ~/design-shell-models/ or "
+                    "~/pixel-forge-models/." % code)
             return StepResult(StepResult.WARN,
                               "model download failed — prompt import "
                               "unavailable")

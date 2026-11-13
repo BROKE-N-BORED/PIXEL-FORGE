@@ -390,7 +390,7 @@ class ImageEnginePinTests(unittest.TestCase):
                 return 22
             return 0
 
-        result, _lines, _commands, checked = self._drive_step(
+        result, lines, _commands, checked = self._drive_step(
             run, engine_values=[Path("/opt/sd.cpp/bin/sd-cli")],
             model_values=[None, None])
         self.assertEqual(result.status, StepResult.WARN)
@@ -401,6 +401,11 @@ class ImageEnginePinTests(unittest.TestCase):
                         "the partial file was deleted — resume lost")
         self.assertEqual(checked, [],
                          "the hash check ran on a failed download")
+        # B13: the failure warning once named only the shared
+        # home — a model in either home makes prompt import work.
+        log = "\n".join(lines)
+        self.assertIn("~/design-shell-models/", log)
+        self.assertIn("~/pixel-forge-models/", log)
 
 
 @unittest.skipUnless(HAS_QT, "PySide6 not available")
