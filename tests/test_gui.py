@@ -626,6 +626,11 @@ class SpritesheetGuiTests(unittest.TestCase):
             raise unittest.SkipTest("ffmpeg not installed")
         # 2 seconds at 24 fps, 8 fps extraction = 16 frames.
         cls.clip = make_test_video(os.path.join(cls.tmp, "clip.mp4"))
+        # 30 seconds, for the B8 new-import test: a second clip
+        # to load after the first, so the fps controls are
+        # asserted across a real import.
+        cls.long_clip = make_test_video(
+            os.path.join(cls.tmp, "long.mp4"), duration=30)
 
     def setUp(self):
         from pixel_forge.gui import MainWindow
@@ -692,14 +697,91 @@ class SpritesheetGuiTests(unittest.TestCase):
         self.assertTrue(self.win.sheet_preview_btn.isEnabled())
         self.assertTrue(self.win.sheet_export_btn.isEnabled())
 
-    def test_sheet_fps_follows_extraction_fps(self):
+    def test_sheet_fps_keeps_own_value_on_extraction_change(self):
+        # B8: this test used to pin the overwrite — changing the
+        # extraction fps dragged the sheet fps with it. The three
+        # fps controls keep their own values now.
         self.win.load_video(self.clip)
         self.assertTrue(self._wait_for_video())
         self.assertEqual(self.win.sheet_fps_spin.value(), 8)
+        self.assertEqual(self.win.video_play_fps_spin.value(), 8)
         index = self.win.video_fps_combo.findData(4)
         self.win.video_fps_combo.setCurrentIndex(index)
         self.assertTrue(self._wait_for_video())
-        self.assertEqual(self.win.sheet_fps_spin.value(), 4)
+        self.assertEqual(self.win.video_fps_combo.currentData(), 4)
+        self.assertEqual(self.win.sheet_fps_spin.value(), 8)
+        self.assertEqual(self.win.video_play_fps_spin.value(), 8)
+        self.assertEqual(len(self.win.video_frames), 8)
+
+    def test_fps_controls_keep_own_values_on_reload(self):
+        self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
+        self.win.video_play_fps_spin.setValue(2)
+        self.win.sheet_fps_spin.setValue(12)
+        # Every-Nth is an extract setting: changing it reloads
+        # (re-extracts) without touching any fps control.
+        self.win.video_every_spin.setValue(2)
+        self.assertTrue(self._wait_for_video())
+        self.assertEqual(self.win.video_fps_combo.currentData(), 8)
+        self.assertEqual(self.win.video_play_fps_spin.value(), 2)
+        self.assertEqual(self.win.sheet_fps_spin.value(), 12)
+        # And a pixelize-only change (re-pixelize, no re-extract)
+        # leaves them alone too.
+        self.win.video_colors_spin.setValue(4)
+        self.assertTrue(self._wait_for_video())
+        self.assertEqual(self.win.video_fps_combo.currentData(), 8)
+        self.assertEqual(self.win.video_play_fps_spin.value(), 2)
+        self.assertEqual(self.win.sheet_fps_spin.value(), 12)
+
+    def test_fps_controls_keep_own_values_on_new_import(self):
+        self.win.load_video(self.long_clip)
+        self.assertTrue(self._wait_for_video())
+        index = self.win.video_fps_combo.findData(4)
+        self.win.video_fps_combo.setCurrentIndex(index)
+        self.win.video_play_fps_spin.setValue(2)
+        self.win.sheet_fps_spin.setValue(12)
+        self.assertTrue(self._wait_for_video())
+        self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
+        self.assertEqual(self.win.video_fps_combo.currentData(), 4)
+        self.assertEqual(self.win.video_play_fps_spin.value(), 2)
+        self.assertEqual(self.win.sheet_fps_spin.value(), 12)
+        self.assertEqual(len(self.win.video_frames), 8)
+
+    def test_fps_labels(self):
+        texts = visible_texts(self.win)
+        self.assertIn("Extract fps", texts)
+        self.assertIn("Preview fps", texts)
+        self.assertIn("Sheet fps", texts)
+        self.assertNotIn("Frames per second", texts)
+        self.assertNotIn("Playback fps", texts)
+
+    def test_playback_uses_preview_fps(self):
+        self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
+        self.win.video_play_fps_spin.setValue(2)
+        self.win._on_play_pause()
+        try:
+            self.assertTrue(self.win.video_timer.isActive())
+            self.assertEqual(self.win.video_timer.interval(), 500)
+        finally:
+            self.win._stop_playback()
+
+    def test_sheet_metadata_uses_sheet_fps_not_extraction(self):
+        import json
+        self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
+        index = self.win.video_fps_combo.findData(4)
+        self.win.video_fps_combo.setCurrentIndex(index)
+        self.win.sheet_fps_spin.setValue(12)
+        self.assertTrue(self._wait_for_video())
+        png = os.path.join(self.tmp, "fps-sheet.png")
+        self.assertTrue(self.win.export_spritesheet(png))
+        with open(os.path.join(self.tmp, "fps-sheet.json")) as handle:
+            meta = json.load(handle)
+        self.assertEqual(meta["fps"], 12)
+        self.assertEqual([f["duration_ms"] for f in meta["frames"]],
+                         [83] * len(meta["frames"]))
 
     def test_preview_dialog_shows_packed_sheet(self):
         import math

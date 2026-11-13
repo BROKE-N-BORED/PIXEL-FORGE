@@ -965,7 +965,7 @@ class MainWindow(QMainWindow):
 
         form.addWidget(self._section("Frames"))
         fps_row = QHBoxLayout()
-        fps_row.addWidget(QLabel("Frames per second"))
+        fps_row.addWidget(QLabel("Extract fps"))
         self.video_fps_combo = QComboBox()
         for preset in FPS_PRESETS:
             self.video_fps_combo.addItem(str(preset), preset)
@@ -1160,7 +1160,7 @@ class MainWindow(QMainWindow):
         self.video_play_btn.setEnabled(False)
         self.video_play_btn.clicked.connect(self._on_play_pause)
         playback_row.addWidget(self.video_play_btn)
-        playback_row.addWidget(QLabel("Playback fps"))
+        playback_row.addWidget(QLabel("Preview fps"))
         self.video_play_fps_spin = QSpinBox()
         self.video_play_fps_spin.setRange(1, 30)
         self.video_play_fps_spin.setValue(DEFAULT_FPS)
@@ -1359,8 +1359,12 @@ class MainWindow(QMainWindow):
             self._cleanup_video_raw()
             self.video_raw_dir = result["raw_dir"]
             self.video_raw_frames = result["raw"]
-            self.video_play_fps_spin.setValue(result["fps"])
-            self.sheet_fps_spin.setValue(result["fps"])
+            # B8: the three fps controls keep their own values —
+            # a reload used to copy the extraction fps into the
+            # Preview and Sheet fps controls, silently stomping
+            # whatever the user had set there. Nothing copies one
+            # fps into another; each control is read only where
+            # it applies (extraction, playback, sheet metadata).
             self.video_keep = [True] * len(result["frames"])
         elif len(self.video_keep) != len(result["frames"]):
             self.video_keep = [True] * len(result["frames"])

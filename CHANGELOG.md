@@ -1,5 +1,30 @@
 # Pixel Forge changelog
 
+## 0.24 — 2026-11-13
+
+The three Video tab fps controls stop overwriting each other —
+task-list item #12 (bug B8). Every reload used to copy the
+extraction fps into the Preview and Sheet fps controls, silently
+stomping whatever the user had set there. Each control now keeps
+its own value across reloads, re-pixelizes, and new imports, and
+the labels say what each one is for: "Extract fps", "Preview
+fps", "Sheet fps".
+
+- GUI: `_on_video_run_done` no longer writes the run's fps into
+  the preview/sheet spins. Extraction reads Extract fps,
+  playback reads Preview fps (the play timer interval), and
+  sheet export reads Sheet fps (the metadata fps).
+- The CLI needed no change: `frames --fps` drives extraction
+  only and `sheet --fps` is recorded in the metadata only —
+  each command takes its own flag and neither overwrites a
+  stored value.
+- Tests: the old `test_sheet_fps_follows_extraction_fps`, which
+  pinned the overwrite, is replaced by six B8 tests — the
+  controls keep their values across a reload and a new import,
+  the labels read exactly "Extract fps" / "Preview fps" /
+  "Sheet fps", playback uses Preview fps, and sheet metadata
+  uses Sheet fps.
+
 ## 0.23 — 2026-11-13
 
 The Video tab's start/end range resets on a new import — task-list
