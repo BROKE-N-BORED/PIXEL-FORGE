@@ -1,6 +1,6 @@
 """Library tests — plain-file storage, index, search, tags.
 
-Skipped when PySide6 is not importable."""
+Qt-free (task 64): runs without PySide6."""
 import json
 import os
 import sys
@@ -10,20 +10,18 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-try:
-    from helpers import ensure_app, make_solid_image, write_image  # noqa: E402
-    from pixel_forge.library import (LIBRARY_FORMAT, Library,  # noqa: E402
-                                     default_library_dir,
-                                     normalize_tags, slugify,
-                                     validate_entry)
-    from pixel_forge.pixelize import PixelForgeError  # noqa: E402
-except ImportError as exc:
-    # Task 63: every test here needs Qt, so skip the module when
-    # PySide6 is what is missing — but a genuinely broken import
-    # still fails loudly instead of hiding behind the skip.
-    if exc.name and exc.name.startswith("PySide6"):
-        raise unittest.SkipTest("PySide6 not available")
-    raise
+from helpers import make_solid_image, write_image  # noqa: E402
+from pixel_forge.image import Image  # noqa: E402
+from pixel_forge.library import (LIBRARY_FORMAT, Library,  # noqa: E402
+                                 default_library_dir,
+                                 normalize_tags, slugify,
+                                 validate_entry)
+from pixel_forge.pixelize import PixelForgeError  # noqa: E402
+
+# The QApplication must exist before the first load_image
+# call takes the Qt path (see helpers.ensure_app_if_qt).
+from helpers import ensure_app_if_qt  # noqa: E402
+ensure_app_if_qt()
 
 
 class SlugTests(unittest.TestCase):
@@ -43,10 +41,6 @@ class SlugTests(unittest.TestCase):
 
 
 class LibraryTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        ensure_app()
-
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.lib = Library(os.path.join(self.tmp, "lib"))
@@ -109,9 +103,8 @@ class LibraryTests(unittest.TestCase):
     def test_add_image_rejects_blank_name_and_null_image(self):
         with self.assertRaises(PixelForgeError):
             self.lib.add_image(self._image(), "   ")
-        from PySide6.QtGui import QImage
         with self.assertRaises(PixelForgeError):
-            self.lib.add_image(QImage(), "Empty")
+            self.lib.add_image(Image(0, 0), "Empty")
 
     def test_add_file_copies_and_converts_to_png(self):
         src = write_image(self._image(16, 16), os.path.join(

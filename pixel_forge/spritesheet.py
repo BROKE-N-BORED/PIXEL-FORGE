@@ -23,8 +23,7 @@ import math
 import os
 from pathlib import Path
 
-from PySide6.QtGui import QImage, QPainter
-
+from .image import Image
 from .pixelize import PixelForgeError, load_image
 from .video import sorted_frames
 
@@ -75,7 +74,7 @@ def layout_frames(count, frame_w, frame_h, cols=None, padding=0):
 
 def check_uniform(frames):
     """All frames the same size, or a readable error naming the
-    odd one out. frames is a list of (name, QImage)."""
+    odd one out. frames is a list of (name, Image)."""
     if not frames:
         raise PixelForgeError("no frames to pack")
     first_name, first = frames[0]
@@ -92,9 +91,9 @@ def check_uniform(frames):
 
 
 def pack_frames(images, cols=None, padding=0):
-    """Pack QImages into one transparent sheet.
+    """Pack Images into one transparent sheet.
 
-    Returns (sheet QImage, layout dict). All images must be the
+    Returns (sheet Image, layout dict). All images must be the
     same size. Empty cells in a partial last row stay transparent.
     """
     if not images:
@@ -103,15 +102,19 @@ def pack_frames(images, cols=None, padding=0):
     frame_w, frame_h = images[0].width(), images[0].height()
     layout = layout_frames(len(images), frame_w, frame_h,
                            cols=cols, padding=padding)
-    sheet = QImage(layout["sheet_width"], layout["sheet_height"],
-                   QImage.Format.Format_ARGB32)
-    sheet.fill(0)  # transparent background, gaps, and empty cells
-    painter = QPainter(sheet)
-    try:
-        for image, (x, y) in zip(images, layout["positions"]):
-            painter.drawImage(x, y, image)
-    finally:
-        painter.end()
+    sheet = Image(layout["sheet_width"], layout["sheet_height"])
+    # Frames are blitted, not blended: the sheet starts fully
+    # transparent and frames never overlap, so a plain copy is
+    # exactly what QPainter's SourceOver drawImage produced here.
+    sheet_data = sheet.data
+    sheet_stride = layout["sheet_width"] * 4
+    for image, (x, y) in zip(images, layout["positions"]):
+        src = image.data
+        src_stride = frame_w * 4
+        for row in range(frame_h):
+            s = row * src_stride
+            d = ((y + row) * layout["sheet_width"] + x) * 4
+            sheet_data[d:d + src_stride] = src[s:s + src_stride]
     return sheet, layout
 
 
@@ -151,7 +154,7 @@ def build_metadata(sheet_name, frame_names, frame_w, frame_h,
 def load_frame_dir(directory):
     """Load the PNG frames in a folder, in playback order.
 
-    Returns a list of (name, QImage). frame_NNN.png names sort
+    Returns a list of (name, Image). frame_NNN.png names sort
     numerically (frame_1000 after frame_999); other names sort
     alphabetically. Non-PNG files are ignored. Raises
     PixelForgeError when the folder is missing, holds no PNGs, or
@@ -264,7 +267,7 @@ def load_metadata(path):
 def extract_frame(sheet, metadata, index):
     """Cut one frame out of a sheet by its metadata entry.
 
-    Returns a QImage copy of that frame's rectangle. Raises
+    Returns an Image copy of that frame's rectangle. Raises
     PixelForgeError when the index is out of range.
     """
     frames = metadata["frames"]

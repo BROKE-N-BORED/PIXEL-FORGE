@@ -1,10 +1,7 @@
 """Core pixelizer tests.
 
-Run with the Qt test env (see AGENTS.md):
-  LD_LIBRARY_PATH=~/workspace/qt-libs/root/usr/lib/x86_64-linux-gnu \
-  QT_QPA_PLATFORM=offscreen \
-  ~/workspace/forge-v2-testenv/bin/python -m unittest discover -s tests
-Skipped when PySide6 is not importable.
+Qt-free (task 64): runs on bare python as well as under the Qt
+test env (see AGENTS.md).
 """
 import os
 import sys
@@ -16,22 +13,25 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pixel_forge.palettes import PICO8  # noqa: E402
 
+from helpers import (  # noqa: E402
+    make_gradient_image, make_solid_image,
+    make_transparent_image, write_image)
+from pixel_forge.image import Image  # noqa: E402
+from pixel_forge.pixelize import (  # noqa: E402
+    PixelForgeError, compute_target_size, count_opaque_colors,
+    downscale, load_image, opaque_pixels, pixelize_file,
+    pixelize_image, quantize)
+
+# The QApplication must exist before the first load_image
+# call takes the Qt path (see helpers.ensure_app_if_qt).
+from helpers import ensure_app_if_qt  # noqa: E402
+ensure_app_if_qt()
+
 try:
-    from helpers import (  # noqa: E402
-        ensure_app, make_gradient_image, make_solid_image,
-        make_transparent_image, write_image)
-    from PySide6.QtGui import QImage  # noqa: E402
-    from pixel_forge.pixelize import (  # noqa: E402
-        PixelForgeError, compute_target_size, count_opaque_colors,
-        downscale, load_image, opaque_pixels, pixelize_file,
-        pixelize_image, quantize)
-except ImportError as exc:
-    # Task 63: every test here needs Qt, so skip the module when
-    # PySide6 is what is missing — but a genuinely broken import
-    # still fails loudly instead of hiding behind the skip.
-    if exc.name and exc.name.startswith("PySide6"):
-        raise unittest.SkipTest("PySide6 not available")
-    raise
+    from PySide6.QtGui import QImage  # noqa: F401
+    HAS_QT = True
+except ImportError:
+    HAS_QT = False
 
 
 def make_two_color_image():
@@ -40,7 +40,7 @@ def make_two_color_image():
     The regression image for the palette bugs — two colors far
     apart, so a broken palette step shows up as one flat color.
     """
-    image = QImage(64, 64, QImage.Format.Format_ARGB32)
+    image = Image(64, 64)
     image.fill(0xFF880000)
     for y in range(32):
         for x in range(32):
@@ -51,7 +51,6 @@ def make_two_color_image():
 class PixelizeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        ensure_app()
         cls.tmp = tempfile.mkdtemp()
 
     def _gradient_png(self, name="gradient.png"):
@@ -71,14 +70,58 @@ class PixelizeTests(unittest.TestCase):
             fh.write("this is not an image at all")
         with self.assertRaises(PixelForgeError) as caught:
             load_image(path)
-        self.assertIn("could not read as an image", str(caught.exception))
+        message = str(caught.exception)
+        self.assertIn(str(path), message)
+        if HAS_QT:
+            self.assertIn("could not read as an image", message)
+        else:
+            # No Qt: only PNG loads, and the refusal names the fix.
+            self.assertIn("is not a PNG", message)
+            self.assertIn("Install PySide6", message)
 
+    def test_load_damaged_png_fails_cleanly(self):
+        # A damaged PNG fails the same way with and without Qt —
+        # the signature is right, so the stdlib path tries to
+        # decode it and fails like Qt does.
+        from pixel_forge.pngio import PNG_SIGNATURE
+        path = os.path.join(self.tmp, "damaged.png")
+        with open(path, "wb") as fh:
+            fh.write(PNG_SIGNATURE + b"garbagegarbagegarbage")
+        with self.assertRaises(PixelForgeError) as caught:
+            load_image(path)
+        self.assertIn("could not read as an image",
+                      str(caught.exception))
+
+    @unittest.skipIf(HAS_QT, "needs the no-Qt refusal path")
+    def test_jpg_without_qt_refuses_plainly(self):
+        # Without Qt there is no JPEG decoder: a JPG input fails
+        # with a plain message naming the file and the fix, never
+        # a traceback.
+        path = os.path.join(self.tmp, "photo.jpg")
+        with open(path, "wb") as fh:
+            fh.write(b"\xff\xd8\xff\xe0" + b"junk" * 10)
+        with self.assertRaises(PixelForgeError) as caught:
+            load_image(path)
+        message = str(caught.exception)
+        self.assertIn("is not a PNG", message)
+        self.assertIn(str(path), message)
+        self.assertIn("Install PySide6", message)
+
+    @unittest.skipUnless(HAS_QT, "PySide6 not available")
     def test_jpg_loads(self):
-        path = write_image(make_gradient_image(80, 60),
-                           os.path.join(self.tmp, "photo.jpg"), "JPG")
+        # Image.save writes PNG only, so the JPG fixture is
+        # written through Qt — the load under test is
+        # load_image's Qt path.
+        from helpers import ensure_app
+        from pixel_forge.qtimage import to_qimage
+        ensure_app()
+        path = os.path.join(self.tmp, "photo.jpg")
+        self.assertTrue(to_qimage(make_gradient_image(80, 60))
+                        .save(path, "JPG"))
         image = load_image(path)
         self.assertEqual((image.width(), image.height()), (80, 60))
 
+    @unittest.skipUnless(HAS_QT, "PySide6 not available")
     def test_gif_first_frame_loads(self):
         # Qt reads GIF but cannot write it, so the fixture is a real
         # 1x1 GIF (base64) written as raw bytes.
@@ -247,7 +290,7 @@ class PixelizeTests(unittest.TestCase):
                                               max_colors=8)
         self.assertEqual((width, height), (32, 32))
         self.assertLessEqual(colors, 8)
-        back = QImage(out)
+        back = load_image(out)
         self.assertFalse(back.isNull())
         self.assertEqual((back.width(), back.height()), (32, 32))
 

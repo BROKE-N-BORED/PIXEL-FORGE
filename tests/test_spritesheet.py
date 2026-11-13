@@ -3,7 +3,7 @@ folder loading, and playback from the sheet. No fixtures needed:
 small solid-color frames, each a distinct color so a wrong position
 shows up as a wrong pixel.
 
-Skipped when PySide6 is not importable."""
+Qt-free (task 64): runs without PySide6."""
 import json
 import os
 import sys
@@ -12,23 +12,19 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-try:
-    from helpers import make_solid_image, write_image  # noqa: E402
-    from PySide6.QtGui import QImage  # noqa: E402
-    from pixel_forge.pixelize import PixelForgeError  # noqa: E402
-    from pixel_forge.spritesheet import (auto_columns, build_metadata,  # noqa: E402
-                                         check_uniform, duration_for_fps,
-                                         extract_frame, frames_from_sheet,
-                                         layout_frames, load_frame_dir,
-                                         load_metadata, pack_frames,
-                                         write_sheet)
-except ImportError as exc:
-    # Task 63: every test here needs Qt, so skip the module when
-    # PySide6 is what is missing — but a genuinely broken import
-    # still fails loudly instead of hiding behind the skip.
-    if exc.name and exc.name.startswith("PySide6"):
-        raise unittest.SkipTest("PySide6 not available")
-    raise
+from helpers import make_solid_image, write_image  # noqa: E402
+from pixel_forge.pixelize import PixelForgeError, load_image  # noqa: E402
+from pixel_forge.spritesheet import (auto_columns, build_metadata,  # noqa: E402
+                                     check_uniform, duration_for_fps,
+                                     extract_frame, frames_from_sheet,
+                                     layout_frames, load_frame_dir,
+                                     load_metadata, pack_frames,
+                                     write_sheet)
+
+# The QApplication must exist before the first load_image
+# call takes the Qt path (see helpers.ensure_app_if_qt).
+from helpers import ensure_app_if_qt  # noqa: E402
+ensure_app_if_qt()
 
 # Distinct frame colors: (r, g, b) per frame index.
 COLORS = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
@@ -219,7 +215,7 @@ class MetadataTests(unittest.TestCase):
         loaded = load_metadata(js)
         self.assertEqual(loaded, meta)
         # The saved PNG matches the metadata: size + frame pixels.
-        image = QImage(png)
+        image = load_image(png)
         self.assertEqual((image.width(), image.height()),
                          (meta["sheet_width"], meta["sheet_height"]))
         for index, entry in enumerate(meta["frames"]):

@@ -6,7 +6,7 @@ PNG), because no engine or model exists in this sandbox. Live
 generation against the real LCM model is NOT proven here — it needs
 Joshua's PC, where the model pull is the long pole.
 
-Skipped when PySide6 is not importable.
+Qt-free (task 64): runs without PySide6.
 """
 import hashlib
 import json
@@ -20,37 +20,33 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-try:
-    from helpers import ensure_app, stub_env, write_stub_engine  # noqa: E402
-    from pixel_forge import imagegen  # noqa: E402
-    from pixel_forge.imagegen import (DEFAULT_NEGATIVE,  # noqa: E402
-                                      ENGINE_RELEASE, ENGINE_REPO,
-                                      GenerationCancelled, MODEL_FILENAME,
-                                      MODEL_SHA256, MODEL_URL,
-                                      build_command, check_model_file,
-                                      engine_clone_command,
-                                      engine_missing_text, engine_status,
-                                      file_sha256, find_engine, find_model,
-                                      generate, load_batch,
-                                      model_download_command,
-                                      model_missing_text, new_batch,
-                                      pixelize_candidates, prompt_to_sprites,
-                                      save_batch, set_keeper, slugify,
-                                      validate_prompt)
-    from pixel_forge.pixelize import PixelForgeError  # noqa: E402
-except ImportError as exc:
-    # Task 63: every test here needs Qt, so skip the module when
-    # PySide6 is what is missing — but a genuinely broken import
-    # still fails loudly instead of hiding behind the skip.
-    if exc.name and exc.name.startswith("PySide6"):
-        raise unittest.SkipTest("PySide6 not available")
-    raise
+from helpers import stub_env, write_stub_engine  # noqa: E402
+from pixel_forge import imagegen  # noqa: E402
+from pixel_forge.imagegen import (DEFAULT_NEGATIVE,  # noqa: E402
+                                  ENGINE_RELEASE, ENGINE_REPO,
+                                  GenerationCancelled, MODEL_FILENAME,
+                                  MODEL_SHA256, MODEL_URL,
+                                  build_command, check_model_file,
+                                  engine_clone_command,
+                                  engine_missing_text, engine_status,
+                                  file_sha256, find_engine, find_model,
+                                  generate, load_batch,
+                                  model_download_command,
+                                  model_missing_text, new_batch,
+                                  pixelize_candidates, prompt_to_sprites,
+                                  save_batch, set_keeper, slugify,
+                                  validate_prompt)
+from pixel_forge.pixelize import PixelForgeError, load_image  # noqa: E402
+
+# The QApplication must exist before the first load_image
+# call takes the Qt path (see helpers.ensure_app_if_qt).
+from helpers import ensure_app_if_qt  # noqa: E402
+ensure_app_if_qt()
 
 
 class ImageGenBase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        ensure_app()
         cls.tmp = tempfile.mkdtemp()
         cls.stub = write_stub_engine(cls.tmp)
         cls.model = os.path.join(cls.tmp, "dummy.gguf")
@@ -533,8 +529,6 @@ class GenerateTests(ImageGenBase):
         self.assertIn("timed out", batch["candidates"][0]["error"])
 
     def test_pixelize_candidates(self):
-        from PySide6.QtGui import QImage
-
         bdir = self._batch()
         with stub_env(self.stub, self.model):
             generate(bdir)
@@ -543,7 +537,7 @@ class GenerateTests(ImageGenBase):
         for _cand, pixel in pairs:
             path = bdir / pixel
             self.assertTrue(path.is_file())
-            image = QImage(str(path))
+            image = load_image(str(path))
             self.assertEqual((image.width(), image.height()), (32, 32))
         batch = load_batch(bdir)
         self.assertTrue(all("pixel_file" in c

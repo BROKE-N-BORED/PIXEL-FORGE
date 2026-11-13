@@ -17,13 +17,14 @@ import subprocess
 import sys
 import unittest
 
-# Test modules that need Qt: every test in them imports the
-# Qt-only pixelize core, directly or through helpers. Each must
-# raise unittest.SkipTest when PySide6 is unavailable.
+# Test modules that need Qt: only the GUI tests still do (task
+# 64 decoupled the core, so test_cli, test_codeinput,
+# test_imagegen, test_library, test_pixelize, test_presets,
+# test_skins, test_spritesheet and test_video all run without
+# PySide6 now). Each guarded module must raise
+# unittest.SkipTest when PySide6 is unavailable.
 GUARDED_MODULES = (
-    "test_cli", "test_codeinput", "test_gui", "test_imagegen",
-    "test_library", "test_pixelize", "test_presets", "test_skins",
-    "test_spritesheet", "test_video",
+    "test_gui",
 )
 
 PROBE = r"""

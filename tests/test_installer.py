@@ -874,8 +874,8 @@ def _install_sh_text():
 
 def _imagegen_constant(name):
     """A module-level constant from pixel_forge/imagegen.py, read
-    from the source with ast — no import, so this works without
-    PySide6 (imagegen imports the Qt-only core)."""
+    from the source with ast — no import, so the test pins the
+    literal the installers must match."""
     import ast
 
     path = os.path.join(ROOT, "pixel_forge", "imagegen.py")

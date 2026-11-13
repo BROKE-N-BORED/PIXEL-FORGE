@@ -1,21 +1,33 @@
 """Pixel Forge core — image to pixel sprite, no AI, no network.
 
-Pipeline: load with QImage, downscale FIRST with nearest-neighbour
-sampling (honest pixel art: each output pixel is one sampled source
-pixel), then quantize the small image in pure Python. Quantizing after
-the downscale keeps the pure-Python step fast — the image is at most a
-few hundred pixels on a side by then.
+Pipeline: load into a plain RGBA buffer (image.Image), downscale
+FIRST with nearest-neighbour sampling (honest pixel art: each
+output pixel is one sampled source pixel), then quantize the small
+image in pure Python. Quantizing after the downscale keeps the
+pure-Python step fast — the image is at most a few hundred pixels
+on a side by then.
 
-Transparency: pixels with alpha 0 stay transparent, are excluded from
-the palette, and take no part in dithering. Other pixels keep their
-original alpha value; only their color is quantized.
+This module never imports Qt at module level: the core runs with
+no PySide6 at all, so the command line works on a bare system
+python. PNGs decode through the stdlib codec (pngio) when Qt is
+absent; when PySide6 IS present, decoding goes through Qt's libpng
+instead — the stdlib decoder is complete and correct, but ~100x
+slower than libpng on Paeth-heavy photos (a 1080p frame: ~3.3 s
+vs ~0.03 s), and the GUI must not freeze for half a minute on a
+big PNG import. The two decoders are pinned pixel-identical by
+the cross-check in tests/test_pngio.py, and the reference-output
+test runs the stdlib path (bare python) against the v0.18 outputs.
+
+Transparency: pixels with alpha 0 stay transparent, are excluded
+from the palette, and take no part in dithering. Other pixels keep
+their original alpha value; only their color is quantized.
 """
 
+import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, qRgba
-
+from . import pngio
+from .image import Image
 from .palettes import (NAMED_PALETTES, median_cut, nearest_color,
                        select_palette_colors)
 
@@ -29,21 +41,56 @@ class PixelForgeError(Exception):
 
 
 def load_image(path):
-    """Load an image file into a 32-bit QImage.
+    """Load an image file into an Image (32-bit RGBA buffer).
 
-    Supports whatever QImage supports (PNG, JPG, BMP, WebP, GIF first
-    frame, and more). Raises PixelForgeError with a readable message
-    when the file is missing or unreadable.
+    With PySide6 present, whatever Qt reads (PNG, JPG, BMP,
+    WebP, GIF first frame, and more). Without it, PNG only,
+    through the stdlib codec — any other format refuses plainly
+    with the fix (install PySide6) instead of a traceback.
+    Raises PixelForgeError with a readable message when the
+    file is missing or unreadable.
     """
     p = Path(path)
     if not p.is_file():
         raise PixelForgeError("not found: %s" % path)
-    image = QImage(str(p))
-    if image.isNull():
+    try:
+        from PySide6.QtCore import QCoreApplication
+        from PySide6.QtGui import QImage
+        from .qtimage import from_qimage
+    except ImportError:
+        qimage = None
+    else:
+        # QImage needs an application instance so Qt finds its
+        # image format plugins (notably JPEG) in a headless
+        # process. The GUI already has one; the CLI makes one
+        # here, on first use, instead of at startup.
+        if QCoreApplication.instance() is None:
+            QCoreApplication(sys.argv)
+        qimage = QImage(str(p))
+        if qimage.isNull():
+            raise PixelForgeError(
+                "could not read as an image: %s "
+                "(unsupported format or damaged file)" % path)
+        return from_qimage(qimage)
+    # No Qt: PNG through the stdlib codec, nothing else.
+    try:
+        with open(p, "rb") as handle:
+            signature = handle.read(8)
+    except OSError as exc:
+        raise PixelForgeError("could not read %s: %s" % (path, exc))
+    if signature != pngio.PNG_SIGNATURE:
+        raise PixelForgeError(
+            "%s is not a PNG — PySide6 is not installed, so only "
+            "PNG files load. Install PySide6 to load JPG, BMP and "
+            "other formats." % path)
+    try:
+        return pngio.read_png(p)
+    except pngio.PngError:
         raise PixelForgeError(
             "could not read as an image: %s "
             "(unsupported format or damaged file)" % path)
-    return image.convertToFormat(QImage.Format.Format_ARGB32)
+    except OSError as exc:
+        raise PixelForgeError("could not read %s: %s" % (path, exc))
 
 
 def compute_target_size(src_w, src_h, width, height, keep_aspect):
@@ -64,24 +111,21 @@ def compute_target_size(src_w, src_h, width, height, keep_aspect):
 
 
 def downscale(image, width, height, keep_aspect=False):
-    """Downscale with nearest-neighbour sampling (FastTransformation)."""
+    """Downscale with nearest-neighbour sampling — the same
+    sampling Qt's FastTransformation uses (Image.scaled
+    reproduces it exactly, probed against QImage.scaled)."""
     target_w, target_h = compute_target_size(
         image.width(), image.height(), width, height, keep_aspect)
-    return image.scaled(target_w, target_h,
-                        Qt.AspectRatioMode.IgnoreAspectRatio,
-                        Qt.TransformationMode.FastTransformation)
+    return image.scaled(target_w, target_h)
 
 
 def opaque_pixels(image):
     """RGB tuples of every pixel with alpha > 0."""
     colors = []
-    for y in range(image.height()):
-        for x in range(image.width()):
-            px = image.pixel(x, y)
-            if (px >> 24) & 0xFF:
-                colors.append(((px >> 16) & 0xFF,
-                               (px >> 8) & 0xFF,
-                               px & 0xFF))
+    data = image.data
+    for i in range(0, len(data), 4):
+        if data[i + 3]:
+            colors.append((data[i], data[i + 1], data[i + 2]))
     return colors
 
 
@@ -142,18 +186,20 @@ def quantize(image, palette, dither=True):
     drift. Transparent pixels are skipped entirely.
     """
     width, height = image.width(), image.height()
-    out = QImage(width, height, QImage.Format.Format_ARGB32)
+    out = Image(width, height)
+    src = image.data
+    dst = out.data
     cache = {}
     for y in range(height):
+        row = y * width * 4
         for x in range(width):
-            px = image.pixel(x, y)
-            alpha = (px >> 24) & 0xFF
+            offset = row + x * 4
+            alpha = src[offset + 3]
             if alpha == 0:
-                out.setPixel(x, y, 0)
-                continue
-            r = (px >> 16) & 0xFF
-            g = (px >> 8) & 0xFF
-            b = px & 0xFF
+                continue  # out starts transparent
+            r = src[offset]
+            g = src[offset + 1]
+            b = src[offset + 2]
             if dither:
                 threshold = (BAYER_4X4[y % 4][x % 4] + 0.5) / 16.0 - 0.5
                 shift = int(round(threshold * BAYER_SPREAD))
@@ -161,7 +207,10 @@ def quantize(image, palette, dither=True):
                 g = min(255, max(0, g + shift))
                 b = min(255, max(0, b + shift))
             nr, ng, nb = nearest_color((r, g, b), palette, cache)
-            out.setPixel(x, y, qRgba(nr, ng, nb, alpha))
+            dst[offset] = nr
+            dst[offset + 1] = ng
+            dst[offset + 2] = nb
+            dst[offset + 3] = alpha
     return out
 
 

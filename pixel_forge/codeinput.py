@@ -49,8 +49,7 @@ import ast
 import re
 from pathlib import Path
 
-from PySide6.QtGui import QImage, qRgba
-
+from .image import Image, argb
 from .palettes import PICO8
 from .pixelize import PixelForgeError
 
@@ -172,31 +171,28 @@ def is_transparent_cell(value):
 # ----------------------------------------------------------- rendering
 
 def render_color_grid(grid):
-    """A grid of (r, g, b, a) tuples / None into a QImage — one
+    """A grid of (r, g, b, a) tuples / None into an Image — one
     pixel per cell, exact."""
     height = len(grid)
     width = len(grid[0]) if height else 0
-    image = QImage(width, height, QImage.Format.Format_ARGB32)
-    image.fill(0)
+    image = Image(width, height)
     for y, row in enumerate(grid):
         for x, color in enumerate(row):
             if color is None:
                 continue
             r, g, b, a = color
-            image.setPixel(x, y, qRgba(r, g, b, a))
+            image.setPixel(x, y, argb(r, g, b, a))
     return image
 
 
 def render_palette_strip(colors):
     """A palette as a strip image — one 8x8 block per color."""
-    image = QImage(len(colors) * PALETTE_BLOCK, PALETTE_BLOCK,
-                   QImage.Format.Format_ARGB32)
-    image.fill(0)
+    image = Image(len(colors) * PALETTE_BLOCK, PALETTE_BLOCK)
     for index, (r, g, b, a) in enumerate(colors):
         for y in range(PALETTE_BLOCK):
             for x in range(PALETTE_BLOCK):
                 image.setPixel(index * PALETTE_BLOCK + x, y,
-                               qRgba(r, g, b, a))
+                               argb(r, g, b, a))
     return image
 
 

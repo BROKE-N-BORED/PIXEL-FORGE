@@ -1,6 +1,7 @@
 """CLI tests — in-process plus one real subprocess smoke test.
 
-Skipped when PySide6 is not importable."""
+Qt-free (task 64): the CLI runs on bare python, so these tests
+run without PySide6."""
 import io
 import json
 import os
@@ -14,19 +15,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pixel_forge import __version__  # noqa: E402
 
-try:
-    from helpers import (ensure_app, make_gradient_image, stub_env,  # noqa: E402
-                         write_image, write_stub_engine)
-    from PySide6.QtGui import QImage  # noqa: E402
-    from pixel_forge.cli import main  # noqa: E402
-    from pixel_forge.library import LIBRARY_FORMAT  # noqa: E402
-except ImportError as exc:
-    # Task 63: every test here needs Qt, so skip the module when
-    # PySide6 is what is missing — but a genuinely broken import
-    # still fails loudly instead of hiding behind the skip.
-    if exc.name and exc.name.startswith("PySide6"):
-        raise unittest.SkipTest("PySide6 not available")
-    raise
+from helpers import (make_gradient_image, stub_env,  # noqa: E402
+                     write_image, write_stub_engine)
+from pixel_forge.cli import main  # noqa: E402
+from pixel_forge.library import LIBRARY_FORMAT  # noqa: E402
+from pixel_forge.pixelize import load_image  # noqa: E402
+
+# The QApplication must exist before the first load_image
+# call takes the Qt path (see helpers.ensure_app_if_qt).
+from helpers import ensure_app_if_qt  # noqa: E402
+ensure_app_if_qt()
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 
@@ -34,7 +32,6 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 class CliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        ensure_app()
         cls.tmp = tempfile.mkdtemp()
         cls.src = write_image(make_gradient_image(),
                               os.path.join(cls.tmp, "photo.png"))
@@ -79,7 +76,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertTrue(os.path.isfile(out_path))
         self.assertIn("32 x 32", out)
-        image = QImage(out_path)
+        image = load_image(out_path)
         self.assertEqual((image.width(), image.height()), (32, 32))
 
     def test_convert_default_output_name(self):
@@ -87,7 +84,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         expected = os.path.join(self.tmp, "photo-pixel.png")
         self.assertTrue(os.path.isfile(expected))
-        image = QImage(expected)
+        image = load_image(expected)
         self.assertEqual((image.width(), image.height()), (16, 16))
 
     def test_convert_width_by_height_size(self):
@@ -96,7 +93,7 @@ class CliTests(unittest.TestCase):
                                      "--size", "64x48",
                                      "--out", out_path])
         self.assertEqual(code, 0, err)
-        image = QImage(out_path)
+        image = load_image(out_path)
         self.assertEqual((image.width(), image.height()), (64, 48))
 
     def test_convert_keep_aspect(self):
@@ -104,7 +101,7 @@ class CliTests(unittest.TestCase):
         code, _out, err = self._run(["convert", self.src, "--size", "32",
                                      "--keep-aspect", "--out", out_path])
         self.assertEqual(code, 0, err)
-        image = QImage(out_path)
+        image = load_image(out_path)
         # Source is 200 x 100, so it fits into 32 x 32 as 32 x 16.
         self.assertEqual((image.width(), image.height()), (32, 16))
 
@@ -182,7 +179,7 @@ class CliTests(unittest.TestCase):
             pixel = os.path.join(bdir,
                                  "cand-%02d-pixel.png" % index)
             self.assertTrue(os.path.isfile(pixel))
-            image = QImage(pixel)
+            image = load_image(pixel)
             self.assertEqual((image.width(), image.height()),
                              (32, 32))
         self.assertTrue(os.path.isfile(
@@ -229,7 +226,6 @@ class CliTests(unittest.TestCase):
 class SheetCliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        ensure_app()
         cls.tmp = tempfile.mkdtemp()
         from helpers import make_solid_image
         cls.frames = os.path.join(cls.tmp, "walk-frames")
@@ -281,7 +277,7 @@ class SheetCliTests(unittest.TestCase):
         self.assertIn("3 x 2 grid", out)
         self.assertTrue(os.path.isfile(out_png))
         self.assertTrue(os.path.isfile(out_json))
-        image = QImage(out_png)
+        image = load_image(out_png)
         self.assertEqual((image.width(), image.height()), (100, 66))
         with open(out_json) as handle:
             meta = json.load(handle)
@@ -305,7 +301,7 @@ class SheetCliTests(unittest.TestCase):
                                      "walk-frames-sheet.json")
         self.assertTrue(os.path.isfile(expected_png))
         self.assertTrue(os.path.isfile(expected_json))
-        image = QImage(expected_png)
+        image = load_image(expected_png)
         # Auto grid for 6 frames: 3 columns, 2 rows, no padding.
         self.assertEqual((image.width(), image.height()), (96, 64))
 
@@ -350,7 +346,6 @@ class SheetCliTests(unittest.TestCase):
 class LibraryCliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        ensure_app()
         cls.tmp = tempfile.mkdtemp()
         cls.src = write_image(make_gradient_image(),
                               os.path.join(cls.tmp, "photo.png"))
@@ -490,7 +485,6 @@ class LibraryCliTests(unittest.TestCase):
 class CodeCliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        ensure_app()
         cls.tmp = tempfile.mkdtemp()
         cls.game = os.path.join(cls.tmp, "game.py")
         with open(cls.game, "w") as handle:
@@ -527,7 +521,7 @@ class CodeCliTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertTrue(os.path.isfile(out_path))
         self.assertIn("HERO: 2 x 2", out)
-        image = QImage(out_path)
+        image = load_image(out_path)
         self.assertEqual((image.width(), image.height()), (2, 2))
 
     def test_code_missing_asset_fails_cleanly(self):
@@ -567,15 +561,14 @@ class CodeCliTests(unittest.TestCase):
 class SkinCliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        ensure_app()
         cls.tmp = tempfile.mkdtemp()
         from helpers import make_solid_image
-        from PySide6.QtGui import qRgba
+        from pixel_forge.image import argb
         skin = make_solid_image(64, 64, 10, 20, 30)
         # A red head front, so the extracted part is checkable.
         for y in range(8, 16):
             for x in range(8, 16):
-                skin.setPixel(x, y, qRgba(255, 0, 0, 255))
+                skin.setPixel(x, y, argb(255, 0, 0, 255))
         cls.skin = write_image(skin, os.path.join(cls.tmp,
                                                   "steve.png"))
         cls.texture = write_image(
@@ -601,9 +594,9 @@ class SkinCliTests(unittest.TestCase):
             os.path.join(out_dir, "head.png")))
         self.assertTrue(os.path.isfile(
             os.path.join(out_dir, "figure.png")))
-        head = QImage(os.path.join(out_dir, "head.png"))
+        head = load_image(os.path.join(out_dir, "head.png"))
         self.assertEqual((head.width(), head.height()), (8, 8))
-        self.assertEqual(head.pixelColor(0, 0).red(), 255)
+        self.assertEqual((head.pixel(0, 0) >> 16) & 0xFF, 255)
 
     def test_skin_default_out_dir(self):
         code, _out, err = self._run(["skin", self.skin])

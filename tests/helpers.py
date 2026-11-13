@@ -1,11 +1,16 @@
-"""Shared test helpers — small synthetic images, no fixtures needed."""
+"""Shared test helpers — small synthetic images, no fixtures needed.
+
+Qt-free: the makers return buffer Images (pixel_forge.image.Image),
+so the core tests run on bare python. Only ensure_app() touches Qt,
+and it imports lazily, inside the function.
+"""
 import contextlib
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from PySide6.QtGui import QImage, qRgba  # noqa: E402
+from pixel_forge.image import Image, argb  # noqa: E402
 
 
 STUB_ENGINE_SOURCE = '''#!/usr/bin/env python3
@@ -125,12 +130,31 @@ def ensure_app():
     return app
 
 
+def ensure_app_if_qt():
+    """ensure_app() when PySide6 is importable, else a no-op.
+
+    The core's load_image creates a QCoreApplication lazily when
+    it takes the Qt decode path — and a QCoreApplication created
+    first cannot be upgraded to the QApplication the GUI tests
+    need. So every test module that can reach load_image calls
+    this at import time: discovery imports all modules before
+    any test runs, so the QApplication exists before the first
+    load_image call in any subset run. Without PySide6 it does
+    nothing and the module runs on bare python.
+    """
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        return None
+    return ensure_app()
+
+
 def make_gradient_image(width=200, height=100):
     """Red ramps left to right, green top to bottom, blue fixed."""
-    image = QImage(width, height, QImage.Format.Format_ARGB32)
+    image = Image(width, height)
     for y in range(height):
         for x in range(width):
-            image.setPixel(x, y, qRgba(
+            image.setPixel(x, y, argb(
                 x * 255 // max(1, width - 1),
                 y * 255 // max(1, height - 1),
                 128, 255))
@@ -139,17 +163,16 @@ def make_gradient_image(width=200, height=100):
 
 def make_transparent_image(width=64, height=64):
     """Left half opaque red, right half fully transparent."""
-    image = QImage(width, height, QImage.Format.Format_ARGB32)
-    image.fill(0)
+    image = Image(width, height)
     for y in range(height):
         for x in range(width // 2):
-            image.setPixel(x, y, qRgba(255, 0, 0, 255))
+            image.setPixel(x, y, argb(255, 0, 0, 255))
     return image
 
 
 def make_solid_image(width, height, r, g, b, a=255):
-    image = QImage(width, height, QImage.Format.Format_ARGB32)
-    image.fill(qRgba(r, g, b, a))
+    image = Image(width, height)
+    image.fill(argb(r, g, b, a))
     return image
 
 
@@ -161,21 +184,30 @@ def write_image(image, path, fmt="PNG"):
 def make_noisy_image(width, height, rects=3000, seed=42):
     """A photo-like image: thousands of random-color rectangles,
     so the pixelize core faces thousands of distinct colors (a
-    solid image would be trivially fast even uncapped)."""
+    solid image would be trivially fast even uncapped).
+
+    The RNG call order matches the old QPainter version exactly
+    (x, y, w, h, r, g, b per rect), and the slice fills clip at
+    the image edge like fillRect does — so the image this builds
+    is the same one the QPainter version built.
+    """
     import random
-    from PySide6.QtGui import QColor, QImage, QPainter
     rng = random.Random(seed)
-    image = QImage(width, height, QImage.Format.Format_ARGB32)
-    image.fill(0xFF000000)
-    painter = QPainter(image)
+    image = Image(width, height)
+    image.fill(argb(0, 0, 0, 255))
     for _ in range(rects):
-        painter.fillRect(
-            rng.randrange(width), rng.randrange(height),
-            rng.randrange(1, max(2, width // 20)),
-            rng.randrange(1, max(2, height // 20)),
-            QColor(rng.randrange(256), rng.randrange(256),
-                   rng.randrange(256)))
-    painter.end()
+        x = rng.randrange(width)
+        y = rng.randrange(height)
+        w = rng.randrange(1, max(2, width // 20))
+        h = rng.randrange(1, max(2, height // 20))
+        color = bytes((rng.randrange(256), rng.randrange(256),
+                       rng.randrange(256), 255))
+        x2 = min(width, x + w)
+        y2 = min(height, y + h)
+        row = color * (x2 - x)
+        for yy in range(y, y2):
+            start = (yy * width + x) * 4
+            image.data[start:start + len(row)] = row
     return image
 
 

@@ -2,9 +2,9 @@
 
 Sample code files are written to a temp dir and parsed through the
 public API (parse_file / parse_paths). Pixel-exact checks read the
-rendered QImage back pixel by pixel.
+rendered Image back pixel by pixel.
 
-Skipped when PySide6 is not importable.
+Qt-free (task 64): runs without PySide6.
 """
 import os
 import sys
@@ -13,18 +13,9 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-try:
-    from helpers import ensure_app  # noqa: E402
-    from pixel_forge.codeinput import (parse_file, parse_paths,  # noqa: E402
-                                       parse_source)
-    from pixel_forge.pixelize import PixelForgeError  # noqa: E402
-except ImportError as exc:
-    # Task 63: every test here needs Qt, so skip the module when
-    # PySide6 is what is missing — but a genuinely broken import
-    # still fails loudly instead of hiding behind the skip.
-    if exc.name and exc.name.startswith("PySide6"):
-        raise unittest.SkipTest("PySide6 not available")
-    raise
+from pixel_forge.codeinput import (parse_file, parse_paths,  # noqa: E402
+                                   parse_source)
+from pixel_forge.pixelize import PixelForgeError  # noqa: E402
 
 PY_SAMPLE = '''
 """A tiny game file: palettes, maps, and things that cannot render."""
@@ -96,8 +87,9 @@ const LABELS: Record<string, string> = { a: "#ff0000" };
 
 
 def pixel(image, x, y):
-    c = image.pixelColor(x, y)
-    return c.red(), c.green(), c.blue(), c.alpha()
+    px = image.pixel(x, y)
+    return ((px >> 16) & 0xFF, (px >> 8) & 0xFF,
+            px & 0xFF, (px >> 24) & 0xFF)
 
 
 def by_name(result, name):
@@ -110,7 +102,6 @@ def by_name(result, name):
 class PythonParsingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        ensure_app()
         cls.tmp = tempfile.mkdtemp()
         cls.path = os.path.join(cls.tmp, "game.py")
         with open(cls.path, "w") as handle:
@@ -231,7 +222,6 @@ class PythonParsingTests(unittest.TestCase):
 class JsParsingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        ensure_app()
         cls.tmp = tempfile.mkdtemp()
         cls.path = os.path.join(cls.tmp, "game.js")
         with open(cls.path, "w") as handle:
@@ -291,7 +281,6 @@ class JsParsingTests(unittest.TestCase):
 class ParseDriverTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        ensure_app()
         cls.tmp = tempfile.mkdtemp()
 
     def _write(self, name, text):

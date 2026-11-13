@@ -28,9 +28,7 @@ the cap is what keeps a big photo import to seconds.
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage
-
+from .image import Image
 from .pixelize import (PixelForgeError, compute_target_size,
                        downscale, load_image, pixelize_image)
 
@@ -92,7 +90,7 @@ def detect_skin(image):
 
 
 def skin_parts(image):
-    """Front-view part images, in display order: {name: QImage}.
+    """Front-view part images, in display order: {name: Image}.
 
     Raises PixelForgeError when the image is not skin-sized.
     Classic skins get mirrored left limbs; overlays that do not
@@ -116,10 +114,8 @@ def skin_parts(image):
 
 
 def _mirror_horizontal(image):
-    """A left-right mirror, copied pixel by pixel (QImage.mirrored
-    is deprecated in this Qt build)."""
-    out = QImage(image.width(), image.height(),
-                 QImage.Format.Format_ARGB32)
+    """A left-right mirror, copied pixel by pixel."""
+    out = Image(image.width(), image.height())
     for y in range(image.height()):
         for x in range(image.width()):
             out.setPixel(image.width() - 1 - x, y,
@@ -130,7 +126,7 @@ def _mirror_horizontal(image):
 def _composite(base, overlay):
     """Overlay drawn over base: opaque overlay pixels replace,
     transparent ones let the base show through."""
-    out = QImage(base)
+    out = base.copy()
     for y in range(overlay.height()):
         for x in range(overlay.width()):
             px = overlay.pixel(x, y)
@@ -144,9 +140,7 @@ def skin_figure(image):
     sprite, overlays composited over their base parts. Raises
     PixelForgeError when the image is not skin-sized."""
     parts = skin_parts(image)
-    figure = QImage(FIGURE_WIDTH, FIGURE_HEIGHT,
-                    QImage.Format.Format_ARGB32)
-    figure.fill(0)
+    figure = Image(FIGURE_WIDTH, FIGURE_HEIGHT)
     for name, (fx, fy) in FIGURE_LAYOUT.items():
         part = parts[name]
         overlay_name = OVERLAYS.get(name)

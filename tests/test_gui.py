@@ -435,7 +435,7 @@ class VideoGuiTests(unittest.TestCase):
     def test_superseded_run_results_are_ignored(self):
         # v0.9: two runs started back to back — the first one's
         # results must be dropped by the stale guard, not shown.
-        from PySide6.QtGui import QImage
+        from pixel_forge.image import Image, argb
         self.win.load_video(self.clip)
         self.assertTrue(self._wait_for_video())
         original_count = len(self.win.video_frames)
@@ -445,8 +445,8 @@ class VideoGuiTests(unittest.TestCase):
         self.win._repixelize_video()
         second = self.win.video_worker
         self.assertIsNot(first, second)
-        fake = QImage(8, 8, QImage.Format_ARGB32)
-        fake.fill(0xFFFF0000)
+        fake = Image(8, 8)
+        fake.fill(argb(255, 0, 0, 255))
         first.done.emit({
             "mode": "repixelize", "frames": [fake], "raw": [],
             "raw_dir": None, "fps": 8, "fresh": False,

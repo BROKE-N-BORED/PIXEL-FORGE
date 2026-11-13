@@ -59,6 +59,7 @@ from .palettes import PALETTE_LABELS
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
                        count_opaque_colors, load_image, pixelize_image)
 from .presets import BUILTIN_PRESETS, PresetStore
+from .qtimage import to_qimage
 from .skins import (detect_skin, extract_skin, pixelize_texture,
                     skin_figure, skin_parts)
 from .spritesheet import (build_metadata, frames_from_sheet,
@@ -127,7 +128,12 @@ def code_filter():
 
 def checkerboard_pixmap(image, scale, smooth):
     """Scale an image and composite it over a checkerboard so
-    transparency reads clearly in the preview."""
+    transparency reads clearly in the preview.
+
+    Takes a buffer Image (pixel_forge.image.Image) — the core's
+    type — and converts to QImage at the display boundary, so the
+    smooth/fast scaling stays Qt's exactly as before.
+    """
     width = max(1, int(image.width() * scale))
     height = max(1, int(image.height() * scale))
     longest = max(width, height)
@@ -137,8 +143,8 @@ def checkerboard_pixmap(image, scale, smooth):
         height = max(1, int(height * factor))
     mode = (Qt.TransformationMode.SmoothTransformation if smooth else
             Qt.TransformationMode.FastTransformation)
-    scaled = image.scaled(width, height,
-                          Qt.AspectRatioMode.IgnoreAspectRatio, mode)
+    scaled = to_qimage(image).scaled(
+        width, height, Qt.AspectRatioMode.IgnoreAspectRatio, mode)
     canvas = QImage(width, height, QImage.Format.Format_ARGB32)
     painter = QPainter(canvas)
     cell = 12
@@ -151,6 +157,15 @@ def checkerboard_pixmap(image, scale, smooth):
     painter.drawImage(0, 0, scaled)
     painter.end()
     return QPixmap.fromImage(canvas)
+
+
+def thumb_pixmap(image, size):
+    """A list-thumbnail pixmap for a buffer Image, fitted inside
+    a size x size box, nearest-neighbour (the same Qt scaling the
+    strips used when the core held QImages)."""
+    return QPixmap.fromImage(to_qimage(image).scaled(
+        size, size, Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.FastTransformation))
 
 
 class PromptWorker(QThread):
@@ -202,8 +217,9 @@ class TextureWorker(QThread):
     512 px cap in pixelize_texture bounds the work to seconds,
     and the worker keeps the window responsive while it runs.
     Signals cross back to the GUI thread; the worker never
-    touches a widget itself. Only a QImage crosses the thread
-    boundary (QPixmap is not thread-safe).
+    touches a widget itself. Only a buffer Image crosses the
+    thread boundary (QPixmap is not thread-safe) — a plain
+    Python object, safer to pass than a QImage was.
     """
     done = Signal(dict)   # path, source size, texture, color count
     failed = Signal(str)  # readable error message
@@ -241,8 +257,9 @@ class VideoWorker(QThread):
     solid on every slider move. The worker does both in the
     background; the debounce timer in MainWindow makes sure
     rapid control changes run once, with the settled settings.
-    Only QImages cross the thread boundary (QPixmap is not
-    thread-safe).
+    Only buffer Images cross the thread boundary (QPixmap is
+    not thread-safe) — plain Python objects, safer to pass
+    than QImages were.
 
     Settings arrive as one dict so a run snapshots the
     controls at start: a later control change cannot rewrite
@@ -535,8 +552,8 @@ class MainWindow(QMainWindow):
         self.prompt_result_image = None
         self._updating_prompt_size = False
 
-        # Code tab state. Assets are small rendered QImages held in
-        # memory; a skin also keeps its source path so its parts
+        # Code tab state. Assets are small rendered buffer Images
+        # held in memory; a skin also keeps its source path so its parts
         # can be exported to a folder. A texture loads on a worker
         # thread (see TextureWorker) so a big photo never freezes
         # the window.
@@ -1426,10 +1443,7 @@ class MainWindow(QMainWindow):
         try:
             self.video_strip.clear()
             for index, frame in enumerate(self.video_frames):
-                thumb = QPixmap.fromImage(frame.scaled(
-                    STRIP_THUMB, STRIP_THUMB,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.FastTransformation))
+                thumb = thumb_pixmap(frame, STRIP_THUMB)
                 item = QListWidgetItem(thumb, "Frame %03d" % (index + 1))
                 item.setData(Qt.ItemDataRole.UserRole, index)
                 item.setFlags(item.flags()
@@ -2085,11 +2099,15 @@ class MainWindow(QMainWindow):
             self.prompt_strip.clear()
             for record in self.prompt_candidates:
                 path = self.prompt_batch_dir / record["file"]
-                image = QImage(str(path))
-                thumb = QPixmap.fromImage(image.scaled(
-                    STRIP_THUMB, STRIP_THUMB,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.FastTransformation))
+                try:
+                    image = load_image(path)
+                except PixelForgeError:
+                    # A damaged candidate still lists — a dark
+                    # square, like an unreadable library image.
+                    thumb = QPixmap(STRIP_THUMB, STRIP_THUMB)
+                    thumb.fill(Qt.GlobalColor.darkGray)
+                else:
+                    thumb = thumb_pixmap(image, STRIP_THUMB)
                 label = "Candidate %s" % record["file"][5:7]
                 if record["file"] == self.prompt_keeper:
                     label += " (keeper)"
@@ -2521,9 +2539,7 @@ class MainWindow(QMainWindow):
         try:
             self.code_list.clear()
             for index, asset in enumerate(self.code_assets):
-                thumb = QPixmap.fromImage(asset["image"].scaled(
-                    32, 32, Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.FastTransformation))
+                thumb = thumb_pixmap(asset["image"], 32)
                 item = QListWidgetItem(
                     thumb,
                     "%s — %s, %d x %d" % (
@@ -2992,14 +3008,13 @@ class MainWindow(QMainWindow):
         try:
             self.library_list.clear()
             for entry in entries:
-                image = QImage(str(self.library.path_for(entry)))
-                if image.isNull():
+                try:
+                    image = load_image(self.library.path_for(entry))
+                except PixelForgeError:
                     thumb = QPixmap(64, 64)
                     thumb.fill(Qt.GlobalColor.darkGray)
                 else:
-                    thumb = QPixmap.fromImage(image.scaled(
-                        64, 64, Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.FastTransformation))
+                    thumb = thumb_pixmap(image, 64)
                 item = QListWidgetItem(thumb, entry["name"])
                 item.setData(Qt.ItemDataRole.UserRole, entry["id"])
                 item.setToolTip(", ".join(entry.get("tags", []))
@@ -3076,8 +3091,9 @@ class MainWindow(QMainWindow):
             self._clear_library_selection()
             return
         path = self.library.path_for(entry)
-        image = QImage(str(path))
-        if image.isNull():
+        try:
+            image = load_image(path)
+        except PixelForgeError:
             self.library_preview_label.setText(
                 "File missing: %s" % entry["file"])
         else:

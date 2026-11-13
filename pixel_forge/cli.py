@@ -31,7 +31,7 @@ from .codeinput import parse_paths
 from .imagegen import (DEFAULT_NEGATIVE, prompt_to_sprites, slugify)
 from .library import Library, normalize_tags
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
-                       pixelize_file)
+                       load_image, pixelize_file)
 from .presets import PresetStore
 from .skins import extract_skin
 from .spritesheet import load_frame_dir, write_sheet
@@ -248,8 +248,7 @@ def cmd_frames(args):
         start=args.start, end=args.end, width=width, height=height,
         keep_aspect=args.keep_aspect, palette=args.palette,
         max_colors=args.colors, dither=args.dither)
-    from PySide6.QtGui import QImage
-    first = QImage(str(written[0]))
+    first = load_image(written[0])
     print("%d frames, %d x %d, in %s"
           % (len(written), first.width(), first.height(), out))
     return 0
@@ -451,13 +450,9 @@ def cmd_gui(_args):
 
 
 def main(argv=None):
-    # QImage needs a QCoreApplication instance so Qt finds its image
-    # format plugins (notably JPEG) even in a headless process.
-    from PySide6.QtCore import QCoreApplication
-    app = QCoreApplication.instance()
-    if app is None:
-        app = QCoreApplication(sys.argv if argv is None else
-                               ["pixel-forge"] + list(argv or []))
+    # No Qt bootstrap here: the core runs without PySide6, and
+    # load_image creates the QCoreApplication lazily, only when
+    # it takes the Qt decode path (see pixelize.load_image).
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

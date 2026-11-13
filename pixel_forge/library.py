@@ -39,9 +39,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtGui import QImage
-
-from .pixelize import PixelForgeError
+from .pixelize import PixelForgeError, load_image
 
 LIBRARY_ENV = "PIXELFORGE_LIBRARY"
 LIBRARY_FORMAT = "pixel-forge-library"
@@ -315,7 +313,7 @@ class Library:
 
     def add_image(self, image, name, tags=(), source="image",
                   palette=None):
-        """Save a QImage as a sprite entry. Returns the entry."""
+        """Save an Image as a sprite entry. Returns the entry."""
         if image is None or image.isNull():
             raise PixelForgeError("nothing to save to the library")
         self._load()
@@ -335,9 +333,7 @@ class Library:
         src = Path(path)
         if not src.is_file():
             raise PixelForgeError("no such file: %s" % path)
-        image = QImage(str(src))
-        if image.isNull():
-            raise PixelForgeError("not a readable image: %s" % path)
+        image = load_image(src)
         return self.add_image(image, name, tags, source=source)
 
     def add_sheet(self, png_path, meta_path, name, tags=(),
@@ -352,9 +348,7 @@ class Library:
         if not meta.is_file():
             raise PixelForgeError(
                 "spritesheet metadata missing: %s" % meta_path)
-        image = QImage(str(png))
-        if image.isNull():
-            raise PixelForgeError("not a readable image: %s" % png)
+        image = load_image(png)
         self._load()
         stem = self._unique_stem(name)
         png_name = stem + ".png"

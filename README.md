@@ -322,9 +322,9 @@ A preset needs all six keys: `width` and `height` (1–512),
 (true/false). A hand-edited file with a bad preset fails loudly
 instead of applying nonsense.
 
-## What v0.18 does and does not do
+## What v0.19 does and does not do
 
-v0.18 is Items 1–6 of the plan: image to pixel sprite core, video to
+v0.19 is Items 1–6 of the plan: image to pixel sprite core, video to
 sprite frames, prompt-to-sprite with a local image model,
 spritesheets + animation export, a sprite library with presets,
 and code + game-asset input — plus the window-fit fix (every tab's
@@ -358,17 +358,23 @@ leave a half-written file), and the sheet-metadata fix (a
 spritesheet saved to the library now carries a metadata JSON
 whose "sheet" field names the PNG as it sits in the library,
 instead of the original file name — which did not exist in
-the library folder). The MIMIK merge is the one remaining planned item —
+the library folder), and the stdlib-core fix (the pixelize
+core no longer needs Qt: the CLI and the core suite run on a
+bare system python with no PySide6, on a pure-Python PNG
+codec written for this release — only PNG loads without Qt,
+and a JPG input fails with a plain message naming the fix
+instead of a traceback). The MIMIK merge is the one remaining planned item —
 none of that is in this build.
 
 ## Requirements
 
-Linux, Python 3.10 or newer, PySide6 (the installer handles it),
-ffmpeg for video import (the installer offers it; image import works
-without it), and the image engine + model for prompt import (the
-installer offers those too; everything else works without them).
-Runs fine on a CPU-only machine with 8 GB of RAM — generation uses
-about 2.3 GB while it runs.
+Linux, Python 3.10 or newer, PySide6 for the GUI and for JPG/BMP/
+WebP/GIF input (the installer handles it — the CLI works without
+it for PNG input), ffmpeg for video import (the installer offers
+it; image import works without it), and the image engine + model
+for prompt import (the installer offers those too; everything
+else works without them). Runs fine on a CPU-only machine with
+8 GB of RAM — generation uses about 2.3 GB while it runs.
 
 ## Tests
 
@@ -378,5 +384,6 @@ python3 -m unittest discover -s tests
 
 (The Qt GUI tests need a display or `QT_QPA_PLATFORM=offscreen`.)
 On a bare system python with no PySide6 the suite still runs:
-the Qt-dependent test modules skip cleanly instead of erroring
-on import, and the tests that do not need Qt run and pass.
+the core tests run and pass (the CLI and the pixelizer need no
+Qt), and only the genuinely Qt-only tests skip — the GUI tests,
+the installer's widget tests, and the JPG/GIF load tests.

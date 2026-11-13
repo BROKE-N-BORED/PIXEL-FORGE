@@ -4,7 +4,7 @@ Synthetic skins are built with one distinct color per region, so
 every part can be checked pixel-exact. Region coordinates are the
 standard skin layout (see skins.py).
 
-Skipped when PySide6 is not importable.
+Qt-free (task 64): runs without PySide6.
 """
 import os
 import sys
@@ -14,20 +14,18 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-try:
-    from helpers import (ensure_app, make_noisy_image,  # noqa: E402
-                         make_solid_image, write_image)
-    from pixel_forge.pixelize import PixelForgeError, pixelize_image  # noqa: E402
-    from pixel_forge.skins import (detect_skin, extract_skin,  # noqa: E402
-                                   pixelize_texture, skin_figure,
-                                   skin_parts, texture_target_size)
-except ImportError as exc:
-    # Task 63: every test here needs Qt, so skip the module when
-    # PySide6 is what is missing — but a genuinely broken import
-    # still fails loudly instead of hiding behind the skip.
-    if exc.name and exc.name.startswith("PySide6"):
-        raise unittest.SkipTest("PySide6 not available")
-    raise
+from helpers import (make_noisy_image,  # noqa: E402
+                     make_solid_image, write_image)
+from pixel_forge.image import Image, argb  # noqa: E402
+from pixel_forge.pixelize import PixelForgeError, pixelize_image  # noqa: E402
+from pixel_forge.skins import (detect_skin, extract_skin,  # noqa: E402
+                               pixelize_texture, skin_figure,
+                               skin_parts, texture_target_size)
+
+# The QApplication must exist before the first load_image
+# call takes the Qt path (see helpers.ensure_app_if_qt).
+from helpers import ensure_app_if_qt  # noqa: E402
+ensure_app_if_qt()
 
 # Distinct colors per front-view region.
 REGION_COLORS = {
@@ -50,16 +48,16 @@ FRONTS = {
 
 
 def pixel(image, x, y):
-    c = image.pixelColor(x, y)
-    return c.red(), c.green(), c.blue(), c.alpha()
+    px = image.pixel(x, y)
+    return ((px >> 16) & 0xFF, (px >> 8) & 0xFF,
+            px & 0xFF, (px >> 24) & 0xFF)
 
 
 def fill_rect(image, rect, rgb):
-    from PySide6.QtGui import qRgba
     x, y, w, h = rect
     for yy in range(y, y + h):
         for xx in range(x, x + w):
-            image.setPixel(xx, yy, qRgba(*rgb, 255))
+            image.setPixel(xx, yy, argb(*rgb, 255))
 
 
 def make_skin(layout="64x64", hat_solid=True):
@@ -67,10 +65,8 @@ def make_skin(layout="64x64", hat_solid=True):
     rest transparent. For 64x32 only the classic regions exist.
     hat_solid=False leaves the hat transparent except one pixel,
     to test overlay compositing."""
-    from PySide6.QtGui import QImage
     height = 64 if layout == "64x64" else 32
-    image = QImage(64, height, QImage.Format.Format_ARGB32)
-    image.fill(0)
+    image = Image(64, height)
     names = (REGION_COLORS if layout == "64x64" else
              {k: v for k, v in REGION_COLORS.items()
               if k in ("head", "hat", "body", "right_arm",
@@ -80,16 +76,11 @@ def make_skin(layout="64x64", hat_solid=True):
             continue
         fill_rect(image, FRONTS[name], rgb)
     if not hat_solid:
-        from PySide6.QtGui import qRgba
-        image.setPixel(40, 8, qRgba(0, 255, 0, 255))
+        image.setPixel(40, 8, argb(0, 255, 0, 255))
     return image
 
 
 class SkinDetectionTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        ensure_app()
-
     def test_detect_layouts(self):
         self.assertEqual(detect_skin(make_skin("64x64")), "64x64")
         self.assertEqual(detect_skin(make_skin("64x32")), "64x32")
@@ -116,10 +107,9 @@ class SkinDetectionTests(unittest.TestCase):
     def test_parts_classic_mirror_left_limbs(self):
         skin = make_skin("64x32")
         # Asymmetric right arm: left column red, right column blue.
-        from PySide6.QtGui import qRgba
         for y in range(20, 32):
-            skin.setPixel(44, y, qRgba(255, 0, 0, 255))
-            skin.setPixel(47, y, qRgba(0, 0, 255, 255))
+            skin.setPixel(44, y, argb(255, 0, 0, 255))
+            skin.setPixel(47, y, argb(0, 0, 255, 255))
         parts = skin_parts(skin)
         self.assertEqual(list(parts), [
             "head", "hat", "body", "right_arm", "left_arm",
@@ -144,10 +134,6 @@ class SkinDetectionTests(unittest.TestCase):
 
 
 class SkinFigureTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        ensure_app()
-
     def test_figure_layout_and_overlays(self):
         figure = skin_figure(make_skin("64x64"))
         self.assertEqual((figure.width(), figure.height()), (16, 32))
@@ -190,7 +176,6 @@ class SkinFigureTests(unittest.TestCase):
 class SkinExtractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        ensure_app()
         cls.tmp = tempfile.mkdtemp()
 
     def test_extract_writes_parts_and_figure(self):
@@ -237,10 +222,6 @@ class SkinExtractTests(unittest.TestCase):
 class TextureCapTests(unittest.TestCase):
     """v0.8 regression: the texture path caps at 512 px (review
     W2 — a 4000x3000 photo used to freeze the UI for 209 s)."""
-    @classmethod
-    def setUpClass(cls):
-        ensure_app()
-
     def test_texture_target_size(self):
         self.assertEqual(
             texture_target_size(make_solid_image(64, 64, 1, 2, 3)),

@@ -3,7 +3,8 @@
 Test videos are generated with ffmpeg itself (testsrc: moving
 shapes), so the suite tests against real videos, not fixtures.
 Skipped when ffmpeg is not installed.
-Skipped when PySide6 is not importable.
+
+Qt-free (task 64): runs without PySide6.
 """
 import io
 import os
@@ -17,19 +18,15 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-try:
-    from helpers import ensure_app, make_test_video  # noqa: E402
-    from PySide6.QtGui import QImage  # noqa: E402
-    from pixel_forge import video as video_mod  # noqa: E402
-    from pixel_forge.cli import main as cli_main  # noqa: E402
-    from pixel_forge.pixelize import PixelForgeError  # noqa: E402
-except ImportError as exc:
-    # Task 63: every test here needs Qt, so skip the module when
-    # PySide6 is what is missing — but a genuinely broken import
-    # still fails loudly instead of hiding behind the skip.
-    if exc.name and exc.name.startswith("PySide6"):
-        raise unittest.SkipTest("PySide6 not available")
-    raise
+from helpers import make_test_video  # noqa: E402
+from pixel_forge import video as video_mod  # noqa: E402
+from pixel_forge.cli import main as cli_main  # noqa: E402
+from pixel_forge.pixelize import PixelForgeError, load_image  # noqa: E402
+
+# The QApplication must exist before the first load_image
+# call takes the Qt path (see helpers.ensure_app_if_qt).
+from helpers import ensure_app_if_qt  # noqa: E402
+ensure_app_if_qt()
 
 HAS_FFMPEG = video_mod.find_ffmpeg() is not None
 
@@ -38,7 +35,6 @@ HAS_FFMPEG = video_mod.find_ffmpeg() is not None
 class VideoTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        ensure_app()
         cls.tmp = tempfile.mkdtemp()
         # 2 seconds at 24 fps = 48 source frames.
         cls.clip = make_test_video(
@@ -74,7 +70,7 @@ class VideoTests(unittest.TestCase):
         self.assertIn(len(frames), (15, 16))
         for path in frames:
             self.assertTrue(os.path.isfile(path))
-            image = QImage(str(path))
+            image = load_image(str(path))
             self.assertEqual((image.width(), image.height()),
                              (160, 120))
 
@@ -209,7 +205,7 @@ class VideoTests(unittest.TestCase):
             os.path.basename(str(written[-1])),
             "frame_%03d.png" % len(written))
         for path in written:
-            image = QImage(str(path))
+            image = load_image(str(path))
             self.assertEqual((image.width(), image.height()), (32, 32))
 
     def test_video_to_frames_end_to_end(self):
@@ -218,7 +214,7 @@ class VideoTests(unittest.TestCase):
             self.clip, out, fps=8, width=16, palette="gameboy")
         self.assertIn(len(written), (15, 16))
         for path in written:
-            image = QImage(str(path))
+            image = load_image(str(path))
             self.assertEqual((image.width(), image.height()), (16, 16))
 
 
@@ -226,7 +222,6 @@ class VideoTests(unittest.TestCase):
 class FramesCliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        ensure_app()
         cls.tmp = tempfile.mkdtemp()
         cls.clip = make_test_video(
             os.path.join(cls.tmp, "clip.mp4"))
@@ -260,7 +255,7 @@ class FramesCliTests(unittest.TestCase):
         self.assertEqual(files[0], "frame_001.png")
         self.assertIn("frames", out)
         self.assertIn("32 x 32", out)
-        image = QImage(os.path.join(out_dir, files[0]))
+        image = load_image(os.path.join(out_dir, files[0]))
         self.assertEqual((image.width(), image.height()), (32, 32))
 
     def test_frames_default_output_dir(self):

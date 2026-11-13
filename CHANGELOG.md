@@ -1,5 +1,71 @@
 # Pixel Forge changelog
 
+## 0.19 — 2026-11-12
+
+The pixelize core no longer needs Qt — task-list item #64 (the
+real fix for repo-audit Top 5 #3, where v0.18 was only the
+minimum). The CLI and the core suite now run on a bare system
+python with no PySide6 at all; the GUI keeps Qt for display only.
+
+- New `pixel_forge/image.py`: the core works on a plain pixel
+  buffer (`Image` — width, height, RGBA bytes) instead of
+  `QImage`. Its nearest-neighbour scaling reproduces Qt's
+  `FastTransformation` sampling exactly — the mapping was probed
+  against `QImage.scaled` on 4,400+ size pairs plus the boundary
+  cases where a naive formula is off by one (100 -> 3 samples
+  16, 49, 83 — the middle one is 49, not 50).
+- New `pixel_forge/pngio.py`: a minimal pure-Python PNG codec on
+  stdlib zlib, written for this release (the stdlib has no PNG
+  codec). The decoder handles every color type, bit depths
+  1/2/4/8/16, tRNS, all five filters, and Adam7 interlace; the
+  writer emits 8-bit RGBA PNGs. New `pixel_forge/qtimage.py`
+  adapts between buffer Images and QImages at the GUI's display
+  boundary.
+- `pixelize.py`, `spritesheet.py`, `skins.py`, `codeinput.py`,
+  `library.py`, `video.py`, and `cli.py` no longer import
+  PySide6. The CLI bootstrap is gone from `cli.main()` —
+  `load_image` creates the QCoreApplication lazily, only when
+  it takes the Qt decode path.
+- `load_image` prefers Qt when PySide6 is importable, and falls
+  back to the stdlib codec when it is not. That is a deliberate
+  performance choice, measured: Qt's libpng decodes a 1920x1080
+  frame in ~0.03 s against ~3.3 s for the pure-Python codec
+  (Paeth unfiltering is ~2 MB/s in CPython — no further stdlib
+  vectorization exists). Stdlib-always would have frozen the
+  Image tab ~25–30 s on a 4000x3000 PNG import and stretched a
+  2 s video clip import to ~50 s. The two decoders are pinned
+  pixel-identical by the Qt cross-check tests in
+  `tests/test_pngio.py`.
+- JPG (and BMP, WebP, GIF, ...) has no stdlib decoder, so
+  without Qt only PNG loads: a non-PNG input fails with a plain
+  message naming the file and the fix ("Install PySide6 to load
+  JPG, BMP and other formats"), never a traceback. With PySide6
+  present, the Qt loader stays available for every format
+  exactly as before — GUI behavior is unchanged.
+- Pixel-identical before/after is proven, not assumed: 137
+  reference outputs were recorded from the v0.18 Qt core
+  (pixelize across sizes/palettes/dither, downscale and upscale
+  pairs, sheet pack + cut-back-out, both skin layouts, texture
+  pixelize, code rendering) and all 137 match from the new core
+  on bare python AND under Qt. The comparison is now a
+  permanent test (`tests/test_reference_outputs.py`), along
+  with the downscale formula pins.
+- The cross-check caught a real codec bug during the build:
+  16-bit samples were reduced by keeping the high byte, but
+  libpng (and Qt) scale with rounding — `(v * 255 + 32895) >>
+  16`, which disagrees with truncation on a quarter of all
+  values (0x00FF scales to 1, 0xFF00 to 254). pngio now scales
+  via a 64 KiB lookup table.
+- The suite: 466 tests with PySide6 (was 428 — new
+  `test_pngio.py` with the independent-encoder codec tests and
+  the Qt cross-check, plus `test_reference_outputs.py`). On bare
+  python: Ran 358, OK, skipped=39 (was Ran 70, skipped=42) —
+  the core tests now RUN instead of skipping; the 39 skips are
+  all genuinely Qt-only (the GUI tests, the installer's widget
+  tests, the cross-check, and the JPG/GIF load tests).
+  `tests/test_skip_guards.py` now pins only `test_gui` as
+  guarded.
+
 ## 0.18 — 2026-11-12
 
 The test suite runs on a bare system python — task-list item
