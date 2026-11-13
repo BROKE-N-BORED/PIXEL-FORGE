@@ -154,11 +154,13 @@ def build_metadata(sheet_name, frame_names, frame_w, frame_h,
 def load_frame_dir(directory):
     """Load the PNG frames in a folder, in playback order.
 
-    Returns a list of (name, Image). frame_NNN.png names sort
-    numerically (frame_1000 after frame_999); other names sort
-    alphabetically. Non-PNG files are ignored. Raises
-    PixelForgeError when the folder is missing, holds no PNGs, or
-    holds a file that is not a readable image.
+    Returns a list of (name, Image). Names carrying a number
+    sort first, by that number (frame_2 before frame_10);
+    names with no number are kept but sort after all numbered
+    ones, alphabetically among themselves — a stray cover.png
+    never becomes frame 0 (review B9). Non-PNG files are
+    ignored. Raises PixelForgeError when the folder is missing,
+    holds no PNGs, or holds a file that is not a readable image.
     """
     folder = Path(directory)
     if not folder.is_dir():

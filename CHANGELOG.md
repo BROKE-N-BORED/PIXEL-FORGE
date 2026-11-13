@@ -1,5 +1,32 @@
 # Pixel Forge changelog
 
+## 0.25 — 2026-11-13
+
+A stray PNG in a frames folder no longer becomes frame 0 —
+task-list item #13 (bug B9). `cover.png` used to sort as 0
+(no number in the name) and land ahead of every numbered
+frame. Frame ordering is now: names carrying a number sort
+first, by that number (frame_2 before frame_10 — a number
+anywhere in the name counts, so walk2.png and cover2.png are
+numbered too); names with no number are kept but sort after
+all numbered ones, alphabetically among themselves; a folder
+with no numbered files at all keeps plain alphabetical order.
+
+- `video.sorted_frames` is the one ordering site — the fix
+  covers every path that reads frames from a folder: the
+  `sheet` CLI (via `spritesheet.load_frame_dir`) and video
+  extraction (ffmpeg-written frame_%03d.png files are all
+  numbered, so extraction order is unchanged).
+- `pixelize_frame_files` takes an already-ordered list and
+  writes frame_001.png, frame_002.png, ... in that order —
+  no re-sort, nothing to fix there. The GUI video and sheet
+  paths use the same ordered lists, so they inherit the fix.
+- Tests: seven new B9 tests — stray PNG last, a number
+  anywhere counts, all-unnumbered stays alphabetical, mixed
+  numbers sort numerically, frame_2 before frame_10, and
+  the CLI `sheet` path end-to-end (meta frame names in
+  order).
+
 ## 0.24 — 2026-11-13
 
 The three Video tab fps controls stop overwriting each other —

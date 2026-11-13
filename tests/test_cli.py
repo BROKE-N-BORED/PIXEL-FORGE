@@ -244,6 +244,17 @@ class SheetCliTests(unittest.TestCase):
                     os.path.join(cls.mixed, "frame_001.png"))
         write_image(make_solid_image(16, 16, 1, 2, 3),
                     os.path.join(cls.mixed, "frame_002.png"))
+        # B9: a stray cover.png plus a name with a number in it.
+        cls.stray = os.path.join(cls.tmp, "stray-frames")
+        os.makedirs(cls.stray)
+        stray = [("frame_001.png", (255, 0, 0)),
+                 ("frame_002.png", (0, 255, 0)),
+                 ("frame_010.png", (0, 0, 255)),
+                 ("cover.png", (255, 255, 0)),
+                 ("walk2.png", (255, 0, 255))]
+        for name, color in stray:
+            write_image(make_solid_image(32, 32, *color),
+                        os.path.join(cls.stray, name))
 
     def _run(self, argv):
         """Run main(argv), capturing stdout/stderr and the exit code."""
@@ -312,6 +323,22 @@ class SheetCliTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertTrue(os.path.isfile(
             os.path.join(self.tmp, "custom-name.json")))
+
+    def test_sheet_stray_png_last_in_meta(self):
+        # B9 end-to-end: numbered frames first in numeric order,
+        # the stray cover.png last — never frame 0.
+        import json
+        out_png = os.path.join(self.tmp, "stray-sheet.png")
+        out_json = os.path.join(self.tmp, "stray-sheet.json")
+        code, _out, err = self._run(["sheet", self.stray,
+                                     "--out", out_png,
+                                     "--meta", out_json])
+        self.assertEqual(code, 0, err)
+        with open(out_json) as handle:
+            meta = json.load(handle)
+        self.assertEqual([f["name"] for f in meta["frames"]],
+                         ["frame_001.png", "frame_002.png",
+                          "walk2.png", "frame_010.png", "cover.png"])
 
     def test_sheet_missing_dir_fails_cleanly(self):
         code, _out, err = self._run(

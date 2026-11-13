@@ -317,6 +317,21 @@ class FrameDirTests(unittest.TestCase):
                          ["frame_002.png", "frame_999.png",
                           "frame_1000.png"])
 
+    def test_stray_png_sorts_last_not_first(self):
+        # B9: cover.png used to become frame 0.
+        self._write_frames(["frame_001.png", "frame_002.png",
+                            "frame_003.png", "cover.png"])
+        frames = load_frame_dir(self.tmp)
+        self.assertEqual([name for name, _ in frames],
+                         ["frame_001.png", "frame_002.png",
+                          "frame_003.png", "cover.png"])
+
+    def test_frame_2_sorts_before_frame_10(self):
+        self._write_frames(["frame_10.png", "frame_2.png"])
+        frames = load_frame_dir(self.tmp)
+        self.assertEqual([name for name, _ in frames],
+                         ["frame_2.png", "frame_10.png"])
+
     def test_non_png_files_ignored(self):
         self._write_frames(["frame_001.png"])
         with open(os.path.join(self.tmp, "notes.txt"), "w") as handle:

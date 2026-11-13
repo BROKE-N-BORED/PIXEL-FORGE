@@ -191,6 +191,38 @@ class VideoTests(unittest.TestCase):
         self.assertEqual(ordered, ["frame_001.png", "frame_002.png",
                                    "frame_999.png", "frame_1000.png"])
 
+    def test_sorted_frames_stray_png_last(self):
+        # B9: cover.png used to sort as 0 and become frame 0.
+        paths = ["frame_001.png", "cover.png", "frame_003.png",
+                 "frame_002.png"]
+        ordered = [os.path.basename(p) for p in
+                   video_mod.sorted_frames(paths)]
+        self.assertEqual(ordered, ["frame_001.png", "frame_002.png",
+                                   "frame_003.png", "cover.png"])
+
+    def test_sorted_frames_number_anywhere_counts(self):
+        # A number anywhere in the name makes it numbered.
+        paths = ["frame_010.png", "walk2.png", "frame_002.png",
+                 "cover.png"]
+        ordered = [os.path.basename(p) for p in
+                   video_mod.sorted_frames(paths)]
+        self.assertEqual(ordered, ["frame_002.png", "walk2.png",
+                                   "frame_010.png", "cover.png"])
+
+    def test_sorted_frames_all_unnumbered_alphabetical(self):
+        paths = ["zebra.png", "cover.png", "apple.png"]
+        ordered = [os.path.basename(p) for p in
+                   video_mod.sorted_frames(paths)]
+        self.assertEqual(ordered, ["apple.png", "cover.png",
+                                   "zebra.png"])
+
+    def test_sorted_frames_mixed_numbers_numeric(self):
+        paths = ["walk1.png", "walk10.png", "walk2.png"]
+        ordered = [os.path.basename(p) for p in
+                   video_mod.sorted_frames(paths)]
+        self.assertEqual(ordered, ["walk1.png", "walk2.png",
+                                   "walk10.png"])
+
     def test_pixelize_frames_sizes_and_names(self):
         raw = os.path.join(self.tmp, "raw")
         frames = video_mod.extract_frames(self.clip, raw, fps=4)

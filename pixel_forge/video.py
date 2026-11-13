@@ -82,20 +82,29 @@ def parse_time(text):
     return total
 
 
-def _frame_number(path):
-    """Numeric order for frame_NNN.png names (plain sorted() breaks
-    past frame 999: "frame_1000" sorts before "frame_999")."""
-    stem = Path(path).stem
-    suffix = stem.rsplit("_", 1)[-1]
-    try:
-        return int(suffix)
-    except ValueError:
-        return 0
+def _frame_sort_key(path):
+    """Playback order for frame files.
+
+    A name counts as numbered when a number appears anywhere in
+    it (frame_002.png, walk2.png, cover2.png) — numbered names
+    sort first, by that number (frame_2 before frame_10; plain
+    sorted() breaks past frame 999, putting "frame_1000" before
+    "frame_999"). Names with no number sort AFTER all numbered
+    ones, alphabetically among themselves — a stray cover.png
+    used to sort as 0 and become frame 0 (review B9). A folder
+    with no numbered files at all keeps plain alphabetical
+    order. Ties on the number break alphabetically.
+    """
+    name = Path(path).name.lower()
+    match = re.search(r"\d+", Path(path).stem)
+    if match is not None:
+        return (0, int(match.group()), name)
+    return (1, 0, name)
 
 
 def sorted_frames(paths):
-    """Frame paths in playback order."""
-    return sorted(paths, key=_frame_number)
+    """Frame paths in playback order (see _frame_sort_key)."""
+    return sorted(paths, key=_frame_sort_key)
 
 
 def build_filter(fps, every):
