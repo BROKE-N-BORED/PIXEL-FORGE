@@ -15,18 +15,24 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from helpers import (make_gradient_image, make_noisy_image,  # noqa: E402
-                     make_solid_image, make_test_video, stub_env,
-                     write_image, write_stub_engine)
-
 try:
+    from helpers import (make_gradient_image, make_noisy_image,  # noqa: E402
+                         make_solid_image, make_test_video, stub_env,
+                         write_image, write_stub_engine)
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, \
         QFileDialog, QInputDialog, QLabel, QMessageBox, QPushButton, \
         QTabWidget, QWidget
-    HAS_QT = True
-except ImportError:
-    HAS_QT = False
+except ImportError as exc:
+    # Task 63: every test here needs Qt, so skip the module when
+    # PySide6 is what is missing — but a genuinely broken import
+    # still fails loudly instead of hiding behind the skip.
+    # (This replaces the old per-class HAS_QT decorators: one of
+    # the classes never had the decorator, so the module skipped
+    # nothing and errored on import instead.)
+    if exc.name and exc.name.startswith("PySide6"):
+        raise unittest.SkipTest("PySide6 not available")
+    raise
 
 
 def visible_texts(widget):
@@ -46,7 +52,6 @@ def visible_texts(widget):
     return texts
 
 
-@unittest.skipUnless(HAS_QT, "PySide6 not available")
 class GuiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -201,7 +206,6 @@ class GuiTests(unittest.TestCase):
         self.assertGreater(os.path.getsize(shot), 1000)
 
 
-@unittest.skipUnless(HAS_QT, "PySide6 not available")
 class VideoGuiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -536,7 +540,6 @@ class VideoGuiTests(unittest.TestCase):
         self.assertGreater(os.path.getsize(shot), 1000)
 
 
-@unittest.skipUnless(HAS_QT, "PySide6 not available")
 class SpritesheetGuiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -770,7 +773,6 @@ class SpritesheetGuiTests(unittest.TestCase):
             dialog.deleteLater()
 
 
-@unittest.skipUnless(HAS_QT, "PySide6 not available")
 class PromptGuiTests(unittest.TestCase):
     """Prompt tab — generation runs against the fake sd-cli, so
     these prove the tab, the worker thread, and the keeper flow,
@@ -1058,7 +1060,6 @@ class PromptGuiTests(unittest.TestCase):
         self.assertGreater(os.path.getsize(shot), 1000)
 
 
-@unittest.skipUnless(HAS_QT, "PySide6 not available")
 class LibraryGuiTests(unittest.TestCase):
     """Library tab — every window gets its own temp library dir,
     so these never touch the real ~/pixel-forge-library/."""
@@ -1405,7 +1406,6 @@ class LibraryGuiTests(unittest.TestCase):
         self.assertGreater(os.path.getsize(shot), 1000)
 
 
-@unittest.skipUnless(HAS_QT, "PySide6 not available")
 class PresetGuiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1592,7 +1592,6 @@ class PresetGuiTests(unittest.TestCase):
                              % text)
 
 
-@unittest.skipUnless(HAS_QT, "PySide6 not available")
 class SheetLibraryGuiTests(unittest.TestCase):
     """Saving a spritesheet to the library needs a real video."""
 

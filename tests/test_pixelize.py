@@ -4,6 +4,7 @@ Run with the Qt test env (see AGENTS.md):
   LD_LIBRARY_PATH=~/workspace/qt-libs/root/usr/lib/x86_64-linux-gnu \
   QT_QPA_PLATFORM=offscreen \
   ~/workspace/forge-v2-testenv/bin/python -m unittest discover -s tests
+Skipped when PySide6 is not importable.
 """
 import os
 import sys
@@ -13,14 +14,24 @@ from collections import Counter
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from helpers import (  # noqa: E402
-    ensure_app, make_gradient_image, make_solid_image,
-    make_transparent_image, write_image)
-from PySide6.QtGui import QImage  # noqa: E402
-from pixel_forge.pixelize import (  # noqa: E402
-    PixelForgeError, compute_target_size, count_opaque_colors, downscale,
-    load_image, opaque_pixels, pixelize_file, pixelize_image, quantize)
 from pixel_forge.palettes import PICO8  # noqa: E402
+
+try:
+    from helpers import (  # noqa: E402
+        ensure_app, make_gradient_image, make_solid_image,
+        make_transparent_image, write_image)
+    from PySide6.QtGui import QImage  # noqa: E402
+    from pixel_forge.pixelize import (  # noqa: E402
+        PixelForgeError, compute_target_size, count_opaque_colors,
+        downscale, load_image, opaque_pixels, pixelize_file,
+        pixelize_image, quantize)
+except ImportError as exc:
+    # Task 63: every test here needs Qt, so skip the module when
+    # PySide6 is what is missing — but a genuinely broken import
+    # still fails loudly instead of hiding behind the skip.
+    if exc.name and exc.name.startswith("PySide6"):
+        raise unittest.SkipTest("PySide6 not available")
+    raise
 
 
 def make_two_color_image():

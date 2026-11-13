@@ -3,6 +3,8 @@
 Sample code files are written to a temp dir and parsed through the
 public API (parse_file / parse_paths). Pixel-exact checks read the
 rendered QImage back pixel by pixel.
+
+Skipped when PySide6 is not importable.
 """
 import os
 import sys
@@ -11,10 +13,18 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from helpers import ensure_app  # noqa: E402
-from pixel_forge.codeinput import (parse_file, parse_paths,  # noqa: E402
-                                   parse_source)
-from pixel_forge.pixelize import PixelForgeError  # noqa: E402
+try:
+    from helpers import ensure_app  # noqa: E402
+    from pixel_forge.codeinput import (parse_file, parse_paths,  # noqa: E402
+                                       parse_source)
+    from pixel_forge.pixelize import PixelForgeError  # noqa: E402
+except ImportError as exc:
+    # Task 63: every test here needs Qt, so skip the module when
+    # PySide6 is what is missing — but a genuinely broken import
+    # still fails loudly instead of hiding behind the skip.
+    if exc.name and exc.name.startswith("PySide6"):
+        raise unittest.SkipTest("PySide6 not available")
+    raise
 
 PY_SAMPLE = '''
 """A tiny game file: palettes, maps, and things that cannot render."""

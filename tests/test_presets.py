@@ -1,4 +1,6 @@
-"""Preset tests — built-ins, user presets, validation."""
+"""Preset tests — built-ins, user presets, validation.
+
+Skipped when PySide6 is not importable."""
 import json
 import os
 import sys
@@ -8,9 +10,20 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pixel_forge.pixelize import PixelForgeError  # noqa: E402
-from pixel_forge.presets import (BUILTIN_PRESETS, PresetStore,  # noqa: E402
-                                 validate_settings)
+try:
+    from pixel_forge.pixelize import PixelForgeError  # noqa: E402
+    from pixel_forge.presets import (BUILTIN_PRESETS, PresetStore,  # noqa: E402
+                                     validate_settings)
+except ImportError as exc:
+    # Task 63: every test here needs Qt, so skip the module when
+    # PySide6 is what is missing — but a genuinely broken import
+    # still fails loudly instead of hiding behind the skip.
+    # (The preset logic itself is plain JSON — but presets.py
+    # imports the Qt-only pixelize core, so the module cannot
+    # even load without PySide6. Decoupling that is task 64.)
+    if exc.name and exc.name.startswith("PySide6"):
+        raise unittest.SkipTest("PySide6 not available")
+    raise
 
 
 GOOD = {"width": 32, "height": 48, "keep_aspect": True,

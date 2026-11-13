@@ -3,6 +3,8 @@
 Synthetic skins are built with one distinct color per region, so
 every part can be checked pixel-exact. Region coordinates are the
 standard skin layout (see skins.py).
+
+Skipped when PySide6 is not importable.
 """
 import os
 import sys
@@ -12,12 +14,20 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from helpers import (ensure_app, make_noisy_image,  # noqa: E402
-                     make_solid_image, write_image)
-from pixel_forge.pixelize import PixelForgeError, pixelize_image  # noqa: E402
-from pixel_forge.skins import (detect_skin, extract_skin,  # noqa: E402
-                               pixelize_texture, skin_figure,
-                               skin_parts, texture_target_size)
+try:
+    from helpers import (ensure_app, make_noisy_image,  # noqa: E402
+                         make_solid_image, write_image)
+    from pixel_forge.pixelize import PixelForgeError, pixelize_image  # noqa: E402
+    from pixel_forge.skins import (detect_skin, extract_skin,  # noqa: E402
+                                   pixelize_texture, skin_figure,
+                                   skin_parts, texture_target_size)
+except ImportError as exc:
+    # Task 63: every test here needs Qt, so skip the module when
+    # PySide6 is what is missing — but a genuinely broken import
+    # still fails loudly instead of hiding behind the skip.
+    if exc.name and exc.name.startswith("PySide6"):
+        raise unittest.SkipTest("PySide6 not available")
+    raise
 
 # Distinct colors per front-view region.
 REGION_COLORS = {

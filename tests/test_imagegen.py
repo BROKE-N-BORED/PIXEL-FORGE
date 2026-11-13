@@ -5,6 +5,8 @@ script that answers the real sd-cli flags and writes a seed-colored
 PNG), because no engine or model exists in this sandbox. Live
 generation against the real LCM model is NOT proven here — it needs
 Joshua's PC, where the model pull is the long pole.
+
+Skipped when PySide6 is not importable.
 """
 import hashlib
 import json
@@ -18,23 +20,31 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from helpers import ensure_app, stub_env, write_stub_engine  # noqa: E402
-from pixel_forge import imagegen  # noqa: E402
-from pixel_forge.imagegen import (DEFAULT_NEGATIVE,  # noqa: E402
-                                  ENGINE_RELEASE, ENGINE_REPO,
-                                  GenerationCancelled, MODEL_FILENAME,
-                                  MODEL_SHA256, MODEL_URL,
-                                  build_command, check_model_file,
-                                  engine_clone_command,
-                                  engine_missing_text, engine_status,
-                                  file_sha256, find_engine, find_model,
-                                  generate, load_batch,
-                                  model_download_command,
-                                  model_missing_text, new_batch,
-                                  pixelize_candidates, prompt_to_sprites,
-                                  save_batch, set_keeper, slugify,
-                                  validate_prompt)
-from pixel_forge.pixelize import PixelForgeError  # noqa: E402
+try:
+    from helpers import ensure_app, stub_env, write_stub_engine  # noqa: E402
+    from pixel_forge import imagegen  # noqa: E402
+    from pixel_forge.imagegen import (DEFAULT_NEGATIVE,  # noqa: E402
+                                      ENGINE_RELEASE, ENGINE_REPO,
+                                      GenerationCancelled, MODEL_FILENAME,
+                                      MODEL_SHA256, MODEL_URL,
+                                      build_command, check_model_file,
+                                      engine_clone_command,
+                                      engine_missing_text, engine_status,
+                                      file_sha256, find_engine, find_model,
+                                      generate, load_batch,
+                                      model_download_command,
+                                      model_missing_text, new_batch,
+                                      pixelize_candidates, prompt_to_sprites,
+                                      save_batch, set_keeper, slugify,
+                                      validate_prompt)
+    from pixel_forge.pixelize import PixelForgeError  # noqa: E402
+except ImportError as exc:
+    # Task 63: every test here needs Qt, so skip the module when
+    # PySide6 is what is missing — but a genuinely broken import
+    # still fails loudly instead of hiding behind the skip.
+    if exc.name and exc.name.startswith("PySide6"):
+        raise unittest.SkipTest("PySide6 not available")
+    raise
 
 
 class ImageGenBase(unittest.TestCase):

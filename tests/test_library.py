@@ -1,4 +1,6 @@
-"""Library tests — plain-file storage, index, search, tags."""
+"""Library tests — plain-file storage, index, search, tags.
+
+Skipped when PySide6 is not importable."""
 import json
 import os
 import sys
@@ -8,12 +10,20 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from helpers import ensure_app, make_solid_image, write_image  # noqa: E402
-from pixel_forge.library import (LIBRARY_FORMAT, Library,  # noqa: E402
-                                 default_library_dir,
-                                 normalize_tags, slugify,
-                                 validate_entry)
-from pixel_forge.pixelize import PixelForgeError  # noqa: E402
+try:
+    from helpers import ensure_app, make_solid_image, write_image  # noqa: E402
+    from pixel_forge.library import (LIBRARY_FORMAT, Library,  # noqa: E402
+                                     default_library_dir,
+                                     normalize_tags, slugify,
+                                     validate_entry)
+    from pixel_forge.pixelize import PixelForgeError  # noqa: E402
+except ImportError as exc:
+    # Task 63: every test here needs Qt, so skip the module when
+    # PySide6 is what is missing — but a genuinely broken import
+    # still fails loudly instead of hiding behind the skip.
+    if exc.name and exc.name.startswith("PySide6"):
+        raise unittest.SkipTest("PySide6 not available")
+    raise
 
 
 class SlugTests(unittest.TestCase):

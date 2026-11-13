@@ -1,5 +1,36 @@
 # Pixel Forge changelog
 
+## 0.18 — 2026-11-12
+
+The test suite runs on a bare system python — task-list item
+#63 (repo-audit Top 5 #3, minimum level). Ten of the twelve test
+modules errored on import without PySide6, so the documented test
+command failed outright (10 errors) on any machine without Qt
+installed.
+
+- Each Qt-dependent test module now guards its Qt imports at
+  module level: when PySide6 is what is missing, the module
+  raises `unittest.SkipTest` and discovery reports it as one
+  clean skip instead of an import error. Only a missing PySide6
+  skips — the guard checks the failed import's name, so a
+  genuinely broken import still fails loudly instead of hiding
+  behind the skip.
+- The pure tests still run on bare python: the palette tests,
+  the installer script tests, and the new guard tests all run
+  and pass with no PySide6 at all (bare run: 70 tests, OK,
+  skipped=42 — 10 module skips plus the 32 installer tests
+  that need Qt).
+- `test_gui.py`'s old per-class `HAS_QT` decorators are gone:
+  one of its eight classes never had the decorator, so the
+  module skipped nothing and errored on import anyway. The
+  module-level guard covers every class and cannot be missed.
+- New `tests/test_skip_guards.py` pins the behavior: it imports
+  each guarded module in a subprocess with PySide6 blocked and
+  asserts it skips instead of erroring.
+- This is the minimum level, not the real fix: the pixelize
+  core is still Qt-only, so even the CLI needs PySide6.
+  Decoupling the core is task #64 (v0.19).
+
 ## 0.17 — 2026-11-12
 
 The image engine pin is enforced and the model download is

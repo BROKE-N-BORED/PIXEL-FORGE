@@ -3,6 +3,7 @@
 Test videos are generated with ffmpeg itself (testsrc: moving
 shapes), so the suite tests against real videos, not fixtures.
 Skipped when ffmpeg is not installed.
+Skipped when PySide6 is not importable.
 """
 import io
 import os
@@ -16,11 +17,19 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from helpers import ensure_app, make_test_video  # noqa: E402
-from PySide6.QtGui import QImage  # noqa: E402
-from pixel_forge import video as video_mod  # noqa: E402
-from pixel_forge.cli import main as cli_main  # noqa: E402
-from pixel_forge.pixelize import PixelForgeError  # noqa: E402
+try:
+    from helpers import ensure_app, make_test_video  # noqa: E402
+    from PySide6.QtGui import QImage  # noqa: E402
+    from pixel_forge import video as video_mod  # noqa: E402
+    from pixel_forge.cli import main as cli_main  # noqa: E402
+    from pixel_forge.pixelize import PixelForgeError  # noqa: E402
+except ImportError as exc:
+    # Task 63: every test here needs Qt, so skip the module when
+    # PySide6 is what is missing — but a genuinely broken import
+    # still fails loudly instead of hiding behind the skip.
+    if exc.name and exc.name.startswith("PySide6"):
+        raise unittest.SkipTest("PySide6 not available")
+    raise
 
 HAS_FFMPEG = video_mod.find_ffmpeg() is not None
 

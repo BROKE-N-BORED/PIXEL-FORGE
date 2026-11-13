@@ -322,9 +322,9 @@ A preset needs all six keys: `width` and `height` (1–512),
 (true/false). A hand-edited file with a bad preset fails loudly
 instead of applying nonsense.
 
-## What v0.17 does and does not do
+## What v0.18 does and does not do
 
-v0.17 is Items 1–6 of the plan: image to pixel sprite core, video to
+v0.18 is Items 1–6 of the plan: image to pixel sprite core, video to
 sprite frames, prompt-to-sprite with a local image model,
 spritesheets + animation export, a sprite library with presets,
 and code + game-asset input — plus the window-fit fix (every tab's
@@ -377,3 +377,6 @@ python3 -m unittest discover -s tests
 ```
 
 (The Qt GUI tests need a display or `QT_QPA_PLATFORM=offscreen`.)
+On a bare system python with no PySide6 the suite still runs:
+the Qt-dependent test modules skip cleanly instead of erroring
+on import, and the tests that do not need Qt run and pass.
