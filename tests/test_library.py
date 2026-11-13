@@ -144,6 +144,61 @@ class LibraryTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(
             os.path.join(self.tmp, "lib", "walk-cycle.json")))
 
+    def test_add_sheet_rewrites_sheet_field_to_library_png(self):
+        """Task 62: the library copy's meta must name the PNG as
+        it sits in the library — not the source PNG, which does
+        not exist there. The original meta stays byte-identical."""
+        png = write_image(self._image(64, 64),
+                          os.path.join(self.tmp, "walk-sheet.png"))
+        meta = os.path.join(self.tmp, "walk-sheet.json")
+        with open(meta, "w") as f:
+            json.dump({"format": "pixel-forge-spritesheet",
+                       "version": 1, "sheet": "walk-sheet.png",
+                       "frames": [{"name": "frame_001.png",
+                                   "index": 0}]}, f)
+        with open(meta, "rb") as f:
+            original_bytes = f.read()
+        entry = self.lib.add_sheet(png, meta, "Walk cycle",
+                                   frames=1)
+        lib_meta_path = os.path.join(self.tmp, "lib",
+                                     entry["meta"])
+        with open(lib_meta_path) as f:
+            lib_meta = json.load(f)
+        self.assertEqual(lib_meta["sheet"], entry["file"])
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.tmp, "lib", lib_meta["sheet"])))
+        # Everything else in the meta survives the rewrite.
+        self.assertEqual(lib_meta["format"],
+                         "pixel-forge-spritesheet")
+        self.assertEqual(lib_meta["frames"],
+                         [{"name": "frame_001.png", "index": 0}])
+        with open(meta, "rb") as f:
+            self.assertEqual(f.read(), original_bytes)
+
+    def test_add_sheet_adds_sheet_field_when_missing(self):
+        png = write_image(self._image(64, 64),
+                          os.path.join(self.tmp, "walk.png"))
+        meta = os.path.join(self.tmp, "walk.json")
+        with open(meta, "w") as f:
+            json.dump({"format": "pixel-forge-spritesheet",
+                       "version": 1, "frames": []}, f)
+        entry = self.lib.add_sheet(png, meta, "Walk", frames=0)
+        with open(os.path.join(self.tmp, "lib",
+                               entry["meta"])) as f:
+            self.assertEqual(json.load(f)["sheet"],
+                             entry["file"])
+
+    def test_add_sheet_copies_non_json_meta_verbatim(self):
+        png = write_image(self._image(64, 64),
+                          os.path.join(self.tmp, "walk.png"))
+        meta = os.path.join(self.tmp, "walk.json")
+        with open(meta, "w") as f:
+            f.write("not json at all")
+        entry = self.lib.add_sheet(png, meta, "Walk", frames=0)
+        with open(os.path.join(self.tmp, "lib",
+                               entry["meta"])) as f:
+            self.assertEqual(f.read(), "not json at all")
+
     def test_add_sheet_requires_both_files(self):
         png = write_image(self._image(),
                           os.path.join(self.tmp, "walk.png"))

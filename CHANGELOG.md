@@ -1,5 +1,28 @@
 # Pixel Forge changelog
 
+## 0.16 — 2026-11-12
+
+A spritesheet saved to the library no longer carries stale
+metadata — task-list item #62 (repo-audit Top 5 #1). `add_sheet`
+copied the sheet's metadata JSON verbatim, so the library copy's
+"sheet" field still named the ORIGINAL PNG (e.g.
+"walk-sheet.png") — a file that does not exist in the library
+folder. The GUI path was always stale too: the temp sheet is
+always called sheet.png.
+
+- `add_sheet` now rewrites the library copy's "sheet" field to
+  the PNG's name inside the library, so the JSON names a file
+  that exists next to it. The rewrite happens on the library
+  copy only — the original meta file stays byte-identical — and
+  every other field in the JSON is preserved.
+- The rewritten copy is written atomically (temp file + rename),
+  like `write_sheet`. A meta that is not a JSON object is copied
+  verbatim, as before — it has no "sheet" field to go stale.
+- Checked the read path: the Library tab shows and loads a sheet
+  from the entry's own PNG (`path_for`), never from
+  meta["sheet"], so no fallback was needed for entries saved
+  before this fix.
+
 ## 0.15 — 2026-11-12
 
 A corrupt `batch.json` no longer crashes out of a GUI slot —

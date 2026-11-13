@@ -1661,6 +1661,21 @@ class SheetLibraryGuiTests(unittest.TestCase):
         self.assertIn("spritesheet, 16 frames",
                       self.win.library_info_label.text())
 
+    def test_saved_sheet_meta_names_existing_library_file(self):
+        """Task 62: the GUI saves the sheet from a temp file
+        always called sheet.png — the library copy's meta must
+        name the PNG as it sits in the library, not sheet.png."""
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        entry = self.win.save_sheet_to_library("Walk cycle",
+                                               ["walk"])
+        with open(os.path.join(self.lib_dir,
+                               entry["meta"])) as f:
+            lib_meta = json.load(f)
+        self.assertEqual(lib_meta["sheet"], entry["file"])
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.lib_dir, lib_meta["sheet"])))
+
 
 class CodeTabTests(unittest.TestCase):
     """Code tab — code parsing, skins, textures, export, library."""

@@ -362,12 +362,46 @@ class Library:
         self.directory.mkdir(parents=True, exist_ok=True)
         try:
             shutil.copyfile(png, self.directory / png_name)
-            shutil.copyfile(meta, self.directory / meta_name)
+            self._copy_sheet_meta(meta, self.directory / meta_name,
+                                  png_name)
         except OSError as exc:
             raise PixelForgeError("could not copy sheet: %s" % exc)
         return self._record(name, tags, source, "sheet", png_name,
                             image.width(), image.height(),
                             frames=frames, meta=meta_name)
+
+    def _copy_sheet_meta(self, src, dest, png_name):
+        """Copy a sheet's metadata JSON into the library, with its
+        "sheet" field rewritten to the PNG's name inside the
+        library. The original names the SOURCE png — a file that
+        does not exist in the library folder (and the GUI's temp
+        sheet is always sheet.png, so the GUI path was always
+        stale). The original file is never touched. A meta that
+        is not a JSON object is copied verbatim, as before — it
+        has no "sheet" field to go stale. The rewrite is written
+        atomically (temp file + rename), like write_sheet."""
+        try:
+            with open(src) as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            shutil.copyfile(src, dest)
+            return
+        if not isinstance(data, dict):
+            shutil.copyfile(src, dest)
+            return
+        data["sheet"] = png_name
+        tmp = dest.with_suffix(".json.tmp")
+        try:
+            with open(tmp, "w") as handle:
+                json.dump(data, handle, indent=2)
+                handle.write("\n")
+            os.replace(tmp, dest)
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
 
     def rename(self, entry_id, new_name):
         """Change an entry's display name (the file stays put).
