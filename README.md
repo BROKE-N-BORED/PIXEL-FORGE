@@ -160,7 +160,10 @@ it keeps them and prints the way to remove them by hand.
   spritesheet to write the pair straight away. Export GIF
   writes the kept frames (or the selected tag's range) as an
   animated GIF with the per-frame durations, looping forever;
-  it needs ffmpeg, the same as video import.
+  it needs ffmpeg, the same as video import. Export for engine
+  writes the kept frames in a game engine's format instead —
+  Aseprite JSON, TexturePacker JSON, Godot, Unity, GameMaker,
+  Phaser, or Pixi (see "Engine-ready export" below).
 - **Prompt tab:** type what you want (and what to avoid), press
   Generate, and 3 candidates appear in the strip — each takes a
   few minutes on CPU, and the window stays usable while they
@@ -456,6 +459,57 @@ positions into the frames list in playback order, naming a set
 (walk/idle/attack) inside the one sheet. Names are unique, and
 `from` never comes after `to`. Older metadata without `tags`
 loads unchanged.
+
+## Engine-ready export
+
+The Video tab's Export for engine button (and
+`pixel-forge sheet DIR --format <preset>` on the command line)
+writes the kept frames in a game engine's format instead of
+Pixel Forge's own. The export carries the frames, their
+per-frame durations, and the animation tags — except where the
+format has no place for them, which is stated for each preset
+below, never hidden. The command line reads a folder of PNGs,
+which carries no durations or tags, so every frame there gets
+the uniform fps duration.
+
+- **Aseprite JSON** — sheet PNG + JSON in Aseprite's hash
+  format: frames keyed by filename, each with its rect and its
+  own duration in ms; meta with the PNG name, sheet size, and
+  frameTags. Durations and tags are both carried.
+- **TexturePacker JSON** — sheet PNG + JSON in TexturePacker's
+  format: the same frame entries without durations, meta with
+  a smartupdate content hash of the PNG. The format has no
+  place for frame durations or animation tags, so they are
+  dropped.
+- **Godot** — sheet PNG + a JSON atlas in Aseprite's shape
+  (frames, durations, frameTags). Set the texture Filter to
+  Nearest on import, or the pixels blur. Godot has no
+  built-in JSON-atlas import — the atlas is for script-driven
+  use, and the .aseprite file from the Unity preset is what
+  Godot's Aseprite Wizard reads.
+- **Unity (.aseprite)** — a minimal .aseprite file plus the
+  sheet PNG. The file follows the public .aseprite spec: one
+  layer, one compressed cel per frame, a palette chunk, and a
+  tags chunk carrying the animation tags. Unity's 2D Aseprite
+  Importer reads it. Frame counts, sizes, and durations live
+  in 16-bit fields, so anything over 65535 fails with a plain
+  error instead of wrapping silently.
+- **GameMaker strip** — one horizontal strip named `_stripN`,
+  all frames in one row, the frame count in the name. No JSON,
+  no durations, no tags; GameMaker reads the strip from the
+  name.
+- **Phaser JSON** and **Pixi JSON** — TexturePacker JSON, which
+  Phaser's atlas loader and Pixi's Spritesheet both read, with
+  the meta app naming the engine. Same drops as TexturePacker:
+  no durations, no tags.
+
+Verification: the exports are checked structurally against the
+public specs — the .aseprite file is parsed back by a minimal
+reader in the test suite (magic number, frame count, durations,
+chunk types, tags, palette, and cel pixels round-tripping to
+the source frames). No Aseprite binary, Godot, or Unity runs
+in the build sandbox, so opening the exports in the real
+engines is a real-PC check, not something proven here.
 
 ## Library folder and preset format
 

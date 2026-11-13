@@ -6751,5 +6751,176 @@ class LayerGuiTests(unittest.TestCase):
         self.assertFalse(self.win._result_edited)
 
 
+class EngineExportGuiTests(unittest.TestCase):
+    """Engine-ready export dialog (task 36): nothing picked by
+    default, Export disabled until a preset is chosen, the note
+    naming what each preset writes and drops, and real exports
+    read back from disk. The dialog tests build the dialog
+    directly with synthetic frames — no video load needed; only
+    the button test loads a clip."""
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        from pixel_forge import video as video_mod
+        if video_mod.find_ffmpeg() is None:
+            raise unittest.SkipTest("ffmpeg not installed")
+        cls.clip = make_test_video(os.path.join(cls.tmp, "clip.mp4"))
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.win = MainWindow()
+        self.win.tabs.setCurrentIndex(1)
+        self.out = tempfile.mkdtemp(dir=self.tmp)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _wait_for_video(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.video_worker is None
+                    and not self.win._video_debounce_timer.isActive()):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _dialog(self, count=3):
+        from pixel_forge.gui import EngineExportDialog
+        colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+        images = [make_solid_image(32, 32, *colors[i])
+                  for i in range(count)]
+        names = ["frame_%03d.png" % (i + 1) for i in range(count)]
+        dialog = EngineExportDialog(
+            self.win, images, names, [500, 100, 100][:count],
+            [{"name": "walk", "from": 0, "to": count - 1}],
+            cols=2, padding=0, fps=8, folder=self.out,
+            stem="clip-sheet")
+        return dialog
+
+    def _pick(self, dialog, key):
+        combo = dialog.engine_format_combo
+        combo.setCurrentIndex(combo.findData(key))
+        self.app.processEvents()
+
+    def test_nothing_picked_by_default(self):
+        dialog = self._dialog()
+        self.assertEqual(dialog.engine_format_combo.currentIndex(),
+                         -1)
+        self.assertIsNone(dialog.format_key())
+        self.assertFalse(dialog.engine_export_btn.isEnabled())
+        self.assertIn("Pick a preset",
+                      dialog.engine_note_label.text())
+
+    def test_pick_enables_export_and_shows_the_note(self):
+        dialog = self._dialog()
+        self._pick(dialog, "aseprite")
+        self.assertTrue(dialog.engine_export_btn.isEnabled())
+        note = dialog.engine_note_label.text()
+        self.assertIn("clip-sheet.png + clip-sheet.json", note)
+        self.assertIn("carried", note)
+
+    def test_texturepacker_note_names_the_drop(self):
+        dialog = self._dialog()
+        self._pick(dialog, "texturepacker")
+        note = dialog.engine_note_label.text()
+        self.assertIn("dropped", note)
+        self.assertIn("durations", note)
+        self._pick(dialog, "gamemaker")
+        note = dialog.engine_note_label.text()
+        self.assertIn("clip-sheet_strip3.png", note)
+        self.assertIn("No JSON", note)
+
+    def test_long_note_is_not_clipped(self):
+        # The Godot note is the longest — several wrapped lines.
+        # A word-wrapped label does not push its dialog taller
+        # on its own, so the text used to overflow the label
+        # and clip (caught on the v0.46 screenshot). The dialog
+        # must grow until the label is at least as tall as the
+        # text needs at its width.
+        dialog = self._dialog()
+        dialog.show()
+        self.app.processEvents()
+        self._pick(dialog, "godot")
+        self.app.processEvents()
+        label = dialog.engine_note_label
+        needed = label.heightForWidth(label.width())
+        self.assertGreaterEqual(label.height(), needed,
+                                "label %d px tall, text needs %d"
+                                % (label.height(), needed))
+
+    def test_export_aseprite_json_writes_files(self):
+        dialog = self._dialog()
+        self._pick(dialog, "aseprite")
+        dialog.engine_export_btn.click()
+        self.app.processEvents()
+        self.assertEqual(dialog.result(), 1)  # accepted
+        png = os.path.join(self.out, "clip-sheet.png")
+        meta = os.path.join(self.out, "clip-sheet.json")
+        self.assertEqual([str(p) for p in dialog.written],
+                         [png, meta])
+        self.assertTrue(os.path.isfile(png))
+        with open(meta) as handle:
+            data = json.load(handle)
+        self.assertEqual(data["meta"]["image"], "clip-sheet.png")
+        self.assertEqual(data["frames"]["frame_001.png"]["duration"],
+                         500)
+        self.assertEqual(data["meta"]["frameTags"], [
+            {"name": "walk", "from": 0, "to": 2,
+             "direction": "forward"}])
+
+    def test_export_gamemaker_writes_the_strip(self):
+        dialog = self._dialog()
+        self._pick(dialog, "gamemaker")
+        dialog.engine_export_btn.click()
+        self.app.processEvents()
+        strip = os.path.join(self.out, "clip-sheet_strip3.png")
+        self.assertEqual([str(p) for p in dialog.written], [strip])
+        self.assertTrue(os.path.isfile(strip))
+        from pixel_forge.pixelize import load_image
+        image = load_image(strip)
+        self.assertEqual((image.width(), image.height()), (96, 32))
+
+    def test_export_unity_writes_aseprite_and_png(self):
+        dialog = self._dialog()
+        self._pick(dialog, "unity")
+        dialog.engine_export_btn.click()
+        self.app.processEvents()
+        ase = os.path.join(self.out, "clip-sheet.aseprite")
+        png = os.path.join(self.out, "clip-sheet.png")
+        self.assertEqual([str(p) for p in dialog.written],
+                         [ase, png])
+        with open(ase, "rb") as handle:
+            magic = handle.read(6)
+        self.assertEqual(magic[4:], b"\xe0\xa5")  # 0xA5E0
+
+    def test_no_bare_ampersand_in_dialog(self):
+        dialog = self._dialog()
+        for text in visible_texts(dialog):
+            self.assertNotIn("&", text, "bare & in visible text: %r"
+                             % text)
+
+    def test_dialog_controls_have_tooltips(self):
+        from PySide6.QtWidgets import QComboBox, QLineEdit, QPushButton
+        dialog = self._dialog()
+        missing = []
+        for cls in (QPushButton, QComboBox, QLineEdit):
+            for widget in dialog.findChildren(cls):
+                if not widget.toolTip().strip():
+                    missing.append(widget.__class__.__name__)
+        self.assertEqual(missing, [])
+
+    def test_engine_button_enables_with_frames(self):
+        self.assertFalse(self.win.engine_export_btn.isEnabled())
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        self.app.processEvents()
+        self.assertTrue(self.win.engine_export_btn.isEnabled())
+
+
 if __name__ == "__main__":
     unittest.main()

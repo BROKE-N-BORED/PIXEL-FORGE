@@ -478,6 +478,98 @@ class SheetCliTests(unittest.TestCase):
             self.assertIn(needle, err, argv)
             self.assertNotIn("Traceback", err, argv)
 
+    def test_sheet_format_aseprite(self):
+        # Task 36: --format aseprite writes a PNG + an Aseprite
+        # JSON atlas next to --out; --json reports the files.
+        import json
+        out_png = os.path.join(self.tmp, "ase-sheet.png")
+        code, out, err = self._run(
+            ["sheet", self.frames, "--out", out_png,
+             "--format", "aseprite", "--json"])
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["format"], "aseprite")
+        self.assertEqual(payload["frames"], 6)
+        self.assertEqual(payload["files"], [
+            out_png, os.path.join(self.tmp, "ase-sheet.json")])
+        with open(payload["files"][1]) as handle:
+            data = json.load(handle)
+        self.assertEqual(data["meta"]["app"], "Pixel Forge")
+        self.assertEqual(data["meta"]["image"], "ase-sheet.png")
+        # A folder of PNGs carries no durations: uniform from
+        # the default fps (8 -> 125 ms).
+        durations = {entry["duration"]
+                     for entry in data["frames"].values()}
+        self.assertEqual(durations, {125})
+
+    def test_sheet_format_gamemaker(self):
+        out_png = os.path.join(self.tmp, "gm-sheet.png")
+        code, out, err = self._run(
+            ["sheet", self.frames, "--out", out_png,
+             "--format", "gamemaker"])
+        self.assertEqual(code, 0, err)
+        strip = os.path.join(self.tmp, "gm-sheet_strip6.png")
+        self.assertTrue(os.path.isfile(strip), out)
+        self.assertFalse(os.path.isfile(out_png))
+        image = load_image(strip)
+        self.assertEqual((image.width(), image.height()), (192, 32))
+
+    def test_sheet_format_unity(self):
+        out_png = os.path.join(self.tmp, "uni-sheet.png")
+        code, _out, err = self._run(
+            ["sheet", self.frames, "--out", out_png,
+             "--format", "unity"])
+        self.assertEqual(code, 0, err)
+        ase = os.path.join(self.tmp, "uni-sheet.aseprite")
+        self.assertTrue(os.path.isfile(ase))
+        self.assertTrue(os.path.isfile(out_png))
+        with open(ase, "rb") as handle:
+            magic = handle.read(6)
+        self.assertEqual(magic[4:], b"\xe0\xa5")  # 0xA5E0, little-endian
+
+    def test_sheet_format_native_is_the_default(self):
+        # --format native must be byte-identical to omitting it.
+        import hashlib
+        default_png = os.path.join(self.tmp, "dflt-sheet.png")
+        code, _out, err = self._run(
+            ["sheet", self.frames, "--out", default_png])
+        self.assertEqual(code, 0, err)
+        native_png = os.path.join(self.tmp, "nat-sheet.png")
+        code, _out, err = self._run(
+            ["sheet", self.frames, "--out", native_png,
+             "--format", "native"])
+        self.assertEqual(code, 0, err)
+
+        def digest(path):
+            with open(path, "rb") as handle:
+                return hashlib.sha256(handle.read()).hexdigest()
+
+        self.assertEqual(digest(default_png), digest(native_png))
+        default_json = os.path.join(self.tmp, "dflt-sheet.json")
+        native_json = os.path.join(self.tmp, "nat-sheet.json")
+        with open(default_json) as handle:
+            default_meta = json.load(handle)
+        with open(native_json) as handle:
+            native_meta = json.load(handle)
+        # Same metadata except the sheet name, which follows
+        # the --out name.
+        default_meta["sheet"] = native_meta["sheet"] = "same.png"
+        self.assertEqual(default_meta, native_meta)
+
+    def test_sheet_format_meta_refused_for_strip(self):
+        code, _out, err = self._run(
+            ["sheet", self.frames, "--format", "gamemaker",
+             "--meta", os.path.join(self.tmp, "x.json")])
+        self.assertEqual(code, 1)
+        self.assertIn("--meta", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_sheet_format_bad_choice_is_argparse_error(self):
+        code, _out, err = self._run(
+            ["sheet", self.frames, "--format", "nope"])
+        self.assertEqual(code, 2)
+        self.assertIn("invalid choice", err)
+
 
 class LibraryCliTests(unittest.TestCase):
     @classmethod

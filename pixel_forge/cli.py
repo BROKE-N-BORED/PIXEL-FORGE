@@ -43,6 +43,7 @@ from pathlib import Path
 
 from . import __version__
 from .codeinput import parse_paths
+from .engine_export import (ENGINE_FORMATS, FORMAT_INFO, export_engine)
 from .imagegen import (DEFAULT_NEGATIVE, DEFAULT_SIZE, LCM_CFG,
                        LCM_STEPS, MODEL_FILENAME,
                        GENERATION_MIN_RAM_BYTES, available_ram_bytes,
@@ -276,6 +277,17 @@ def build_parser():
     sheet.add_argument("--fps", type=float, default=DEFAULT_FPS,
                        help="playback fps recorded in the metadata "
                        "(default: %s)" % DEFAULT_FPS)
+    sheet.add_argument("--format", default="native",
+                       choices=["native"] + list(ENGINE_FORMATS),
+                       help="export format (default: native — Pixel "
+                       "Forge's own JSON). Engine formats write "
+                       "their files next to --out: aseprite and "
+                       "godot write a PNG + a JSON atlas with "
+                       "durations and tags, texturepacker, phaser, "
+                       "and pixi write a PNG + a JSON atlas "
+                       "without them, unity writes a .aseprite "
+                       "file + a PNG, and gamemaker writes one "
+                       "horizontal strip named _stripN.")
     _add_output_args(sheet)
 
     library = sub.add_parser(
@@ -574,12 +586,34 @@ def cmd_sheet(args):
     out = args.out
     if out is None:
         out = str(folder.parent / (folder.name + "-sheet.png"))
-    meta = args.meta
-    if meta is None:
-        meta = str(Path(out).with_suffix(".json"))
     frames = load_frame_dir(folder)
     names = [name for name, _ in frames]
     images = [image for _, image in frames]
+    fmt = getattr(args, "format", "native") or "native"
+    if fmt != "native":
+        # Engine formats (task 36): the files are written next
+        # to --out, named from its stem. A folder of PNGs
+        # carries no durations or tags, so every frame gets the
+        # uniform fps duration and no tags are written.
+        out_path = Path(out)
+        if args.meta is not None and fmt in ("unity", "gamemaker"):
+            raise PixelForgeError(
+                "--meta only applies to formats that write a "
+                "JSON file")
+        files = export_engine(fmt, images, names, out_path.parent,
+                              out_path.stem, cols=args.cols or None,
+                              padding=args.padding, fps=args.fps,
+                              meta_path=args.meta)
+        _emit_json(args, {"format": fmt,
+                          "files": [str(p) for p in files],
+                          "frames": len(frames), "fps": args.fps})
+        _info(args, "%s — wrote %s"
+              % (FORMAT_INFO[fmt][0],
+                 ", ".join(p.name for p in files)))
+        return 0
+    meta = args.meta
+    if meta is None:
+        meta = str(Path(out).with_suffix(".json"))
     metadata = write_sheet(images, names, out, meta,
                            cols=args.cols or None,
                            padding=args.padding, fps=args.fps)

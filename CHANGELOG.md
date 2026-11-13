@@ -1,5 +1,73 @@
 # Pixel Forge changelog
 
+## 0.46 — 2026-11-13
+
+Engine-ready export — task-list item #36:
+
+- New stdlib-only module pixel_forge/engine_export.py: one writer
+  per game-engine preset, all taking the same inputs (frames,
+  names, durations, tags, fps, columns, padding) and returning
+  the files they wrote. The grid packing is the native writer's
+  pack_frames — no second packer. The JSON writers are shaped
+  after the formats' own exports.
+- Aseprite JSON: sheet PNG + JSON in Aseprite's hash format —
+  frames keyed by filename, each with its rect and its own
+  duration in ms; meta with the PNG name, sheet size, scale
+  "1", and frameTags when animation tags exist. Durations and
+  tags are both carried.
+- TexturePacker JSON: sheet PNG + JSON in TexturePacker's
+  format — the same frame entries without durations, meta with
+  scale 1 (a number, as TexturePacker writes it) and a
+  smartupdate content hash of the PNG. The format has no place
+  for frame durations or animation tags, so they are dropped —
+  stated in the dialog, in the README, and here, never hidden.
+- Phaser JSON and Pixi JSON: TexturePacker JSON, which
+  Phaser's atlas loader and Pixi's Spritesheet both read, with
+  the meta app naming the engine. Same drops as TexturePacker.
+- Godot: sheet PNG + a JSON atlas in Aseprite's shape (frames,
+  durations, frameTags). Set the texture Filter to Nearest on
+  import. Godot has no built-in JSON-atlas import — the atlas
+  is for script-driven use, and the .aseprite file from the
+  Unity preset is what Godot's Aseprite Wizard reads.
+- Unity: a minimal .aseprite file plus the sheet PNG. The
+  writer follows the public .aseprite spec: a 128-byte header
+  (magic 0xA5E0, 32-bit RGBA), one frame per animation frame
+  with its duration in ms, a layer chunk, a zlib-compressed
+  cel chunk per frame, a palette chunk with the distinct
+  colors, and a tags chunk carrying the animation tags.
+  Unity's 2D Aseprite Importer reads the .aseprite file.
+  Frames, sizes, and durations live in WORD fields, so
+  anything over 65535 fails with a plain error instead of
+  wrapping silently.
+- GameMaker: a horizontal strip named _stripN — all frames in
+  one row, the frame count in the name. No JSON, no durations,
+  no tags; a strip is just frames.
+- GUI: an "Export for engine" button in the Video tab's
+  Spritesheet section, enabled when kept frames exist. It
+  opens a dialog with a preset combo (nothing picked by
+  default — Export stays disabled until one is chosen), a note
+  naming what the chosen preset writes and what it drops, and
+  a folder picker. The export carries the kept frames, their
+  durations, and the tags; the status bar names what was
+  written.
+- CLI: pixel-forge sheet DIR --format {native, aseprite,
+  texturepacker, godot, unity, gamemaker, phaser, pixi}
+  (default native — the existing behavior, byte-identical when
+  --format is omitted). Engine formats write their files next
+  to --out, named from its stem. A folder of PNGs carries no
+  durations or tags, so every frame gets the uniform fps
+  duration. --meta overrides the JSON path for the JSON
+  presets and is refused plainly for Unity and GameMaker,
+  which write no JSON. --json reports the written files.
+- Verification note: the exports are verified structurally
+  against the public specs — the .aseprite file is parsed
+  back by a minimal reader in the test suite (magic, frame
+  count, durations, chunk types, tags, palette, and cel pixels
+  round-tripping to the source frames). No Aseprite binary,
+  Godot, or Unity runs in the build sandbox, so opening the
+  exports in the real engines is a real-PC check, not
+  something proven here.
+
 ## 0.45 — 2026-11-13
 
 Layers — task-list item #35:

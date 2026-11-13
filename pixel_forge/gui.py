@@ -59,6 +59,8 @@ from . import __version__
 from .codeinput import CODE_EXTENSIONS, parse_paths
 from .editor import (distinct_colors, draw_line, draw_rect_outline,
                      flood_fill, line_points, pick_color, rect_points)
+from .engine_export import (ENGINE_FORMATS, FORMAT_INFO, export_engine,
+                            format_files, format_note)
 from .history import (batches_dir, load_history, record_batch,
                       record_prompt, save_history)
 from .image import Image
@@ -902,6 +904,122 @@ class TagDialog(QDialog):
         return (self.name_edit.text().strip(),
                 self.from_spin.value() - 1,
                 self.to_spin.value() - 1)
+
+
+class EngineExportDialog(QDialog):
+    """Export the kept frames in a game engine's format (task 36).
+
+    The preset combo starts with nothing picked — Export stays
+    disabled until one is chosen. The note under the combo names
+    what the chosen preset writes and what it drops (frame
+    durations and animation tags have no place in some formats).
+    The folder picker chooses where the files go; the file names
+    come from the video (sheet.png, sheet.json, and friends).
+    written holds the paths the export wrote, once accepted.
+    """
+
+    def __init__(self, parent, images, names, durations, tags, cols,
+                 padding, fps, folder, stem):
+        super().__init__(parent)
+        self.setWindowTitle("Export for engine")
+        self.resize(420, 250)
+        self._images = images
+        self._names = names
+        self._durations = durations
+        self._tags = tags
+        self._cols = cols
+        self._padding = padding
+        self._fps = fps
+        self._stem = stem
+        self.written = []
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Engine format"))
+        self.engine_format_combo = QComboBox()
+        self.engine_format_combo.setToolTip(
+            "The engine format to export")
+        for key in ENGINE_FORMATS:
+            self.engine_format_combo.addItem(FORMAT_INFO[key][0],
+                                             key)
+        self.engine_format_combo.setCurrentIndex(-1)
+        self.engine_format_combo.currentIndexChanged.connect(
+            self._on_format_changed)
+        layout.addWidget(self.engine_format_combo)
+        self.engine_note_label = QLabel(
+            "Pick a preset to see what it writes.")
+        self.engine_note_label.setWordWrap(True)
+        layout.addWidget(self.engine_note_label)
+        layout.addWidget(QLabel("Folder"))
+        folder_row = QHBoxLayout()
+        self.engine_folder_edit = QLineEdit(str(folder))
+        self.engine_folder_edit.setToolTip(
+            "Where the exported files go")
+        folder_row.addWidget(self.engine_folder_edit)
+        browse_btn = QPushButton("Browse")
+        browse_btn.setToolTip(
+            "Pick the folder for the exported files")
+        browse_btn.clicked.connect(self._on_browse)
+        folder_row.addWidget(browse_btn)
+        layout.addLayout(folder_row)
+        layout.addStretch(1)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.engine_export_btn = QPushButton("Export")
+        self.engine_export_btn.setObjectName("export")
+        self.engine_export_btn.setToolTip("Write the exported files")
+        self.engine_export_btn.setEnabled(False)
+        self.engine_export_btn.clicked.connect(self._on_export)
+        button_row.addWidget(self.engine_export_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setToolTip("Close without exporting")
+        cancel_btn.clicked.connect(self.reject)
+        button_row.addWidget(cancel_btn)
+        layout.addLayout(button_row)
+
+    def format_key(self):
+        """The picked preset's key, or None when nothing is picked."""
+        return self.engine_format_combo.currentData()
+
+    def _on_format_changed(self, _index):
+        key = self.format_key()
+        self.engine_export_btn.setEnabled(key is not None)
+        if key is None:
+            self.engine_note_label.setText(
+                "Pick a preset to see what it writes.")
+            return
+        files = format_files(key, self._stem, len(self._images))
+        self.engine_note_label.setText(
+            "Writes %s. %s" % (" + ".join(files), format_note(key)))
+        # The note grows from one line to several (the Godot
+        # note is the longest) — a word-wrapped label does not
+        # push its dialog taller on its own, so without this the
+        # text overflows the label and is clipped. Recompute the
+        # dialog's size from the layout after every change.
+        self.adjustSize()
+
+    def _on_browse(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Export folder", self.engine_folder_edit.text())
+        if folder:
+            self.engine_folder_edit.setText(folder)
+
+    def _on_export(self):
+        key = self.format_key()
+        if key is None:
+            return
+        folder = self.engine_folder_edit.text().strip()
+        if not folder:
+            warn_dialog(self, "Could not export",
+                        "Pick a folder for the exported files first.")
+            return
+        try:
+            self.written = export_engine(
+                key, self._images, self._names, folder, self._stem,
+                cols=self._cols, padding=self._padding, fps=self._fps,
+                durations=self._durations, tags=self._tags)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not export", str(exc))
+            return
+        self.accept()
 
 
 # ------------------------------------------------------- undo commands
@@ -3270,6 +3388,16 @@ class MainWindow(QMainWindow):
         self.video_gif_btn.clicked.connect(self._on_export_gif)
         form.addWidget(self.video_gif_btn)
 
+        self.engine_export_btn = QPushButton("Export for engine")
+        self.engine_export_btn.setObjectName("export")
+        self.engine_export_btn.setToolTip(
+            "Export the kept frames in a game engine's format — "
+            "Aseprite, TexturePacker, Godot, Unity, GameMaker, "
+            "Phaser, or Pixi")
+        self.engine_export_btn.setEnabled(False)
+        self.engine_export_btn.clicked.connect(self._on_export_engine)
+        form.addWidget(self.engine_export_btn)
+
         self.sheet_library_btn = QPushButton("Save sheet to library")
         self.sheet_library_btn.setToolTip(
             "Save the spritesheet to the library")
@@ -4155,7 +4283,8 @@ class MainWindow(QMainWindow):
         has_frames = bool(self.video_frames)
         for button in (self.video_export_btn, self.video_play_btn,
                        self.sheet_preview_btn, self.sheet_export_btn,
-                       self.sheet_library_btn, self.video_gif_btn):
+                       self.sheet_library_btn, self.video_gif_btn,
+                       self.engine_export_btn):
             button.setEnabled(kept)
         for button in (self.video_keep_all_btn,
                        self.video_drop_all_btn):
@@ -4549,6 +4678,32 @@ class MainWindow(QMainWindow):
         if path and self.export_gif(path,
                                     self._selected_video_tag()):
             self._remember_export_dir(Path(path).parent)
+
+    # ------------------------------------------------ engine export
+
+    def _on_export_engine(self):
+        """Open the engine export dialog for the kept frames
+        (task 36): the dialog carries the frames, their
+        durations, and the tags into the chosen preset. On
+        accept, the status bar names what was written and the
+        folder becomes the last-used export folder."""
+        if not self._kept_indices():
+            return
+        images, names = self._kept_sheet_frames()
+        cols, padding, fps = self._sheet_settings()
+        default = Path(self._sheet_default_name())
+        dialog = EngineExportDialog(
+            self, images, names, self._kept_durations(),
+            self.video_tags, cols, padding, fps,
+            str(default.parent.resolve()), default.stem)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        key = dialog.format_key()
+        files = dialog.written
+        self.statusBar().showMessage(
+            "Exported %s: %s" % (FORMAT_INFO[key][0],
+                                 " + ".join(p.name for p in files)))
+        self._remember_export_dir(Path(files[0]).parent)
 
     # =========================================================== prompt tab
 
