@@ -83,6 +83,8 @@ from .skins import (detect_skin, extract_skin, pixelize_texture,
 from .spritesheet import (build_metadata, extract_frame,
                           frames_from_sheet, load_metadata,
                           pack_frames, write_sheet)
+from .undo import Command as UndoCommand
+from .undo import UndoStack
 from .video import (DEFAULT_FPS, FPS_PRESETS, FRAME_COUNT_CONFIRM,
                     VIDEO_EXTENSIONS, estimate_frame_count,
                     extract_frames, parse_time, probe_duration,
@@ -736,6 +738,169 @@ class SheetFrameDialog(QDialog):
         return self._choice
 
 
+# ------------------------------------------------------- undo commands
+# Task 30: the window's undoable changes, one class per kind.
+# Each command is pushed AFTER its change already happened; undo()
+# restores the state from before, redo() re-applies the change,
+# discard() frees what the entry owns when it leaves the stack
+# for good. The window drives them through _push_undo().
+
+class _LibraryDeleteCommand(UndoCommand):
+    """A library delete, undone from the trash folder: the
+    entry's files were moved to trash/<id>/ instead of being
+    unlinked, so undo moves them back and re-inserts the entry
+    at its old index. discard() deletes the trashed files for
+    real — that is the moment the delete becomes permanent."""
+
+    def __init__(self, win, entry, index, trash_dir):
+        super().__init__("Delete %s" % entry["name"])
+        self.win = win
+        self.entry = dict(entry)
+        self.index = index
+        self.trash_dir = Path(trash_dir)
+
+    def _delete(self):
+        win = self.win
+        for key in ("file", "meta"):
+            name = self.entry.get(key)
+            if not name:
+                continue
+            src = win.library.directory / name
+            if src.is_file():
+                self.trash_dir.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(self.trash_dir / name))
+        win.library.remove_index_only(self.entry["id"])
+        win._refresh_library()
+
+    def _restore(self):
+        win = self.win
+        win.library.directory.mkdir(parents=True, exist_ok=True)
+        entry = dict(self.entry)
+        # A new sprite may have taken the stem while this one sat
+        # in the trash — give the restored files a fresh stem
+        # instead of clobbering the new sprite. One stem for both
+        # files, so a sheet pair stays a pair.
+        fresh_stem = None
+        file_name = entry.get("file")
+        if file_name:
+            src = self.trash_dir / file_name
+            if (src.is_file()
+                    and (win.library.directory / file_name).exists()):
+                fresh_stem = win.library._unique_stem(
+                    Path(file_name).stem)
+        for key in ("file", "meta"):
+            name = entry.get(key)
+            if not name:
+                continue
+            src = self.trash_dir / name
+            if not src.is_file():
+                continue  # an orphan had no file to trash
+            if fresh_stem is not None:
+                name = fresh_stem + Path(name).suffix
+                if key == "file":
+                    entry["file"] = name
+                    entry["id"] = fresh_stem
+                else:
+                    entry["meta"] = name
+            dest = win.library.directory / name
+            if dest.exists():
+                # Only the meta collided (a stray file with the
+                # same name): give it its own fresh stem.
+                stem = win.library._unique_stem(Path(name).stem)
+                name = stem + Path(name).suffix
+                entry["meta"] = name
+                dest = win.library.directory / name
+            shutil.move(str(src), str(dest))
+        # The entry's files are back in the library — the now
+        # empty trash subdir goes too, so a restore leaves no
+        # empty folders behind. redo() re-creates it via
+        # mkdir() in _delete() when the delete runs again.
+        self._clean_trash()
+        win.library.restore_entry(entry, self.index)
+        win._refresh_library()
+
+    def _clean_trash(self):
+        # Remove the entry's trash subdir and the trash folder
+        # itself, but only while they are empty (rmdir refuses
+        # otherwise — a sibling entry's files are untouched).
+        try:
+            self.trash_dir.rmdir()
+        except OSError:
+            pass
+        try:
+            self.trash_dir.parent.rmdir()
+        except OSError:
+            pass
+
+    def undo(self):
+        self._restore()
+
+    def redo(self):
+        self._delete()
+
+    def discard(self):
+        shutil.rmtree(self.trash_dir, ignore_errors=True)
+        self._clean_trash()
+
+
+class _PresetDeleteCommand(UndoCommand):
+    """A preset delete: the settings are small, so the command
+    keeps them in memory and saves them back on undo."""
+
+    def __init__(self, win, name, settings, tab):
+        super().__init__("Delete preset %s" % name)
+        self.win = win
+        self.name = name
+        self.settings = dict(settings)
+        self.tab = tab
+
+    def undo(self):
+        self.win.preset_store.save(self.name, self.settings)
+        self.win._refresh_preset_combos()
+        self.win._select_preset(self.tab, "user:%s" % self.name)
+
+    def redo(self):
+        self.win.preset_store.delete(self.name)
+        self.win._refresh_preset_combos()
+
+
+class _KeepDropCommand(UndoCommand):
+    """A keep/drop change on the Video strip: the kept set
+    before and after, as plain lists of booleans indexed by
+    frame number."""
+
+    def __init__(self, win, before, after, text):
+        super().__init__(text)
+        self.win = win
+        self.before = list(before)
+        self.after = list(after)
+
+    def undo(self):
+        self.win._apply_keep(self.before)
+
+    def redo(self):
+        self.win._apply_keep(self.after)
+
+
+class _ControlChangeCommand(UndoCommand):
+    """A control change on one generation tab: the control state
+    before and after (the six pixelize fields plus the picker
+    selection — see _read_control_state)."""
+
+    def __init__(self, win, tab, before, after, text):
+        super().__init__(text)
+        self.win = win
+        self.tab = tab
+        self.before = dict(before)
+        self.after = dict(after)
+
+    def undo(self):
+        self.win._apply_control_state(self.tab, self.before)
+
+    def redo(self):
+        self.win._apply_control_state(self.tab, self.after)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, library_dir=None, restore=True):
         super().__init__()
@@ -758,6 +923,18 @@ class MainWindow(QMainWindow):
         self._session = None
         self._session_corrupt = False
         self._session_restored = not restore
+        # Undo (task 30): a per-window stack, capped at 50. An
+        # undo/redo must not record itself, so every recording
+        # hook checks _undo_suppress first; _tab_settings holds
+        # each generation tab's last-known control state, and a
+        # control change records the diff against it. Both are
+        # set up at the end of __init__ — the control-change
+        # signals fire during tab construction, before the
+        # snapshot exists, and _record_control_change is a no-op
+        # until then.
+        self._undo_stack = UndoStack()
+        self._undo_suppress = False
+        self._tab_settings = None
         # The malformed-entries warning shows in the status bar
         # once per window; the Library tab's count label carries
         # it permanently (see _refresh_library).
@@ -885,11 +1062,16 @@ class MainWindow(QMainWindow):
         self._refresh_prompt_status()
         self._load_prompt_history()
         self._load_session()
+        # Undo snapshots (task 30): the tabs exist now, so the
+        # first control change has a "before" to record against.
+        self._sync_tab_settings()
+        self._refresh_undo_actions()
 
     # ================================================ menus, shortcuts, help
 
     def _build_menu_bar(self):
-        """File + Help menus and the keyboard shortcuts (task 21).
+        """File + Edit + Help menus and the keyboard shortcuts
+        (task 21; Edit is task 30).
 
         Import/Export are QActions with their shortcuts, so the
         menu shows the keys and the actions work from anywhere in
@@ -922,6 +1104,25 @@ class MainWindow(QMainWindow):
             "Open a file you loaded before")
         self._recent_menu = recent_menu
 
+        # Undo/Redo (task 30): the action text names what the
+        # step will do ("Undo Delete knight.png") and is rebuilt
+        # by _refresh_undo_actions after every stack change.
+        # Redo answers to both Ctrl+Y and Ctrl+Shift+Z.
+        edit_menu = self.menuBar().addMenu("Edit")
+        undo_action = QAction("Undo", self)
+        undo_action.setShortcut(QKeySequence("Ctrl+Z"))
+        undo_action.setToolTip("Undo the last change")
+        undo_action.triggered.connect(self._on_undo)
+        edit_menu.addAction(undo_action)
+        redo_action = QAction("Redo", self)
+        redo_action.setShortcuts([QKeySequence("Ctrl+Y"),
+                                  QKeySequence("Ctrl+Shift+Z")])
+        redo_action.setToolTip("Redo the last undone change")
+        redo_action.triggered.connect(self._on_redo)
+        edit_menu.addAction(redo_action)
+        self._undo_action = undo_action
+        self._redo_action = redo_action
+
         help_menu = self.menuBar().addMenu("Help")
         about_action = QAction("About Pixel Forge", self)
         about_action.triggered.connect(self._show_about)
@@ -946,6 +1147,166 @@ class MainWindow(QMainWindow):
                 lambda _checked=False, i=index:
                 self.tabs.setCurrentIndex(i))
             self._tab_shortcuts.append(shortcut)
+
+    # ------------------------------------------------------------ undo
+    def _refresh_undo_actions(self):
+        """The Edit menu's Undo/Redo entries: enabled only when
+        the stack has something to do, and named after the step
+        ("Undo Delete knight.png"). A name with & in it is
+        doubled, or Qt eats the & as a mnemonic marker (the same
+        rule as the Recent files submenu)."""
+        stack = self._undo_stack
+        undo_text = stack.undo_text
+        if undo_text is None:
+            self._undo_action.setText("Undo")
+            self._undo_action.setEnabled(False)
+        else:
+            self._undo_action.setText(
+                "Undo %s" % undo_text.replace("&", "&&"))
+            self._undo_action.setEnabled(True)
+        redo_text = stack.redo_text
+        if redo_text is None:
+            self._redo_action.setText("Redo")
+            self._redo_action.setEnabled(False)
+        else:
+            self._redo_action.setText(
+                "Redo %s" % redo_text.replace("&", "&&"))
+            self._redo_action.setEnabled(True)
+
+    def _push_undo(self, command):
+        """Record a change that already happened, and refresh
+        the Edit menu. Every recording site goes through here,
+        so the menu is never stale."""
+        self._undo_stack.push(command)
+        self._refresh_undo_actions()
+
+    def _on_undo(self):
+        if self._undo_stack.can_undo:
+            text = self._undo_stack.undo_text
+            self._undo_suppress = True
+            try:
+                self._undo_stack.undo()
+            finally:
+                self._undo_suppress = False
+            self._refresh_undo_actions()
+            self.statusBar().showMessage("Undid %s" % text)
+
+    def _on_redo(self):
+        if self._undo_stack.can_redo:
+            text = self._undo_stack.redo_text
+            self._undo_suppress = True
+            try:
+                self._undo_stack.redo()
+            finally:
+                self._undo_suppress = False
+            self._refresh_undo_actions()
+            self.statusBar().showMessage("Redid %s" % text)
+
+    # --------------------------------------------- control-change undo
+    def _read_control_state(self, tab):
+        """One tab's undoable control state: the six pixelize
+        fields plus the picker selection. The Video tab's fps
+        and sheet controls are NOT in here — they have their own
+        handlers outside the control-change funnel, and undoing
+        an extraction is out of scope (see the README)."""
+        settings = self._read_tab_settings(tab)
+        state = {key: settings[key] for key in
+                 ("width", "height", "keep_aspect", "palette",
+                  "max_colors", "dither")}
+        state["preset"] = self._tab_controls(tab)[
+            "preset_combo"].currentData()
+        return state
+
+    def _sync_tab_settings(self):
+        """Re-read every tab's control state as the new
+        "before" — called after a picker rebuild or a programmatic
+        picker change, so a preset save/delete never leaves a
+        phantom picker-only undo step behind."""
+        self._tab_settings = {
+            tab: self._read_control_state(tab)
+            for tab in ("image", "video", "prompt")}
+
+    def _record_control_change(self, tab):
+        """A control on this tab changed — if the state differs
+        from the snapshot, push one undo step and move the
+        snapshot on. A no-op while the window is still being
+        built (no snapshot yet), while an undo/redo is applying,
+        and while a preset is being applied (the preset handler
+        records the whole application as one step itself)."""
+        if self._undo_suppress or self._tab_settings is None:
+            return
+        current = self._read_control_state(tab)
+        before = self._tab_settings[tab]
+        if current == before:
+            return
+        self._tab_settings[tab] = current
+        self._push_undo(_ControlChangeCommand(
+            self, tab, before, current,
+            self._control_change_text(before, current)))
+
+    def _control_change_text(self, before, after):
+        """A short name for a control change, for the Edit menu.
+        A preset pick is named after the preset; a single-field
+        change after the field; several fields at once is just
+        "Change controls"."""
+        if (after.get("preset") is not None
+                and after["preset"] != before.get("preset")):
+            return "Apply preset %s" % after["preset"].split(
+                ":", 1)[1]
+        labels = {"width": "width", "height": "height",
+                  "keep_aspect": "aspect", "palette": "palette",
+                  "max_colors": "colors", "dither": "dither"}
+        changed = [labels[key] for key in labels
+                   if before.get(key) != after.get(key)]
+        if len(changed) == 1:
+            return "Change %s" % changed[0]
+        return "Change controls"
+
+    def _apply_control_state(self, tab, state):
+        """Set a tab's controls from a recorded state (undo/redo).
+        The preset apply fires the normal control signals, so the
+        preview re-pixelizes through the usual path — recording
+        is suppressed, and the picker is set without applying
+        (the settings are already in the state)."""
+        self._undo_suppress = True
+        self._applying_preset = True
+        try:
+            self._apply_settings_to_tab(tab, state)
+            self._select_preset(tab, state.get("preset"))
+        finally:
+            self._applying_preset = False
+            self._undo_suppress = False
+        self._tab_settings[tab] = dict(state)
+
+    # -------------------------------------------------- keep/drop undo
+    def _apply_keep(self, kept):
+        """Set the Video strip's kept set from a recorded list of
+        booleans (undo/redo): the check states, the dimming, the
+        buttons, the counter, and the preview all come back."""
+        self.video_keep = list(kept)
+        self.video_strip.blockSignals(True)
+        try:
+            for row in range(self.video_strip.count()):
+                item = self.video_strip.item(row)
+                index = item.data(Qt.ItemDataRole.UserRole)
+                if index is None:
+                    continue
+                keep = self.video_keep[index]
+                item.setCheckState(
+                    Qt.CheckState.Checked if keep
+                    else Qt.CheckState.Unchecked)
+                self._set_strip_item_dimmed(item, not keep)
+        finally:
+            self.video_strip.blockSignals(False)
+        self._refresh_after_keep_change()
+
+    # ------------------------------------------------ library trash
+    def _trash_dir_for(self, entry_id):
+        """Where a deleted entry's files wait while the delete
+        is still undoable: trash/<id>/ inside the library
+        folder. Export and import iterate the index, never the
+        directory, so the trash folder is invisible to them."""
+        return self.library.directory / "trash" / entry_id
 
     def _on_shortcut_import(self):
         """Ctrl+O: import for the current tab. The Prompt tab has
@@ -1497,6 +1858,7 @@ class MainWindow(QMainWindow):
 
     def _on_control_changed(self):
         self._mark_preset_custom("image")
+        self._record_control_change("image")
         if self.source_image is not None:
             self.update_preview()
 
@@ -2385,6 +2747,7 @@ class MainWindow(QMainWindow):
 
     def _on_video_control_changed(self):
         self._mark_preset_custom("video")
+        self._record_control_change("video")
         if self.video_raw_frames:
             self._schedule_video_run(reload=False)
 
@@ -2501,6 +2864,19 @@ class MainWindow(QMainWindow):
             return
         self.video_keep[index] = (
             item.checkState() == Qt.CheckState.Checked)
+        # A checkbox click is one undo step too (task 30): only
+        # this frame changed, so the "before" is the current set
+        # with this frame flipped back. Signals are blocked
+        # during strip rebuilds and bulk keep/drop, so this only
+        # fires for a real click.
+        if not self._undo_suppress:
+            after = list(self.video_keep)
+            before = list(after)
+            before[index] = not after[index]
+            self._push_undo(_KeepDropCommand(
+                self, before, after,
+                "%s frame %d" % ("Keep" if after[index] else "Drop",
+                                 index + 1)))
         self._set_strip_item_dimmed(item, not self.video_keep[index])
         kept = self._kept_indices()
         self.video_export_btn.setEnabled(bool(kept))
@@ -2546,10 +2922,26 @@ class MainWindow(QMainWindow):
         self._refresh_after_keep_change()
 
     def _on_keep_all(self):
-        self._set_all_keep(True)
+        self._record_keep_drop("Keep all frames",
+                               lambda: self._set_all_keep(True))
 
     def _on_drop_all(self):
-        self._set_all_keep(False)
+        self._record_keep_drop("Drop all frames",
+                               lambda: self._set_all_keep(False))
+
+    def _record_keep_drop(self, text, change):
+        """Run a keep/drop change as one undo step (task 30):
+        the kept set before and after, pushed only when it
+        actually changed. A no-op during an undo/redo."""
+        if self._undo_suppress:
+            change()
+            return
+        before = list(self.video_keep)
+        change()
+        after = list(self.video_keep)
+        if before != after:
+            self._push_undo(_KeepDropCommand(
+                self, before, after, text))
 
     def _set_selected_keep(self, keep):
         """Keep or drop just the selected frames (task 25)."""
@@ -2572,10 +2964,14 @@ class MainWindow(QMainWindow):
         self._refresh_after_keep_change()
 
     def _on_keep_selected(self):
-        self._set_selected_keep(True)
+        self._record_keep_drop(
+            "Keep selected frames",
+            lambda: self._set_selected_keep(True))
 
     def _on_drop_selected(self):
-        self._set_selected_keep(False)
+        self._record_keep_drop(
+            "Drop selected frames",
+            lambda: self._set_selected_keep(False))
 
     # -------------------------------------------------------- playback
 
@@ -4079,6 +4475,7 @@ class MainWindow(QMainWindow):
 
     def _on_prompt_control_changed(self):
         self._mark_preset_custom("prompt")
+        self._record_control_change("prompt")
         if self.prompt_keeper_image is not None:
             self._update_prompt_preview()
 
@@ -5131,6 +5528,11 @@ class MainWindow(QMainWindow):
             return
         if settings is not None and field in settings:
             self._mark_preset_custom("video")
+            # The picker moved without a control signal — sync
+            # the undo snapshot so the next change does not
+            # record a phantom picker-only step (task 30).
+            if self._tab_settings is not None:
+                self._sync_tab_settings()
 
     def _refresh_preset_combos(self):
         """Rebuild all three preset pickers from the store,
@@ -5179,6 +5581,12 @@ class MainWindow(QMainWindow):
             finally:
                 combo.blockSignals(False)
             self._update_preset_buttons(tab)
+        # A rebuild can move a picker (a deleted preset drops
+        # its tab to Custom) without any control signal — sync
+        # the undo snapshot so the next change does not record
+        # a phantom picker-only step (task 30).
+        if self._tab_settings is not None:
+            self._sync_tab_settings()
 
     def _update_preset_buttons(self, tab):
         """Delete is only for a selected USER preset — Custom and
@@ -5201,6 +5609,11 @@ class MainWindow(QMainWindow):
                 combo.blockSignals(False)
                 break
         self._update_preset_buttons(tab)
+        # The picker moved without a control signal — sync the
+        # undo snapshot so the next change does not record a
+        # phantom picker-only step (task 30).
+        if self._tab_settings is not None:
+            self._sync_tab_settings()
 
     def _on_library_preset(self, tab):
         """A preset was picked — apply it to this tab."""
@@ -5218,7 +5631,16 @@ class MainWindow(QMainWindow):
             return
         if settings is None:
             return
-        self._apply_settings_to_tab(tab, settings)
+        # One undo step for the whole application: the apply
+        # fires a control-changed signal per control, so
+        # recording is suppressed until it lands, then the diff
+        # against the snapshot is recorded once (task 30).
+        self._undo_suppress = True
+        try:
+            self._apply_settings_to_tab(tab, settings)
+        finally:
+            self._undo_suppress = False
+        self._record_control_change(tab)
         self.statusBar().showMessage("Applied preset %s" % name)
 
     def _on_save_preset(self, tab):
@@ -5251,12 +5673,18 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
             return
+        # Undoable (task 30): the settings are captured before
+        # the delete, so undo saves them straight back.
         try:
+            settings = self.preset_store.get(name)
             self.preset_store.delete(name)
         except PixelForgeError as exc:
             warn_dialog(self, "Could not delete preset", str(exc))
             return
         self._refresh_preset_combos()
+        if settings is not None:
+            self._push_undo(_PresetDeleteCommand(
+                self, name, settings, tab))
         self.statusBar().showMessage("Deleted preset %s" % name)
 
     def _on_export_preset(self, tab):
@@ -5911,12 +6339,24 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
             return
+        # Undoable (task 30): the files move to the trash folder
+        # instead of being unlinked, and the index entry is
+        # dropped only — the delete becomes permanent when the
+        # undo entry leaves the stack (or the window closes).
+        # The confirm stays: undo is a safety net, not a
+        # replacement for asking.
+        entries = self.library.entries()
+        index = next((i for i, e in enumerate(entries)
+                      if e["id"] == entry["id"]), len(entries))
+        trash_dir = self._trash_dir_for(entry["id"])
         try:
-            self.library.remove(entry["id"])
+            command = _LibraryDeleteCommand(
+                self, entry, index, trash_dir)
+            command._delete()
         except PixelForgeError as exc:
             warn_dialog(self, "Could not delete", str(exc))
             return
-        self._refresh_library()
+        self._push_undo(command)
         self.statusBar().showMessage(
             "Deleted %s from the library" % entry["name"])
 
@@ -6196,6 +6636,10 @@ class MainWindow(QMainWindow):
         self._stop_video_worker()
         self._cleanup_video_raw()
         self._cleanup_prompt_batch()
+        # Undo is per-window-session only (task 30): clearing
+        # the stack discards every entry, which is what
+        # permanently deletes the files of undone deletes.
+        self._undo_stack.clear()
         event.accept()
 
 

@@ -3586,7 +3586,7 @@ class ShortcutsMenusTests(unittest.TestCase):
 
     def test_menu_bar_has_file_and_help_menus(self):
         menus = self._menus()
-        self.assertEqual(sorted(menus), ["File", "Help"])
+        self.assertEqual(sorted(menus), ["Edit", "File", "Help"])
         file_items = [(a.text(), a.shortcut().toString())
                       for a in menus["File"].actions()]
         # Task 29 adds the Recent files submenu after Export; it
@@ -3596,6 +3596,19 @@ class ShortcutsMenusTests(unittest.TestCase):
                                       ("Export", "Ctrl+S"),
                                       ("Recent files", "")])
         self.assertFalse(menus["File"].actions()[2].isEnabled())
+        # Task 30 adds the Edit menu: Undo (Ctrl+Z) and Redo
+        # (Ctrl+Y, also Ctrl+Shift+Z), both disabled on a fresh
+        # window — there is nothing to undo or redo yet.
+        edit_items = [(a.text(), a.shortcut().toString())
+                      for a in menus["Edit"].actions()]
+        self.assertEqual(edit_items, [("Undo", "Ctrl+Z"),
+                                      ("Redo", "Ctrl+Y")])
+        self.assertFalse(menus["Edit"].actions()[0].isEnabled())
+        self.assertFalse(menus["Edit"].actions()[1].isEnabled())
+        self.assertEqual(
+            [s.toString()
+             for s in menus["Edit"].actions()[1].shortcuts()],
+            ["Ctrl+Y", "Ctrl+Shift+Z"])
         help_items = [a.text()
                       for a in menus["Help"].actions()]
         self.assertEqual(help_items,
@@ -5307,6 +5320,347 @@ class SessionGuiTests(unittest.TestCase):
             session_path(self.lib_dir).read_text(
                 encoding="utf-8"),
             "{not json")
+
+
+class UndoGuiTests(unittest.TestCase):
+    """Task 30: Undo/Redo in the Edit menu — library deletes,
+    preset deletes, keep/drop choices, control changes. Every
+    test gets its own library folder, so the trash under test
+    is isolated from the shared test library."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        cls.image = write_image(
+            make_gradient_image(),
+            os.path.join(cls.tmp, "photo.png"))
+        cls.clip = None
+        try:
+            cls.clip = make_test_video(
+                os.path.join(cls.tmp, "clip.mp4"), duration=2)
+        except Exception:
+            pass  # video tests skip below when ffmpeg is missing
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        # restore=False: no session restore behind the test's
+        # back on show().
+        self.win = MainWindow(library_dir=self.lib_dir,
+                              restore=False)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _add(self, name, r=255, g=0, b=0):
+        return self.win.library.add_image(
+            make_solid_image(32, 32, r, g, b), name)
+
+    def _select(self, row=0):
+        item = self.win.library_list.item(row)
+        self.win.library_list.setCurrentItem(item)
+        self.win._on_library_item_clicked(item)
+        return item
+
+    def _confirm(self, answer):
+        """Patch the Yes/No confirm to answer Yes or No."""
+        from unittest import mock
+        return mock.patch.object(
+            QMessageBox, "question", return_value=answer)
+
+    def _wait_for_video(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.video_worker is None
+                    and not self.win._video_debounce_timer.isActive()):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _pick(self, combo, key):
+        index = combo.findData(key)
+        self.assertGreaterEqual(index, 0, "no such preset: %s" % key)
+        combo.setCurrentIndex(index)
+        self.app.processEvents()
+
+    def test_edit_menu_disabled_on_fresh_window(self):
+        self.assertFalse(self.win._undo_action.isEnabled())
+        self.assertFalse(self.win._redo_action.isEnabled())
+        self.assertEqual(self.win._undo_action.text(), "Undo")
+        self.assertEqual(self.win._redo_action.text(), "Redo")
+
+    def test_library_delete_undo_restores_entry_and_file(self):
+        first = self._add("Knight")
+        second = self._add("Slime", r=0, g=255)
+        third = self._add("Ghost", r=0, g=0, b=255)
+        self.win._refresh_library()
+        self._select(1)
+        lib_file = os.path.join(self.lib_dir, second["file"])
+        self.assertTrue(os.path.exists(lib_file))
+        with self._confirm(QMessageBox.StandardButton.Yes):
+            self.win._on_library_delete()
+        self.assertEqual([e["name"] for e in
+                          self.win.library.entries()],
+                         ["Knight", "Ghost"])
+        self.assertFalse(os.path.exists(lib_file))
+        # The file waits in the trash while the delete is
+        # undoable, and the menu names the step.
+        trash_file = os.path.join(
+            self.lib_dir, "trash", second["id"], second["file"])
+        self.assertTrue(os.path.exists(trash_file))
+        self.assertEqual(self.win._undo_action.text(),
+                         "Undo Delete Slime")
+        self.assertTrue(self.win._undo_action.isEnabled())
+        self.win._on_undo()
+        entries = self.win.library.entries()
+        self.assertEqual([e["name"] for e in entries],
+                         ["Knight", "Slime", "Ghost"])
+        self.assertEqual(entries[1]["id"], second["id"])
+        self.assertEqual(entries[1]["file"], second["file"])
+        self.assertTrue(os.path.exists(lib_file))
+        self.assertFalse(os.path.exists(trash_file))
+        self.assertEqual(self.win.library_list.count(), 3)
+        # Redo deletes it again, and a second undo brings it
+        # back once more.
+        self.win._on_redo()
+        self.assertEqual([e["name"] for e in
+                          self.win.library.entries()],
+                         ["Knight", "Ghost"])
+        self.assertTrue(os.path.exists(trash_file))
+        self.win._on_undo()
+        self.assertEqual([e["name"] for e in
+                          self.win.library.entries()],
+                         ["Knight", "Slime", "Ghost"])
+        self.assertTrue(os.path.exists(lib_file))
+
+    def test_library_delete_undo_restores_sheet_pair(self):
+        png = write_image(make_solid_image(64, 64, 0, 0, 255),
+                          os.path.join(self.tmp, "walk.png"))
+        meta = os.path.join(self.tmp, "walk.json")
+        with open(meta, "w") as handle:
+            json.dump({"format": "pixel-forge-spritesheet",
+                       "version": 1, "frames": []}, handle)
+        sheet = self.win.library.add_sheet(png, meta, "Walk",
+                                           frames=3)
+        self.win._refresh_library()
+        self._select(0)
+        with self._confirm(QMessageBox.StandardButton.Yes):
+            self.win._on_library_delete()
+        self.assertEqual(self.win.library.entries(), [])
+        self.win._on_undo()
+        entries = self.win.library.entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["id"], sheet["id"])
+        self.assertTrue(os.path.exists(
+            os.path.join(self.lib_dir, sheet["file"])))
+        self.assertTrue(os.path.exists(
+            os.path.join(self.lib_dir, sheet["meta"])))
+
+    def test_trash_emptied_when_entry_leaves_stack(self):
+        # The stack cap is 50; a 2-entry stack proves the
+        # eviction path without pushing 51 deletes.
+        from pixel_forge.undo import UndoStack
+        self.win._undo_stack = UndoStack(cap=2)
+        self.win._refresh_undo_actions()
+        first = self._add("Knight")
+        second = self._add("Slime", r=0, g=255)
+        third = self._add("Ghost", r=0, g=0, b=255)
+        self.win._refresh_library()
+        for row in (0, 0, 0):
+            self._select(row)
+            with self._confirm(QMessageBox.StandardButton.Yes):
+                self.win._on_library_delete()
+        trash = os.path.join(self.lib_dir, "trash")
+        # The oldest delete was evicted — its trash is gone for
+        # real. The two newer deletes are still undoable.
+        self.assertFalse(os.path.exists(
+            os.path.join(trash, first["id"])))
+        self.assertTrue(os.path.exists(
+            os.path.join(trash, second["id"], second["file"])))
+        self.assertTrue(os.path.exists(
+            os.path.join(trash, third["id"], third["file"])))
+        self.assertEqual(len(self.win._undo_stack), 2)
+        # Only the two newer deletes can come back.
+        self.win._on_undo()
+        self.win._on_undo()
+        self.assertEqual([e["name"] for e in
+                          self.win.library.entries()],
+                         ["Slime", "Ghost"])
+        self.assertFalse(self.win._undo_action.isEnabled())
+
+    def test_close_clears_trash(self):
+        entry = self._add("Knight")
+        self.win._refresh_library()
+        self._select(0)
+        with self._confirm(QMessageBox.StandardButton.Yes):
+            self.win._on_library_delete()
+        trash = os.path.join(self.lib_dir, "trash")
+        self.assertTrue(os.path.exists(
+            os.path.join(trash, entry["id"], entry["file"])))
+        self.win.close()
+        self.assertFalse(os.path.exists(trash))
+
+    def test_preset_delete_undo_restores_settings(self):
+        settings = {"width": 16, "height": 16, "keep_aspect": False,
+                    "palette": "pico8", "max_colors": 8,
+                    "dither": True}
+        self.win.preset_store.save("My tiny", settings)
+        self.win._refresh_preset_combos()
+        self._pick(self.win.preset_combo, "user:My tiny")
+        with self._confirm(QMessageBox.StandardButton.Yes):
+            self.win._on_delete_preset("image")
+        self.assertIsNone(self.win.preset_store.get("My tiny"))
+        self.assertEqual(self.win._undo_action.text(),
+                         "Undo Delete preset My tiny")
+        self.win._on_undo()
+        self.assertEqual(self.win.preset_store.get("My tiny"),
+                         settings)
+        # The picker re-selects the restored preset.
+        self.assertEqual(self.win.preset_combo.currentData(),
+                         "user:My tiny")
+        self.win._on_redo()
+        self.assertIsNone(self.win.preset_store.get("My tiny"))
+
+    def test_keep_all_undo_restores_kept_set(self):
+        if self.clip is None:
+            self.skipTest("ffmpeg not installed")
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        self.assertEqual(len(self.win.video_frames), 16)
+        # Drop frames 2 and 5, then Keep all.
+        for row in (1, 4):
+            self.win.video_strip.item(row).setSelected(True)
+        self.win._on_drop_selected()
+        self.assertEqual(len(self.win._kept_indices()), 14)
+        self.win._on_keep_all()
+        self.assertEqual(len(self.win._kept_indices()), 16)
+        self.assertEqual(self.win._undo_action.text(),
+                         "Undo Keep all frames")
+        self.win._on_undo()
+        self.assertEqual(len(self.win._kept_indices()), 14)
+        self.assertEqual(self.win._kept_indices(),
+                         [i for i in range(16) if i not in (1, 4)])
+        # The strip, the dimming, and the counter all come back.
+        self.assertEqual(
+            self.win.video_strip.item(1).checkState(),
+            Qt.CheckState.Unchecked)
+        self.assertEqual(
+            self.win.video_strip.item(0).checkState(),
+            Qt.CheckState.Checked)
+        self.assertIn("14 kept",
+                      self.win.video_counter_label.text())
+        self.win._on_redo()
+        self.assertEqual(len(self.win._kept_indices()), 16)
+
+    def test_checkbox_toggle_is_one_undo_step(self):
+        if self.clip is None:
+            self.skipTest("ffmpeg not installed")
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        item = self.win.video_strip.item(2)
+        item.setCheckState(Qt.CheckState.Unchecked)
+        self.app.processEvents()
+        self.assertEqual(len(self.win._kept_indices()), 15)
+        self.assertEqual(self.win._undo_action.text(),
+                         "Undo Drop frame 3")
+        self.win._on_undo()
+        self.assertEqual(len(self.win._kept_indices()), 16)
+        self.assertEqual(item.checkState(), Qt.CheckState.Checked)
+
+    def test_control_change_undo_restores_value_and_preview(self):
+        self.assertTrue(self.win.load_image(self.image))
+        before = self.win.info_label.text()
+        before_count = int(before.split(", ")[1].split(" ")[0])
+        self.win.colors_spin.setValue(4)
+        self.app.processEvents()
+        self.assertEqual(self.win.colors_spin.value(), 4)
+        after_count = int(self.win.info_label.text().split(", ")[1]
+                          .split(" ")[0])
+        # The preview re-pixelized at 4 colors — fewer distinct
+        # colors than the 16-color original.
+        self.assertLess(after_count, before_count)
+        self.assertEqual(self.win._undo_action.text(),
+                         "Undo Change colors")
+        self.win._on_undo()
+        self.assertEqual(self.win.colors_spin.value(), 16)
+        self.assertEqual(self.win.info_label.text(), before)
+        self.win._on_redo()
+        self.assertEqual(self.win.colors_spin.value(), 4)
+        redo_count = int(self.win.info_label.text().split(", ")[1]
+                         .split(" ")[0])
+        self.assertEqual(redo_count, after_count)
+
+    def test_preset_application_is_one_undo_step(self):
+        self.assertTrue(self.win.load_image(self.image))
+        self.assertEqual(self.win.palette_combo.currentData(),
+                         "image")
+        self.assertEqual(self.win.colors_spin.value(), 16)
+        self._pick(self.win.preset_combo, "builtin:Game Boy 32")
+        self.assertEqual(self.win.palette_combo.currentData(),
+                         "gameboy")
+        self.assertEqual(self.win.colors_spin.value(), 4)
+        # One step for the whole application, not one per
+        # control — and it is named after the preset.
+        self.assertEqual(len(self.win._undo_stack), 1)
+        self.assertEqual(self.win._undo_action.text(),
+                         "Undo Apply preset Game Boy 32")
+        self.win._on_undo()
+        self.assertEqual(self.win.palette_combo.currentData(),
+                         "image")
+        self.assertEqual(self.win.colors_spin.value(), 16)
+        self.assertEqual(self.win.preset_combo.currentData(), None)
+        self.assertFalse(self.win._undo_action.isEnabled())
+
+    def test_undo_redo_do_not_push_entries(self):
+        self.assertTrue(self.win.load_image(self.image))
+        self.win.colors_spin.setValue(8)
+        self.win.width_spin.setValue(64)
+        self.app.processEvents()
+        self.assertEqual(len(self.win._undo_stack), 2)
+        self.win._on_undo()
+        self.win._on_undo()
+        self.assertEqual(self.win.colors_spin.value(), 16)
+        self.assertEqual(self.win.width_spin.value(), 32)
+        self.assertEqual(len(self.win._undo_stack), 0)
+        self.assertFalse(self.win._undo_action.isEnabled())
+        self.assertTrue(self.win._redo_action.isEnabled())
+        self.win._on_redo()
+        self.win._on_redo()
+        self.assertEqual(self.win.colors_spin.value(), 8)
+        self.assertEqual(self.win.width_spin.value(), 64)
+        self.assertEqual(len(self.win._undo_stack), 2)
+        self.assertFalse(self.win._redo_action.isEnabled())
+
+    def test_edit_menu_names_the_step(self):
+        self.assertTrue(self.win.load_image(self.image))
+        self.win.dither_check.setChecked(False)
+        self.app.processEvents()
+        self.assertEqual(self.win._undo_action.text(),
+                         "Undo Change dither")
+        self.assertTrue(self.win._undo_action.isEnabled())
+        self.assertFalse(self.win._redo_action.isEnabled())
+        self.win._on_undo()
+        self.assertEqual(self.win._undo_action.text(), "Undo")
+        self.assertFalse(self.win._undo_action.isEnabled())
+        self.assertEqual(self.win._redo_action.text(),
+                         "Redo Change dither")
+        self.assertTrue(self.win._redo_action.isEnabled())
+
+    def test_undo_action_doubles_ampersand(self):
+        # A name with & in it must render literally in the menu,
+        # not lose the & to Qt's mnemonic marker.
+        self._add("Rock & Roll")
+        self.win._refresh_library()
+        self._select(0)
+        with self._confirm(QMessageBox.StandardButton.Yes):
+            self.win._on_library_delete()
+        self.assertEqual(self.win._undo_action.text(),
+                         "Undo Delete Rock && Roll")
 
 
 if __name__ == "__main__":

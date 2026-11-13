@@ -631,6 +631,34 @@ class Library:
         raise PixelForgeError(
             "no library entry with id %r" % entry_id)
 
+    def restore_entry(self, entry, index):
+        """Re-insert a previously removed entry at its old
+        position (undo for a library delete). The entry keeps its
+        id and fields; its files are the caller's job — this only
+        touches the index. Raises PixelForgeError when an entry
+        with the id already exists. The index is clamped to the
+        list. _save rebuilds the file from _raw_entries, so the
+        entry must land there too, at the matching spot — an
+        insert into _entries alone would come back at the end."""
+        self._load()
+        entry_id = entry.get("id")
+        if any(e["id"] == entry_id for e in self._entries):
+            raise PixelForgeError(
+                "library entry %r already exists" % entry_id)
+        index = max(0, min(index, len(self._entries)))
+        self._entries.insert(index, dict(entry))
+        raw_index = len(self._raw_entries)
+        valid = 0
+        for i, raw in enumerate(self._raw_entries):
+            if validate_entry(raw) is None:
+                if valid == index:
+                    raw_index = i
+                    break
+                valid += 1
+        self._raw_entries.insert(raw_index, dict(entry))
+        self._save()
+        return dict(entry)
+
     def remove(self, entry_id):
         """Delete an entry and its files (the sheet JSON too).
         Missing files are tolerated — the index entry is what

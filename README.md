@@ -152,6 +152,21 @@ bash uninstall.sh
   you choose. Changing a control by hand drops the picker back
   to Custom. Delete preset removes a saved preset (built-ins
   cannot be deleted).
+- **Undo:** the Edit menu has Undo (Ctrl+Z) and Redo (Ctrl+Y
+  and Ctrl+Shift+Z), each named after the step it will do.
+  Four kinds of change are undoable: library deletes, preset
+  deletes, keep/drop choices on the Video strip, and control
+  changes on the Image, Video, and Prompt tabs (size, palette,
+  colors, dithering, and the preset selection — applying a
+  preset is one step). A library delete moves the sprite's
+  files to a `trash/` folder in the library folder instead of
+  removing them, so undo brings the entry and its files back;
+  the delete becomes permanent when the undo entry leaves the
+  stack (it holds 50 entries) or the window closes. Undo is
+  per-window-session only — nothing is kept across restarts,
+  and the Video tab's fps and sheet controls are not undone.
+  The command line has no undo: `library remove` still deletes
+  permanently.
 - **Shortcuts:** Enter in the prompt field generates; Ctrl+O
   imports for the current tab and Ctrl+S exports from it
   (nothing happens on a tab with nothing to import or export);
@@ -360,6 +375,9 @@ there until the first save:
   knight.png       one sprite entry
   walk-sheet.png   one spritesheet entry (the PNG half)
   walk-sheet.json  the spritesheet's metadata (the JSON half)
+  trash/           deleted sprites, while their delete is
+                   still undoable — emptied when the undo
+                   entries leave the stack or the window closes
 ```
 
 `library.json` is Pixel Forge's own format

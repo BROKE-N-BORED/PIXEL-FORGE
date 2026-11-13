@@ -280,6 +280,40 @@ class LibraryTests(unittest.TestCase):
         self.lib.remove(entry["id"])  # no raise
         self.assertEqual(self.lib.entries(), [])
 
+    def test_restore_entry_puts_it_back_at_its_index(self):
+        # Task 30: undo for a library delete re-inserts the
+        # entry at its old position, with its id and fields —
+        # and the position survives a fresh load (the save
+        # rebuilds from the raw list, so the restore must land
+        # there too, not just in the valid list).
+        first = self.lib.add_image(self._image(), "Knight")
+        second = self.lib.add_image(self._image(), "Slime")
+        third = self.lib.add_image(self._image(), "Ghost")
+        self.lib.remove_index_only(second["id"])
+        self.assertEqual([e["name"] for e in self.lib.entries()],
+                         ["Knight", "Ghost"])
+        restored = self.lib.restore_entry(dict(second), 1)
+        self.assertEqual(restored["id"], second["id"])
+        self.assertEqual([e["name"] for e in self.lib.entries()],
+                         ["Knight", "Slime", "Ghost"])
+        other = Library(os.path.join(self.tmp, "lib"))
+        self.assertEqual([e["name"] for e in other.entries()],
+                         ["Knight", "Slime", "Ghost"])
+        self.assertEqual(other.find(second["id"])["id"],
+                         second["id"])
+
+    def test_restore_entry_refuses_a_duplicate_id(self):
+        entry = self.lib.add_image(self._image(), "Knight")
+        with self.assertRaises(PixelForgeError):
+            self.lib.restore_entry(dict(entry), 0)
+
+    def test_restore_entry_clamps_the_index(self):
+        entry = self.lib.add_image(self._image(), "Knight")
+        self.lib.remove_index_only(entry["id"])
+        self.lib.restore_entry(dict(entry), 99)
+        self.assertEqual([e["name"] for e in self.lib.entries()],
+                         ["Knight"])
+
     def test_persistence_across_instances(self):
         self.lib.add_image(self._image(), "Knight", tags=["hero"])
         self.lib.add_image(self._image(16, 16), "Slime")

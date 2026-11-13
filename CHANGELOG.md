@@ -1,5 +1,42 @@
 # Pixel Forge changelog
 
+## 0.41 — 2026-11-13
+
+Undo — task-list item #30:
+
+- The Edit menu has Undo (Ctrl+Z) and Redo (Ctrl+Y and
+  Ctrl+Shift+Z). Each entry names the step it will do ("Undo
+  Delete knight.png") and is disabled when the stack has
+  nothing to undo or redo. Undo is per-window-session only:
+  closing the window clears the stack, and nothing is kept
+  across restarts.
+- Four kinds of change are undoable, with redo for each:
+  library deletes, preset deletes, keep/drop choices on the
+  Video strip, and control changes on the Image, Video, and
+  Prompt tabs (size, palette, colors, dither, and the preset
+  selection). A preset application is one step, not one per
+  control. The Video tab's fps and sheet controls are not
+  undone — they have their own handlers and undoing an
+  extraction is out of scope.
+- A library delete moves the sprite's files to a `trash/`
+  folder inside the library folder instead of unlinking them,
+  so undo restores the entry (same id, same position) and its
+  files. The delete becomes permanent when the undo entry
+  leaves the stack: the stack holds 50 entries, and the oldest
+  drops off — or the window closes. The delete confirm dialog
+  stays; undo is a safety net, not a replacement for asking.
+  If a new sprite took the deleted file's name while it sat in
+  the trash, undo restores it under a fresh name instead of
+  clobbering the new sprite.
+- A preset delete is undone by saving the preset back with its
+  exact settings and re-selecting it on the tab that deleted
+  it. Keep/drop undo restores the previous kept set — the
+  strip check states, the dimming, the counter, and the
+  buttons all come back. Control-change undo restores the
+  previous control values and re-pixelizes.
+- The command line has no undo: the CLI's `library remove`
+  still deletes permanently, as before.
+
 ## 0.40 — 2026-11-13
 
 Recent files + session restore — task-list item #29:
