@@ -74,7 +74,8 @@ from .presets import (BUILTIN_PRESETS, SHEET_COLS_VALUES, PresetStore,
 from .qtimage import to_qimage
 from .skins import (detect_skin, extract_skin, pixelize_texture,
                     skin_figure, skin_parts)
-from .spritesheet import (build_metadata, frames_from_sheet,
+from .spritesheet import (build_metadata, extract_frame,
+                          frames_from_sheet, load_metadata,
                           pack_frames, write_sheet)
 from .video import (DEFAULT_FPS, FPS_PRESETS, VIDEO_EXTENSIONS,
                     extract_frames, require_ffmpeg)
@@ -575,6 +576,131 @@ class SaveToLibraryDialog(QDialog):
                 self.tags_edit.text().split(",") if tag.strip()]
 
 
+class EditTagsDialog(QDialog):
+    """Change a saved sprite's tags and collection (task 24).
+    Both fields come pre-filled from the entry; clearing the
+    collection field takes the sprite out of its collection."""
+
+    def __init__(self, parent, entry):
+        super().__init__(parent)
+        self.setWindowTitle("Edit tags")
+        self.resize(360, 200)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Tags (comma separated)"))
+        self.tags_edit = QLineEdit(
+            ", ".join(entry.get("tags", [])))
+        self.tags_edit.setPlaceholderText("hero, red, walk")
+        layout.addWidget(self.tags_edit)
+        layout.addWidget(QLabel("Collection (optional)"))
+        self.collection_edit = QLineEdit(
+            entry.get("collection") or "")
+        self.collection_edit.setPlaceholderText("No collection")
+        layout.addWidget(self.collection_edit)
+        layout.addStretch(1)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.ok_btn = QPushButton("Save")
+        self.ok_btn.setObjectName("export")
+        self.ok_btn.clicked.connect(self.accept)
+        button_row.addWidget(self.ok_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_row.addWidget(cancel_btn)
+        layout.addLayout(button_row)
+
+    def tags_list(self):
+        return [tag.strip() for tag in
+                self.tags_edit.text().split(",") if tag.strip()]
+
+    def collection_text(self):
+        return self.collection_edit.text().strip()
+
+
+class SheetFrameDialog(QDialog):
+    """Pick a frame from a library sheet to load into the Image
+    tab (task 24). Nothing is picked by default — "Load frame"
+    stays disabled until the user picks a row (a click, or the
+    arrow keys). "Load sheet" loads the packed sheet, the old
+    behavior; frame_index() returns None for that choice.
+    Double-clicking a row (or Enter on one) loads it at once."""
+
+    def __init__(self, parent, name, metadata):
+        super().__init__(parent)
+        self.setWindowTitle("Load from %s" % name)
+        self.resize(360, 320)
+        self._choice = None
+        # Qt moves the list's current row to 0 when the dialog
+        # is first shown — that is not a pick, and must not
+        # enable "Load frame". The first currentRowChanged while
+        # visible is the auto-set; later ones are the user's.
+        self._row_change_seen = False
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "Pick a frame to load, or load the packed sheet."))
+        self.frame_list = QListWidget()
+        self.frame_list.setToolTip(
+            "Frames in the sheet, in playback order")
+        for frame in metadata["frames"]:
+            self.frame_list.addItem(frame["name"])
+        self.frame_list.currentRowChanged.connect(
+            self._on_row_changed)
+        self.frame_list.itemClicked.connect(
+            self._on_frame_clicked)
+        self.frame_list.itemActivated.connect(
+            self._on_frame_activated)
+        layout.addWidget(self.frame_list, 1)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.load_frame_btn = QPushButton("Load frame")
+        self.load_frame_btn.setObjectName("export")
+        self.load_frame_btn.setEnabled(False)
+        self.load_frame_btn.setToolTip(
+            "Load the picked frame into the Image tab")
+        self.load_frame_btn.clicked.connect(self._on_load_frame)
+        button_row.addWidget(self.load_frame_btn)
+        self.load_sheet_btn = QPushButton("Load sheet")
+        self.load_sheet_btn.setToolTip(
+            "Load the packed sheet, as before")
+        self.load_sheet_btn.clicked.connect(self._on_load_sheet)
+        button_row.addWidget(self.load_sheet_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_row.addWidget(cancel_btn)
+        layout.addLayout(button_row)
+
+    def _on_row_changed(self, row):
+        if row < 0:
+            return
+        if self.isVisible() and not self._row_change_seen:
+            # The auto-set to row 0 on first show — not a pick.
+            self._row_change_seen = True
+            return
+        self._row_change_seen = True
+        self.load_frame_btn.setEnabled(True)
+
+    def _on_frame_clicked(self, _item):
+        # A click on the already-current row fires no
+        # currentRowChanged — but it is still a pick.
+        self.load_frame_btn.setEnabled(True)
+
+    def _on_frame_activated(self, item):
+        self._choice = self.frame_list.row(item)
+        self.accept()
+
+    def _on_load_frame(self):
+        self._choice = self.frame_list.currentRow()
+        self.accept()
+
+    def _on_load_sheet(self):
+        self._choice = None
+        self.accept()
+
+    def frame_index(self):
+        """The picked frame's index, or None for the packed
+        sheet."""
+        return self._choice
+
+
 class MainWindow(QMainWindow):
     def __init__(self, library_dir=None):
         super().__init__()
@@ -591,6 +717,19 @@ class MainWindow(QMainWindow):
         # once per window; the Library tab's count label carries
         # it permanently (see _refresh_library).
         self._library_skip_warned = False
+        # Library thumbnails, built once per entry and reused
+        # across refreshes (task 24): keyed by entry id + the
+        # file's size and mtime, so a changed file rebuilds but
+        # typing in the search box does not. _thumb_builds counts
+        # cache misses — the suite pins the "N refreshes, 1 build
+        # per entry" rule against it.
+        self._thumb_cache = {}
+        self._thumb_builds = 0
+        # Duplicate groups, cached against a fingerprint of the
+        # library (entry ids + file sizes/mtimes) so the info
+        # label does not re-hash every file on each refresh.
+        self._duplicate_groups_cache = None
+        self._duplicate_fingerprint = None
         self.source_image = None
         self.source_path = None
         self.result_image = None
@@ -4423,6 +4562,58 @@ class MainWindow(QMainWindow):
         tag_row.addWidget(self.library_tag_combo, 1)
         left_layout.addLayout(tag_row)
 
+        # Kind + source filters (task 24) — they compose with
+        # the search box and the tag filter.
+        kind_row = QHBoxLayout()
+        kind_row.addWidget(QLabel("Kind"))
+        self.library_kind_combo = QComboBox()
+        self.library_kind_combo.setToolTip(
+            "Show only sprites, only sheets, or everything")
+        self.library_kind_combo.addItem("All kinds", None)
+        self.library_kind_combo.addItem("Sprites", "sprite")
+        self.library_kind_combo.addItem("Sheets", "sheet")
+        self.library_kind_combo.currentIndexChanged.connect(
+            self._refresh_library)
+        kind_row.addWidget(self.library_kind_combo, 1)
+        kind_row.addWidget(QLabel("From"))
+        self.library_source_combo = QComboBox()
+        self.library_source_combo.setToolTip(
+            "Show only sprites saved from one tab")
+        self.library_source_combo.addItem("All sources", None)
+        for key, label in SOURCE_LABELS.items():
+            self.library_source_combo.addItem(label, key)
+        self.library_source_combo.currentIndexChanged.connect(
+            self._refresh_library)
+        kind_row.addWidget(self.library_source_combo, 1)
+        left_layout.addLayout(kind_row)
+
+        # Collection filter + sort (task 24). The collection
+        # list rebuilds with the tag list (see _refresh_library).
+        sort_row = QHBoxLayout()
+        sort_row.addWidget(QLabel("Collection"))
+        self.library_collection_combo = QComboBox()
+        self.library_collection_combo.setToolTip(
+            "Show only sprites in this collection")
+        self.library_collection_combo.addItem("All collections",
+                                              None)
+        self.library_collection_combo.addItem("No collection", "")
+        self.library_collection_combo.currentIndexChanged.connect(
+            self._refresh_library)
+        sort_row.addWidget(self.library_collection_combo, 1)
+        sort_row.addWidget(QLabel("Sort"))
+        self.library_sort_combo = QComboBox()
+        self.library_sort_combo.setToolTip(
+            "Order the grid: saved order, name, date, or size")
+        self.library_sort_combo.addItem("Saved order", "saved")
+        self.library_sort_combo.addItem("Name", "name")
+        self.library_sort_combo.addItem("Newest", "newest")
+        self.library_sort_combo.addItem("Oldest", "oldest")
+        self.library_sort_combo.addItem("Largest", "largest")
+        self.library_sort_combo.currentIndexChanged.connect(
+            self._refresh_library)
+        sort_row.addWidget(self.library_sort_combo, 1)
+        left_layout.addLayout(sort_row)
+
         self.library_list = QListWidget()
         self.library_list.setToolTip(
             "Sprites in the library — click one to preview it")
@@ -4502,6 +4693,42 @@ class MainWindow(QMainWindow):
             self._on_library_export)
         right_layout.addWidget(self.library_export_btn)
 
+        self.library_edit_tags_btn = QPushButton("Edit tags")
+        self.library_edit_tags_btn.setToolTip(
+            "Change the selected sprite's tags and collection")
+        self.library_edit_tags_btn.setEnabled(False)
+        self.library_edit_tags_btn.clicked.connect(
+            self._on_library_edit_tags)
+        right_layout.addWidget(self.library_edit_tags_btn)
+
+        self.library_repair_btn = QPushButton("Repair missing")
+        self.library_repair_btn.setToolTip(
+            "Remove index entries whose files are gone")
+        self.library_repair_btn.clicked.connect(
+            self._on_library_repair)
+        right_layout.addWidget(self.library_repair_btn)
+
+        self.library_duplicates_btn = QPushButton("Find duplicates")
+        self.library_duplicates_btn.setToolTip(
+            "Find sprites with identical files and remove extras")
+        self.library_duplicates_btn.clicked.connect(
+            self._on_library_find_duplicates)
+        right_layout.addWidget(self.library_duplicates_btn)
+
+        self.library_export_all_btn = QPushButton("Export library")
+        self.library_export_all_btn.setToolTip(
+            "Copy the whole library to a folder as a backup")
+        self.library_export_all_btn.clicked.connect(
+            self._on_library_export_all)
+        right_layout.addWidget(self.library_export_all_btn)
+
+        self.library_import_btn = QPushButton("Import library")
+        self.library_import_btn.setToolTip(
+            "Add sprites from a library backup folder")
+        self.library_import_btn.clicked.connect(
+            self._on_library_import)
+        right_layout.addWidget(self.library_import_btn)
+
         main_layout.addWidget(
             self._scrollable_column(right))
         return root
@@ -4531,20 +4758,26 @@ class MainWindow(QMainWindow):
 
     def _refresh_library(self):
         """Rebuild the Library tab grid from the index, honoring
-        the search box and tag filter. The tag list rebuilds too,
-        keeping the selection when the tag still exists, and the
-        selected entry stays selected when it is still visible.
-        Returns True while malformed entries exist — the warning
-        shows once per window (at construction, usually), and the
-        caller (a tab switch) must not overwrite it with a tab
-        hint while it still applies."""
+        the search box and the tag, kind, source, and collection
+        filters, in the chosen sort order. The tag and collection
+        lists rebuild too, keeping the selection when it still
+        exists, and the selected entry stays selected when it is
+        still visible. Returns True while malformed entries exist
+        — the warning shows once per window (at construction,
+        usually), and the caller (a tab switch) must not
+        overwrite it with a tab hint while it still applies."""
         if not hasattr(self, "library_list"):
             return False  # tab still being built
         try:
             entries = self.library.search(
                 text=self.library_search_edit.text().strip() or None,
-                tag=self.library_tag_combo.currentData())
+                tag=self.library_tag_combo.currentData(),
+                kind=self.library_kind_combo.currentData(),
+                source=self.library_source_combo.currentData(),
+                collection=self.library_collection_combo
+                .currentData())
             tags = self.library.all_tags()
+            collections = self.library.all_collections()
         except PixelForgeError as exc:
             self.library_list.clear()
             self.library_count_label.setText(str(exc))
@@ -4554,6 +4787,17 @@ class MainWindow(QMainWindow):
             self.library_stack.setCurrentWidget(self.library_list)
             self._clear_library_selection()
             return False
+        sort = self.library_sort_combo.currentData()
+        if sort == "name":
+            entries.sort(key=lambda e: e["name"].lower())
+        elif sort == "newest":
+            entries.sort(key=lambda e: e["created"], reverse=True)
+        elif sort == "oldest":
+            entries.sort(key=lambda e: e["created"])
+        elif sort == "largest":
+            entries.sort(key=lambda e: e["width"] * e["height"],
+                         reverse=True)
+        # "saved" keeps the index order — no sort at all.
         selected = self._selected_library_id()
         skipped = self.library.skipped_entries()
         if skipped and not self._library_skip_warned:
@@ -4566,32 +4810,31 @@ class MainWindow(QMainWindow):
                 "not deleted"
                 % ("1 malformed entry" if len(skipped) == 1 else
                    "%d malformed entries" % len(skipped)))
-        combo = self.library_tag_combo
-        current_tag = combo.currentData()
-        combo.blockSignals(True)
-        try:
-            combo.clear()
-            combo.addItem("All tags", None)
-            for tag in tags:
-                combo.addItem(tag, tag)
-            if current_tag is not None:
-                index = combo.findData(current_tag)
-                if index >= 0:
-                    combo.setCurrentIndex(index)
-        finally:
-            combo.blockSignals(False)
+        self._rebuild_filter_combo(
+            self.library_tag_combo, tags, "All tags")
+        self._rebuild_filter_combo(
+            self.library_collection_combo, collections,
+            "All collections", extra=("No collection", ""))
+        # Thumbnails for entries that no longer exist drop out
+        # of the cache; filtered-out entries keep theirs.
+        live_ids = {entry["id"] for entry in
+                    self.library.entries()}
+        for key in list(self._thumb_cache):
+            if key[0] not in live_ids:
+                del self._thumb_cache[key]
+        missing_ids = {entry["id"] for entry in
+                       self.library.orphans()}
         self.library_list.blockSignals(True)
         try:
             self.library_list.clear()
             for entry in entries:
-                try:
-                    image = load_image(self.library.path_for(entry))
-                except PixelForgeError:
-                    thumb = QPixmap(64, 64)
-                    thumb.fill(Qt.GlobalColor.darkGray)
-                else:
-                    thumb = thumb_pixmap(image, 64)
-                item = QListWidgetItem(thumb, entry["name"])
+                thumb = self._library_thumb(entry)
+                label = entry["name"]
+                if entry["kind"] == "sheet":
+                    label += " — Sheet"
+                if entry["id"] in missing_ids:
+                    label += " — Missing"
+                item = QListWidgetItem(thumb, label)
                 item.setData(Qt.ItemDataRole.UserRole, entry["id"])
                 item.setToolTip(", ".join(entry.get("tags", []))
                                 or entry["name"])
@@ -4639,6 +4882,75 @@ class MainWindow(QMainWindow):
         self._clear_library_selection()
         return bool(skipped)
 
+    def _rebuild_filter_combo(self, combo, values, all_label,
+                              extra=None):
+        """Rebuild a Library filter combo (tags, collections)
+        from the current values, keeping the selection when it
+        still exists. `extra` is one extra (label, data) pair
+        added after the "All" item, e.g. "No collection"."""
+        current = combo.currentData()
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem(all_label, None)
+            if extra is not None:
+                combo.addItem(extra[0], extra[1])
+            for value in values:
+                combo.addItem(value, value)
+            if current is not None:
+                index = combo.findData(current)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+        finally:
+            combo.blockSignals(False)
+
+    def _library_thumb(self, entry):
+        """The grid thumbnail for an entry, from the cache when
+        the file is unchanged (task 24). The key is the entry id
+        + the file's size and mtime; a missing file keys on
+        (id, None, None) and caches the gray square too, so an
+        orphan does not re-attempt a load on every refresh."""
+        path = self.library.path_for(entry)
+        try:
+            stat = path.stat()
+            key = (entry["id"], stat.st_size, stat.st_mtime_ns)
+        except OSError:
+            key = (entry["id"], None, None)
+        thumb = self._thumb_cache.get(key)
+        if thumb is not None:
+            return thumb
+        self._thumb_builds += 1
+        try:
+            image = load_image(path)
+        except PixelForgeError:
+            thumb = QPixmap(64, 64)
+            thumb.fill(Qt.GlobalColor.darkGray)
+        else:
+            thumb = thumb_pixmap(image, 64)
+        self._thumb_cache[key] = thumb
+        return thumb
+
+    def _duplicate_groups(self):
+        """Duplicate groups for the library, cached against a
+        fingerprint of entry ids + file sizes/mtimes (task 24).
+        Hashing every file is the expensive part; the fingerprint
+        is stat-only, so a refresh that changed nothing reuses
+        the last result."""
+        fingerprint = []
+        for entry in self.library.entries():
+            path = self.library.path_for(entry)
+            try:
+                stat = path.stat()
+                fingerprint.append((entry["id"], stat.st_size,
+                                    stat.st_mtime_ns))
+            except OSError:
+                fingerprint.append((entry["id"], None, None))
+        fingerprint = tuple(fingerprint)
+        if fingerprint != self._duplicate_fingerprint:
+            self._duplicate_fingerprint = fingerprint
+            self._duplicate_groups_cache = self.library.duplicates()
+        return self._duplicate_groups_cache
+
     def _selected_library_id(self):
         item = self.library_list.currentItem()
         if item is None:
@@ -4663,6 +4975,7 @@ class MainWindow(QMainWindow):
         self.library_rename_btn.setEnabled(False)
         self.library_delete_btn.setEnabled(False)
         self.library_export_btn.setEnabled(False)
+        self.library_edit_tags_btn.setEnabled(False)
 
     def _show_library_entry(self, entry_id):
         entry = self.library.find(entry_id)
@@ -4695,6 +5008,15 @@ class MainWindow(QMainWindow):
                 entry["palette"], entry["palette"]))
         if entry.get("tags"):
             lines.append("Tags: %s" % ", ".join(entry["tags"]))
+        if entry.get("collection"):
+            lines.append("Collection: %s" % entry["collection"])
+        for group in self._duplicate_groups():
+            ids = [other["id"] for other in group]
+            if entry["id"] in ids:
+                others = [other["name"] for other in group
+                          if other["id"] != entry["id"]]
+                lines.append("Duplicate of: %s" % ", ".join(others))
+                break
         lines.append("From: %s" % SOURCE_LABELS.get(
             entry["source"], entry["source"]))
         lines.append("Saved: %s" % entry["created"][:10])
@@ -4703,6 +5025,7 @@ class MainWindow(QMainWindow):
         self.library_rename_btn.setEnabled(True)
         self.library_delete_btn.setEnabled(True)
         self.library_export_btn.setEnabled(True)
+        self.library_edit_tags_btn.setEnabled(True)
 
     def _on_library_item_clicked(self, item):
         entry_id = item.data(Qt.ItemDataRole.UserRole)
@@ -4714,10 +5037,59 @@ class MainWindow(QMainWindow):
         if entry is None:
             return
         path = self.library.path_for(entry)
+        if entry["kind"] == "sheet":
+            self._load_sheet_entry(entry, path)
+            return
         self.tabs.setCurrentIndex(0)
         if self.load_image(str(path)):
             self.statusBar().showMessage(
                 "Loaded %s from the library" % entry["name"])
+
+    def _load_sheet_entry(self, entry, path):
+        """Load a library sheet into the Image tab: ask which
+        frame to load, or load the packed sheet (task 24). A
+        sheet with no metadata, or unreadable metadata, loads
+        the packed sheet — there are no frames to pick from."""
+        meta = entry.get("meta")
+        metadata = None
+        if meta:
+            try:
+                metadata = load_metadata(
+                    self.library.directory / meta)
+            except PixelForgeError as exc:
+                warn_dialog(self, "Could not read the sheet",
+                            str(exc))
+                return
+        if metadata is None:
+            self.tabs.setCurrentIndex(0)
+            if self.load_image(str(path)):
+                self.statusBar().showMessage(
+                    "Loaded %s from the library" % entry["name"])
+            return
+        dialog = SheetFrameDialog(self, entry["name"], metadata)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        index = dialog.frame_index()
+        self.tabs.setCurrentIndex(0)
+        if index is None:
+            if self.load_image(str(path)):
+                self.statusBar().showMessage(
+                    "Loaded %s from the library" % entry["name"])
+            return
+        try:
+            sheet = load_image(path)
+            frame = extract_frame(sheet, metadata, index)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not load the frame",
+                        str(exc))
+            return
+        self.source_image = frame
+        self.source_path = str(path)
+        self.update_preview()
+        self._on_fit_image_zoom()
+        self.statusBar().showMessage(
+            "Loaded %s from %s"
+            % (metadata["frames"][index]["name"], entry["name"]))
 
     def _on_library_rename(self):
         entry = self._selected_library_entry()
@@ -4785,6 +5157,125 @@ class MainWindow(QMainWindow):
             return
         self._remember_export_dir(dest.parent)
         self.statusBar().showMessage("Exported %s" % dest.name)
+
+    def _on_library_edit_tags(self):
+        entry = self._selected_library_entry()
+        if entry is None:
+            return
+        dialog = EditTagsDialog(self, entry)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            self.library.update(
+                entry["id"], tags=dialog.tags_list(),
+                collection=dialog.collection_text())
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not edit tags", str(exc))
+            return
+        self._refresh_library()
+        self.statusBar().showMessage(
+            "Updated %s" % entry["name"])
+
+    def _on_library_repair(self):
+        """Remove index entries whose files are gone (task 24).
+        Nothing on disk is deleted — the files are already gone,
+        and remove_index_only leaves any leftover files alone."""
+        orphans = self.library.orphans()
+        if not orphans:
+            self.statusBar().showMessage(
+                "No missing files in the library")
+            return
+        names = "\n".join("- %s" % entry["name"]
+                          for entry in orphans)
+        answer = QMessageBox.question(
+            self, "Repair the library",
+            "Remove %s from the library? The files are already "
+            "gone — only the index entries are removed.\n\n%s"
+            % (plural(len(orphans), "stale entry"), names),
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        for entry in orphans:
+            self.library.remove_index_only(entry["id"])
+        self._refresh_library()
+        self.statusBar().showMessage(
+            "Removed %s from the library"
+            % plural(len(orphans), "stale entry"))
+
+    def _on_library_find_duplicates(self):
+        """List duplicate groups (identical files) and offer to
+        remove the extras, keeping the first of each group."""
+        groups = self.library.duplicates()
+        if not groups:
+            self.statusBar().showMessage(
+                "No duplicates in the library")
+            return
+        extras = sum(len(group) - 1 for group in groups)
+        lines = []
+        for group in groups:
+            lines.append("- %s (also saved as %s)"
+                         % (group[0]["name"], ", ".join(
+                             entry["name"]
+                             for entry in group[1:])))
+        answer = QMessageBox.question(
+            self, "Remove duplicates",
+            "Remove %s, keeping the first of each group?\n\n%s"
+            % (plural(extras, "duplicate"),
+               "\n".join(lines)),
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        for group in groups:
+            for entry in group[1:]:
+                self.library.remove(entry["id"])
+        self._refresh_library()
+        self.statusBar().showMessage(
+            "Removed %s from the library" % plural(extras,
+                                                   "duplicate"))
+
+    def _on_library_export_all(self):
+        dest = QFileDialog.getExistingDirectory(
+            self, "Export the library", "")
+        if not dest:
+            return
+        try:
+            count = self.library.export_to(dest)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not export the library",
+                        str(exc))
+            return
+        self.statusBar().showMessage(
+            "Exported %s to %s" % (plural(count, "sprite"), dest))
+
+    def _on_library_import(self):
+        src = QFileDialog.getExistingDirectory(
+            self, "Import a library", "")
+        if not src:
+            return
+        try:
+            report = self.library.import_from(src)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not import the library",
+                        str(exc))
+            return
+        self._refresh_library()
+        parts = ["added %s" % plural(len(report["added"]),
+                                     "sprite")]
+        if report["skipped"]:
+            parts.append("skipped %s already here"
+                         % plural(len(report["skipped"]),
+                                  "sprite"))
+        if report["missing"]:
+            parts.append("%s had no file"
+                         % plural(len(report["missing"]),
+                                  "sprite"))
+        self.statusBar().showMessage(
+            "Imported from %s — %s"
+            % (Path(src).name, ", ".join(parts)))
 
     # ------------------------------------------------ save to library
 

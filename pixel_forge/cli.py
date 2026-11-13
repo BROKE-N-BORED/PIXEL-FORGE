@@ -6,6 +6,8 @@
     pixel-forge sheet DIR --out sheet.png --meta sheet.json
     pixel-forge library list [--tag TAG]
     pixel-forge library add FILE --name NAME [--tags a,b]
+    pixel-forge library export DIR
+    pixel-forge library import DIR
     pixel-forge presets list
     pixel-forge code FILE --list
     pixel-forge code FILE --asset NAME --out OUT.png
@@ -199,6 +201,15 @@ def build_parser():
                          help="name for the sprite in the library")
     lib_add.add_argument("--tags", default="",
                          help="comma-separated tags")
+    lib_export = lib_sub.add_parser(
+        "export", help="copy the whole library (sprites + "
+        "index) to a folder as a backup")
+    lib_export.add_argument("dir", help="folder to write the "
+                            "backup into")
+    lib_import = lib_sub.add_parser(
+        "import", help="add sprites from a library backup "
+        "folder (entries already in the library are skipped)")
+    lib_import.add_argument("dir", help="backup folder to read")
 
     presets = sub.add_parser(
         "presets", help="manage pixelize presets (built-in and "
@@ -416,6 +427,30 @@ def cmd_library_add(args):
     return 0
 
 
+def cmd_library_export(args):
+    lib = Library()
+    count = lib.export_to(args.dir)
+    print("Exported %s to %s" % (plural(count, "sprite"),
+                                 args.dir))
+    _warn_skipped(lib)
+    return 0
+
+
+def cmd_library_import(args):
+    lib = Library()
+    report = lib.import_from(args.dir)
+    parts = ["added %s" % plural(len(report["added"]), "sprite")]
+    if report["skipped"]:
+        parts.append("skipped %s already here"
+                     % plural(len(report["skipped"]), "sprite"))
+    if report["missing"]:
+        parts.append("%s had no file"
+                     % plural(len(report["missing"]), "sprite"))
+    print("Imported from %s — %s" % (args.dir, ", ".join(parts)))
+    _warn_skipped(lib)
+    return 0
+
+
 def cmd_presets_list(_args):
     store = PresetStore()
     for name, settings, builtin in store.all_presets():
@@ -572,6 +607,10 @@ def main(argv=None):
                 return cmd_library_list(args)
             if args.library_command == "add":
                 return cmd_library_add(args)
+            if args.library_command == "export":
+                return cmd_library_export(args)
+            if args.library_command == "import":
+                return cmd_library_import(args)
         if args.command == "presets":
             if args.presets_command == "list":
                 return cmd_presets_list(args)

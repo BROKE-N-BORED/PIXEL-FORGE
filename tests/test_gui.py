@@ -3809,5 +3809,489 @@ class PolishTests(unittest.TestCase):
             self.app.processEvents()
 
 
+class LibraryDepthGuiTests(unittest.TestCase):
+    """Library depth (task 24): filters, sort, tag editing,
+    thumbnail cache, badges, repair, duplicates, backup, and
+    the sheet frame picker."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self.win = MainWindow(library_dir=self.lib_dir)
+        self.win.tabs.setCurrentIndex(4)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _add(self, name, tags=(), r=255, g=0, b=0, w=32, h=32,
+             source="image"):
+        return self.win.library.add_image(
+            make_solid_image(w, h, r, g, b), name, tags=tags,
+            source=source)
+
+    def _add_sheet(self, name="Walk cycle"):
+        from pixel_forge.spritesheet import write_sheet
+        frames = [make_solid_image(16, 16, 255, 0, 0),
+                  make_solid_image(16, 16, 0, 255, 0)]
+        png = os.path.join(self.tmp, "sheet.png")
+        meta = os.path.join(self.tmp, "sheet.json")
+        write_sheet(frames, ["frame_001.png", "frame_002.png"],
+                    png, meta, cols=2, padding=0, fps=8)
+        return self.win.library.add_sheet(png, meta, name,
+                                          frames=2)
+
+    def _select(self, row=0):
+        item = self.win.library_list.item(row)
+        self.win.library_list.setCurrentItem(item)
+        self.win._on_library_item_clicked(item)
+        return item
+
+    def _item_texts(self):
+        return [self.win.library_list.item(row).text()
+                for row in range(self.win.library_list.count())]
+
+    def _set_combo(self, combo, data):
+        combo.setCurrentIndex(combo.findData(data))
+        self.app.processEvents()
+
+    def test_filter_combos_exist_with_sensible_defaults(self):
+        self.assertEqual(
+            self.win.library_kind_combo.itemText(0), "All kinds")
+        self.assertEqual(
+            self.win.library_source_combo.itemText(0),
+            "All sources")
+        self.assertEqual(
+            self.win.library_collection_combo.itemText(0),
+            "All collections")
+        self.assertEqual(
+            self.win.library_sort_combo.itemText(0), "Saved order")
+        self.assertEqual(
+            self.win.library_kind_combo.currentData(), None)
+        self.assertEqual(
+            self.win.library_sort_combo.currentData(), "saved")
+
+    def test_kind_source_and_collection_filters_compose(self):
+        self._add("Knight", tags=["hero"], source="image")
+        self._add("Slime", source="code")
+        sheet = self._add_sheet()
+        self.win.library.update(sheet["id"], collection="walks")
+        self.win._refresh_library()
+        self.assertEqual(len(self._item_texts()), 3)
+        self._set_combo(self.win.library_kind_combo, "sheet")
+        self.assertEqual(self._item_texts(),
+                         ["Walk cycle — Sheet"])
+        self._set_combo(self.win.library_kind_combo, None)
+        self._set_combo(self.win.library_source_combo, "code")
+        self.assertEqual(self._item_texts(), ["Slime"])
+        self._set_combo(self.win.library_source_combo, None)
+        self._set_combo(self.win.library_collection_combo,
+                        "walks")
+        self.assertEqual(self._item_texts(),
+                         ["Walk cycle — Sheet"])
+        self._set_combo(self.win.library_collection_combo, "")
+        self.assertEqual(sorted(self._item_texts()),
+                         ["Knight", "Slime"])
+        self._set_combo(self.win.library_collection_combo, None)
+        self.assertEqual(len(self._item_texts()), 3)
+
+    def test_sort_orders(self):
+        self._add("Zebra", w=16, h=16)
+        self._add("Apple", w=64, h=64)
+        self._add("Mango", w=32, h=32)
+        self.win._refresh_library()
+        self.assertEqual(self._item_texts(),
+                         ["Zebra", "Apple", "Mango"])
+        self._set_combo(self.win.library_sort_combo, "name")
+        self.assertEqual(self._item_texts(),
+                         ["Apple", "Mango", "Zebra"])
+        self._set_combo(self.win.library_sort_combo, "largest")
+        self.assertEqual(self._item_texts(),
+                         ["Apple", "Mango", "Zebra"])
+        # Newest/oldest need distinct created stamps — the three
+        # adds above happened inside one second, so their stamps
+        # tie. Rewrite the stamps in the index and re-read.
+        path = os.path.join(self.lib_dir, "library.json")
+        with open(path) as f:
+            data = json.load(f)
+        stamps = {"Zebra": "2026-11-12T00:00:00+00:00",
+                  "Apple": "2026-11-12T01:00:00+00:00",
+                  "Mango": "2026-11-12T02:00:00+00:00"}
+        for entry in data["entries"]:
+            entry["created"] = stamps[entry["name"]]
+        with open(path, "w") as f:
+            json.dump(data, f)
+        from pixel_forge.library import Library
+        self.win.library = Library(self.lib_dir)
+        self.win._refresh_library()
+        self._set_combo(self.win.library_sort_combo, "newest")
+        self.assertEqual(self._item_texts(),
+                         ["Mango", "Apple", "Zebra"])
+        self._set_combo(self.win.library_sort_combo, "oldest")
+        self.assertEqual(self._item_texts(),
+                         ["Zebra", "Apple", "Mango"])
+
+    def test_sheet_and_missing_badges(self):
+        self._add("Knight")
+        self._add_sheet()
+        os.unlink(os.path.join(self.lib_dir, "knight.png"))
+        self.win._refresh_library()
+        self.assertEqual(sorted(self._item_texts()),
+                         ["Knight — Missing",
+                          "Walk cycle — Sheet"])
+
+    def test_thumbnail_cache_builds_once_per_entry(self):
+        self._add("Knight")
+        self._add("Slime", r=0, g=0, b=255)
+        self._add_sheet()
+        self.win._thumb_builds = 0
+        for _ in range(5):
+            self.win._refresh_library()
+        self.assertEqual(self.win._thumb_builds, 3)
+        # Typing in the search box is a refresh too — still no
+        # rebuild (this was the original defect: every keystroke
+        # rebuilt every thumbnail).
+        self.win.library_search_edit.setText("k")
+        self.app.processEvents()
+        self.win.library_search_edit.setText("kn")
+        self.app.processEvents()
+        self.assertEqual(self.win._thumb_builds, 3)
+        # A changed file rebuilds just that one thumbnail.
+        write_image(make_solid_image(48, 48, 255, 0, 0),
+                    os.path.join(self.lib_dir, "knight.png"))
+        self.win.library_search_edit.setText("")
+        self.app.processEvents()
+        self.win._refresh_library()
+        self.assertEqual(self.win._thumb_builds, 4)
+
+    def test_edit_tags_dialog_round_trip(self):
+        from pixel_forge.gui import EditTagsDialog
+        entry = self._add("Knight", tags=["hero"])
+        dialog = EditTagsDialog(self.win, entry)
+        try:
+            self.assertEqual(dialog.tags_edit.text(), "hero")
+            self.assertEqual(dialog.collection_edit.text(), "")
+            dialog.tags_edit.setText("hero, red")
+            dialog.collection_edit.setText("heroes")
+            dialog.accept()
+            self.assertEqual(dialog.tags_list(),
+                             ["hero", "red"])
+            self.assertEqual(dialog.collection_text(), "heroes")
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self.app.processEvents()
+
+    def test_edit_tags_button_updates_entry_and_filters(self):
+        from unittest import mock
+        import pixel_forge.gui as gui_mod
+        entry = self._add("Knight", tags=["hero"])
+        self.win._refresh_library()
+        self._select(0)
+
+        class _StubDialog:
+            def __init__(self, parent, entry):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+                return QDialog.DialogCode.Accepted
+
+            def tags_list(self):
+                return ["hero", "red"]
+
+            def collection_text(self):
+                return "heroes"
+
+        with mock.patch.object(gui_mod, "EditTagsDialog",
+                               _StubDialog):
+            self.win._on_library_edit_tags()
+        updated = self.win.library.find(entry["id"])
+        self.assertEqual(updated["tags"], ["hero", "red"])
+        self.assertEqual(updated["collection"], "heroes")
+        self.assertIn("heroes", [self.win.library_collection_combo
+                                 .itemText(i) for i in range(
+                                     self.win.library_collection_combo
+                                     .count())])
+        self.assertIn("red", [self.win.library_tag_combo.itemText(i)
+                              for i in range(
+                                  self.win.library_tag_combo
+                                  .count())])
+        # The selection survives the refresh, so Edit tags stays
+        # enabled; with nothing selected it is disabled.
+        self.assertTrue(self.win.library_edit_tags_btn.isEnabled())
+        self.win._clear_library_selection()
+        self.assertFalse(self.win.library_edit_tags_btn
+                         .isEnabled())
+
+    def test_orphan_repair_asks_first(self):
+        from unittest import mock
+        self._add("Knight")
+        self._add("Slime", r=0, g=0, b=255)
+        os.unlink(os.path.join(self.lib_dir, "knight.png"))
+        self.win._refresh_library()
+        with mock.patch.object(
+                QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.No):
+            self.win._on_library_repair()
+        self.assertEqual(len(self.win.library.entries()), 2)
+        with mock.patch.object(
+                QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.Yes):
+            self.win._on_library_repair()
+        self.assertEqual(
+            [e["name"] for e in self.win.library.entries()],
+            ["Slime"])
+        self.assertEqual(self.win.library_list.count(), 1)
+        # With no orphans left, Repair says so and asks nothing.
+        with mock.patch.object(
+                QMessageBox, "question",
+                side_effect=AssertionError("must not ask")):
+            self.win._on_library_repair()
+        self.assertIn("No missing files",
+                      self.win.statusBar().currentMessage())
+
+    def test_duplicate_marker_and_removal(self):
+        from unittest import mock
+        self._add("Knight")
+        self._add("Knight copy")
+        self._add("Slime", r=0, g=0, b=255)
+        self.win._refresh_library()
+        self._select(0)
+        self.assertIn("Duplicate of: Knight copy",
+                      self.win.library_info_label.text())
+        self._select(2)
+        self.assertNotIn("Duplicate",
+                         self.win.library_info_label.text())
+        with mock.patch.object(
+                QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.No):
+            self.win._on_library_find_duplicates()
+        self.assertEqual(len(self.win.library.entries()), 3)
+        with mock.patch.object(
+                QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.Yes):
+            self.win._on_library_find_duplicates()
+        self.assertEqual(
+            [e["name"] for e in self.win.library.entries()],
+            ["Knight", "Slime"])
+        self.assertFalse(os.path.exists(os.path.join(
+            self.lib_dir, "knight-copy.png")))
+        with mock.patch.object(
+                QMessageBox, "question",
+                side_effect=AssertionError("must not ask")):
+            self.win._on_library_find_duplicates()
+        self.assertIn("No duplicates",
+                      self.win.statusBar().currentMessage())
+
+    def test_export_and_import_library_round_trip(self):
+        from unittest import mock
+        from pixel_forge.gui import MainWindow
+        self._add("Knight", tags=["hero"])
+        self._add_sheet()
+        backup = os.path.join(tempfile.mkdtemp(), "backup")
+        with mock.patch.object(
+                QFileDialog, "getExistingDirectory",
+                return_value=backup):
+            self.win._on_library_export_all()
+        self.assertTrue(os.path.isfile(
+            os.path.join(backup, "knight.png")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(backup, "walk-cycle.json")))
+        lib2_dir = os.path.join(tempfile.mkdtemp(), "lib2")
+        win2 = MainWindow(library_dir=lib2_dir)
+        try:
+            win2.tabs.setCurrentIndex(4)
+            with mock.patch.object(
+                    QFileDialog, "getExistingDirectory",
+                    return_value=backup):
+                win2._on_library_import()
+            self.assertEqual(win2.library_list.count(), 2)
+            self.assertEqual(
+                [e["name"] for e in win2.library.entries()],
+                ["Knight", "Walk cycle"])
+            # Importing the same backup again skips, never
+            # duplicates.
+            with mock.patch.object(
+                    QFileDialog, "getExistingDirectory",
+                    return_value=backup):
+                win2._on_library_import()
+            self.assertEqual(len(win2.library.entries()), 2)
+            self.assertIn("skipped 2 sprites already here",
+                          win2.statusBar().currentMessage())
+        finally:
+            win2.close()
+            win2.deleteLater()
+            self.app.processEvents()
+
+    def test_import_bad_folder_warns_plainly(self):
+        from unittest import mock
+        import pixel_forge.gui as gui_mod
+        seen = []
+        with mock.patch.object(
+                QFileDialog, "getExistingDirectory",
+                return_value=os.path.join(tempfile.mkdtemp(),
+                                          "nope")), \
+            mock.patch.object(
+                gui_mod, "warn_dialog",
+                side_effect=lambda p, t, m: seen.append((t, m))):
+            self.win._on_library_import()
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][0], "Could not import the library")
+
+    def test_sheet_frame_dialog(self):
+        from pixel_forge.gui import SheetFrameDialog
+        from pixel_forge.spritesheet import load_metadata
+        self._add_sheet()
+        meta = load_metadata(os.path.join(
+            self.lib_dir, "walk-cycle.json"))
+        dialog = SheetFrameDialog(self.win, "Walk cycle", meta)
+        try:
+            self.assertFalse(dialog.load_frame_btn.isEnabled())
+            self.assertEqual(dialog.frame_list.count(), 2)
+            dialog.frame_list.setCurrentRow(1)
+            self.assertTrue(dialog.load_frame_btn.isEnabled())
+            dialog.load_frame_btn.click()
+            self.assertEqual(dialog.frame_index(), 1)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self.app.processEvents()
+        dialog = SheetFrameDialog(self.win, "Walk cycle", meta)
+        try:
+            dialog.load_sheet_btn.click()
+            self.assertIsNone(dialog.frame_index())
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self.app.processEvents()
+
+    def test_sheet_frame_dialog_picks_nothing_on_open(self):
+        """Qt moves the list's current row to 0 when the dialog
+        is shown — that auto-set must not enable "Load frame".
+        Only a real pick (a click, or the arrow keys) does."""
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QDialog
+        from pixel_forge.gui import SheetFrameDialog
+        from pixel_forge.spritesheet import load_metadata
+        self._add_sheet()
+        meta = load_metadata(os.path.join(
+            self.lib_dir, "walk-cycle.json"))
+        dialog = SheetFrameDialog(self.win, "Walk cycle", meta)
+        seen = []
+        state = {"clicked": False, "moved": False, "ticks": 0}
+
+        def watch():
+            state["ticks"] += 1
+            row = dialog.frame_list.currentRow()
+            enabled = dialog.load_frame_btn.isEnabled()
+            if not state["clicked"]:
+                # Wait for Qt's auto-set to row 0 (it lands
+                # after the first paint, not at once) — the
+                # button must stay disabled through it.
+                seen.append((row, enabled))
+                if state["ticks"] > 40:
+                    # The auto-set never came; fail loudly
+                    # rather than hang the suite.
+                    dialog.reject()
+                elif row == 0:
+                    item = dialog.frame_list.item(0)
+                    dialog.frame_list.itemClicked.emit(item)
+                    state["clicked"] = True
+            elif not state["moved"]:
+                # A click on the current row is a pick.
+                seen.append((row, enabled))
+                dialog.frame_list.setCurrentRow(1)
+                state["moved"] = True
+            else:
+                # Moving rows keeps the button enabled.
+                seen.append((row, enabled))
+                dialog.reject()
+
+        watcher = QTimer()
+        watcher.timeout.connect(watch)
+        watcher.start(50)
+        try:
+            self.assertEqual(dialog.exec(),
+                             QDialog.DialogCode.Rejected)
+        finally:
+            watcher.stop()
+            dialog.close()
+            dialog.deleteLater()
+            self.app.processEvents()
+        self.assertTrue(state["clicked"],
+                        "Qt never auto-set row 0: %r" % (seen,))
+        self.assertTrue(state["moved"])
+        clicked_at = next(i for i, s in enumerate(seen) if s[1])
+        # Everything before the click has the button disabled —
+        # including the auto-set row 0.
+        self.assertTrue(all(not s[1] for s in seen[:clicked_at]),
+                        "button enabled before any pick: %r"
+                        % (seen,))
+        self.assertIn((0, False), seen[:clicked_at])
+        # A click on the current row is a pick; moving rows
+        # keeps the button enabled.
+        self.assertEqual(seen[clicked_at], (0, True))
+        self.assertEqual(seen[-1], (1, True))
+
+    def test_load_sheet_entry_offers_frames(self):
+        from unittest import mock
+        import pixel_forge.gui as gui_mod
+        self._add_sheet()
+        self.win._refresh_library()
+        self._select(0)
+
+        class _StubDialog:
+            index = 1
+
+            def __init__(self, parent, name, metadata):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+                return QDialog.DialogCode.Accepted
+
+            def frame_index(self):
+                return _StubDialog.index
+
+        with mock.patch.object(gui_mod, "SheetFrameDialog",
+                               _StubDialog):
+            self.win._on_library_load()
+        self.assertEqual(self.win.tabs.currentIndex(), 0)
+        # Frame 1 is the green 16x16 frame, not the 32x16 sheet.
+        self.assertEqual((self.win.source_image.width(),
+                          self.win.source_image.height()),
+                         (16, 16))
+        self.assertEqual(bytes(self.win.source_image.data[:4]),
+                         b"\x00\xff\x00\xff")
+        # And the "Load sheet" choice loads the packed sheet.
+        _StubDialog.index = None
+        self.win.tabs.setCurrentIndex(4)
+        self._select(0)
+        with mock.patch.object(gui_mod, "SheetFrameDialog",
+                               _StubDialog):
+            self.win._on_library_load()
+        self.assertEqual((self.win.source_image.width(),
+                          self.win.source_image.height()),
+                         (32, 16))
+
+    def test_load_sprite_entry_unchanged(self):
+        self._add("Knight")
+        self.win._refresh_library()
+        self._select(0)
+        self.win._on_library_load()
+        self.assertEqual(self.win.tabs.currentIndex(), 0)
+        self.assertEqual((self.win.source_image.width(),
+                          self.win.source_image.height()),
+                         (32, 32))
+
+
 if __name__ == "__main__":
     unittest.main()

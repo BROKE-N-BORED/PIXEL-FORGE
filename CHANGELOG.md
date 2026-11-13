@@ -1,5 +1,55 @@
 # Pixel Forge changelog
 
+## 0.35 — 2026-11-13
+
+Library depth — task-list item #24, nine sub-items in one
+release:
+
+- The Library tab now filters by kind (sprites / sheets),
+  source (which tab saved it), and collection, and sorts by
+  saved order, name, newest, oldest, or largest. Every filter
+  composes with the search box and the tag filter.
+- Tags can be edited after saving: "Edit tags" on a selected
+  sprite opens a small dialog with the tags and the collection,
+  pre-filled. Saving refreshes the tag and collection filters.
+- Thumbnails are cached: each entry's thumbnail is built once
+  and reused across refreshes, keyed by the file's size and
+  mtime — typing in the search box no longer rebuilds every
+  thumbnail on every keystroke. A changed file rebuilds just
+  its own thumbnail.
+- Sheet entries show a "Sheet" badge in the grid, so a sheet
+  is distinguishable from a single sprite at a glance.
+- Orphan repair: entries whose PNG was deleted outside the app
+  show a "Missing" badge, and "Repair missing" lists them and
+  asks Yes/No (default No) before dropping the stale index
+  entries. Nothing on disk is deleted, and orphans are never
+  removed on their own.
+- Whole-library backup: "Export library" copies every sprite,
+  every sheet's metadata, and the index to a folder; "Import
+  library" adds a backup folder's sprites back, skipping
+  entries already in the library and reporting the counts.
+  The CLI has the same pair (`pixel-forge library export DIR`,
+  `pixel-forge library import DIR`). An imported file never
+  overwrites an existing one — a colliding name gets a fresh
+  name instead.
+- Collections: an optional collection name on each entry
+  ("walk cycles"), set from the tag-edit dialog and filterable
+  from the Library tab. The index format stays version 1 —
+  the field is optional, and libraries saved before it existed
+  load unchanged.
+- Duplicate detection: sprites whose files are byte-identical
+  show a "Duplicate of" line in the info panel, and "Find
+  duplicates" lists the groups and offers to remove the extras,
+  keeping the first of each group (Yes/No, default No).
+- Loading a sheet from the library now asks which frame to
+  load, listing the frames by name, with a "Load sheet" choice
+  for the packed sheet. Loading a single sprite behaves
+  exactly as before. The frame picker starts with nothing
+  picked — "Load frame" stays disabled until a row is picked
+  (Qt moves the current row to the first frame when the dialog
+  opens, and that auto-set is ignored, not treated as a pick).
+  Double-clicking a row loads it at once.
+
 ## 0.34 — 2026-11-13
 
 Presets — task-list item #23, three sub-items in one release:

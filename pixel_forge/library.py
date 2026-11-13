@@ -33,6 +33,7 @@ Nothing is created on disk until the first save — opening the
 window or listing an empty library never touches the home folder.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -136,6 +137,9 @@ def validate_entry(entry):
     if entry.get("meta") is not None and \
             not isinstance(entry["meta"], str):
         return "'meta' must be a file name"
+    if entry.get("collection") is not None and \
+            not isinstance(entry["collection"], str):
+        return "'collection' must be a name"
     return None
 
 
@@ -263,10 +267,13 @@ class Library:
                 return dict(entry)
         return None
 
-    def search(self, text=None, tag=None):
+    def search(self, text=None, tag=None, kind=None, source=None,
+               collection=None):
         """Entries matching a text search (name or tags, substring,
-        case-insensitive) and/or an exact tag. Both filters apply
-        together; no filters returns everything."""
+        case-insensitive) and/or an exact tag, kind ("sprite" /
+        "sheet"), source, or collection. Every filter applies
+        together; no filters returns everything. A collection of
+        "" matches entries with no collection set."""
         self._load()
         needle = text.strip().lower() if text else None
         want_tag = tag.strip().lower() if tag else None
@@ -274,6 +281,13 @@ class Library:
         for entry in self._entries:
             if want_tag is not None and want_tag not in \
                     [t.lower() for t in entry.get("tags", [])]:
+                continue
+            if kind is not None and entry["kind"] != kind:
+                continue
+            if source is not None and entry["source"] != source:
+                continue
+            if collection is not None and \
+                    (entry.get("collection") or "") != collection:
                 continue
             if needle is not None:
                 hay = [entry["name"].lower()] + \
@@ -291,9 +305,167 @@ class Library:
             tags.update(entry.get("tags", []))
         return sorted(tags, key=str.lower)
 
+    def all_collections(self):
+        """Every collection in use, sorted, case-insensitively.
+        Entries with no collection set are uncategorized and do
+        not appear here."""
+        self._load()
+        names = set()
+        for entry in self._entries:
+            name = (entry.get("collection") or "").strip()
+            if name:
+                names.add(name)
+        return sorted(names, key=str.lower)
+
+    def orphans(self):
+        """Entries whose PNG is gone from disk — the index entry
+        is fine, the file was deleted somewhere else (usually the
+        file manager). The file's absence is the whole story:
+        nothing is removed here, repair is the caller's job."""
+        self._load()
+        return [dict(entry) for entry in self._entries
+                if not self.path_for(entry).is_file()]
+
+    def duplicates(self):
+        """Groups of entries whose PNG files are byte-identical
+        (same SHA-256 of the file bytes). Each group is a list of
+        entries in saved order, first entry first; groups with a
+        single entry are not duplicates and never appear. Entries
+        whose file is missing are skipped — they are orphans, not
+        duplicates."""
+        self._load()
+        by_hash = {}
+        for entry in self._entries:
+            path = self.path_for(entry)
+            if not path.is_file():
+                continue
+            try:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                continue
+            by_hash.setdefault(digest, []).append(dict(entry))
+        return [group for group in by_hash.values()
+                if len(group) > 1]
+
     def path_for(self, entry):
         """The PNG on disk for an entry."""
         return self.directory / entry["file"]
+
+    # -------------------------------------------------- export / import
+
+    def export_to(self, directory):
+        """Copy the whole library — every entry's PNG, every
+        sheet's metadata JSON, and the index — into a folder.
+        The folder is created when missing; an existing folder
+        keeps its other files, and files this export writes are
+        replaced. Returns how many entries were exported."""
+        self._load()
+        dest = Path(directory)
+        dest.mkdir(parents=True, exist_ok=True)
+        exported = 0
+        out_entries = []
+        for entry in self._entries:
+            src = self.path_for(entry)
+            if not src.is_file():
+                continue  # an orphan has nothing to export
+            try:
+                shutil.copyfile(src, dest / entry["file"])
+                if entry["kind"] == "sheet" and entry.get("meta"):
+                    meta_src = self.directory / entry["meta"]
+                    if meta_src.is_file():
+                        shutil.copyfile(meta_src,
+                                        dest / entry["meta"])
+            except OSError as exc:
+                raise PixelForgeError(
+                    "could not export %s: %s" % (entry["name"], exc))
+            out_entries.append(dict(entry))
+            exported += 1
+        payload = {"format": LIBRARY_FORMAT,
+                   "version": LIBRARY_VERSION,
+                   "entries": out_entries}
+        index_path = dest / INDEX_NAME
+        tmp = index_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2) + "\n")
+        os.replace(tmp, index_path)
+        return exported
+
+    def import_from(self, directory):
+        """Add entries from a folder written by export_to (or any
+        folder holding a library.json + its PNGs). Returns a
+        report dict: "added" and "skipped" are name lists, and
+        "missing" names entries whose PNG was not in the folder.
+        An entry whose id already exists is skipped, never
+        overwritten; a file name that collides with a different
+        entry's file is copied under a fresh name (the entry's
+        file and id follow the new name). A folder with no index,
+        or an unreadable one, fails plainly and imports nothing."""
+        src_dir = Path(directory)
+        index_path = src_dir / INDEX_NAME
+        if not index_path.is_file():
+            raise PixelForgeError(
+                "no library in %s (no library.json there)"
+                % src_dir)
+        try:
+            data = json.loads(index_path.read_text())
+        except (OSError, ValueError) as exc:
+            raise PixelForgeError(
+                "library index is unreadable: %s (%s)"
+                % (index_path, exc))
+        if not isinstance(data, dict) or \
+                data.get("format") != LIBRARY_FORMAT:
+            raise PixelForgeError(
+                "not a Pixel Forge library: %s" % index_path)
+        incoming = data.get("entries", [])
+        if not isinstance(incoming, list):
+            raise PixelForgeError(
+                "library index is malformed: %s" % index_path)
+        self._load()
+        self.directory.mkdir(parents=True, exist_ok=True)
+        known_ids = {entry["id"] for entry in self._entries}
+        added, skipped, missing = [], [], []
+        for entry in incoming:
+            reason = validate_entry(entry)
+            if reason is not None:
+                skipped.append("%s (%s)"
+                               % (entry.get("name") or "?", reason))
+                continue
+            if entry["id"] in known_ids:
+                skipped.append(entry["name"])
+                continue
+            png_src = src_dir / entry["file"]
+            if not png_src.is_file():
+                missing.append(entry["name"])
+                continue
+            new = dict(entry)
+            # A colliding file name gets a fresh stem — the
+            # incoming file is never written over an existing one.
+            if (self.directory / new["file"]).exists():
+                stem = self._unique_stem(new["name"])
+                new["file"] = stem + ".png"
+                new["id"] = stem
+            try:
+                shutil.copyfile(png_src,
+                                self.directory / new["file"])
+                if new["kind"] == "sheet" and new.get("meta"):
+                    meta_src = src_dir / entry["meta"]
+                    if meta_src.is_file():
+                        meta_name = Path(new["file"]).stem + ".json"
+                        self._copy_sheet_meta(
+                            meta_src, self.directory / meta_name,
+                            new["file"])
+                        new["meta"] = meta_name
+                    else:
+                        new.pop("meta", None)
+            except OSError as exc:
+                raise PixelForgeError(
+                    "could not import %s: %s" % (entry["name"], exc))
+            self._entries.append(new)
+            known_ids.add(new["id"])
+            added.append(new["name"])
+        if added:
+            self._save()
+        return {"added": added, "skipped": skipped,
+                "missing": missing}
 
     # ----------------------------------------------------------- writes
 
@@ -419,6 +591,43 @@ class Library:
                 entry["name"] = str(new_name).strip()
                 self._save()
                 return dict(entry)
+        raise PixelForgeError(
+            "no library entry with id %r" % entry_id)
+
+    def update(self, entry_id, tags=None, collection=None):
+        """Change an entry's tags and/or collection (the file
+        stays put). Pass tags as a list or a comma-separated
+        string; pass collection as a name, or "" / None to clear
+        it. A field left as None is untouched. Returns the
+        updated entry."""
+        self._load()
+        for entry in self._entries:
+            if entry["id"] != entry_id:
+                continue
+            if tags is not None:
+                entry["tags"] = normalize_tags(tags)
+            if collection is not None:
+                name = str(collection).strip()
+                if name:
+                    entry["collection"] = name
+                else:
+                    entry.pop("collection", None)
+            self._save()
+            return dict(entry)
+        raise PixelForgeError(
+            "no library entry with id %r" % entry_id)
+
+    def remove_index_only(self, entry_id):
+        """Drop an entry from the index without touching any
+        file on disk. Orphan repair uses this: the PNG is already
+        gone, and a leftover sheet JSON is not ours to delete."""
+        self._load()
+        for index, entry in enumerate(self._entries):
+            if entry["id"] != entry_id:
+                continue
+            del self._entries[index]
+            self._save()
+            return
         raise PixelForgeError(
             "no library entry with id %r" % entry_id)
 

@@ -541,6 +541,45 @@ class LibraryCliTests(unittest.TestCase):
         self.assertIn("give the sprite a name", err)
         self.assertNotIn("Traceback", err)
 
+    def test_library_export_import_round_trip(self):
+        self._run(["library", "add", self.src, "--name", "Knight",
+                   "--tags", "hero"])
+        backup = os.path.join(tempfile.mkdtemp(), "backup")
+        code, out, _err = self._run(["library", "export", backup])
+        self.assertEqual(code, 0)
+        self.assertIn("Exported 1 sprite", out)
+        self.assertTrue(os.path.isfile(
+            os.path.join(backup, "knight.png")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(backup, "library.json")))
+        # Import into a fresh library, then import again: the
+        # second run skips, never duplicates.
+        fresh = os.path.join(tempfile.mkdtemp(), "lib2")
+        os.environ["PIXELFORGE_LIBRARY"] = fresh
+        try:
+            code, out, _err = self._run(
+                ["library", "import", backup])
+            self.assertEqual(code, 0)
+            self.assertIn("added 1 sprite", out)
+            code, out, _err = self._run(
+                ["library", "import", backup])
+            self.assertEqual(code, 0)
+            self.assertIn("added 0 sprites", out)
+            self.assertIn("skipped 1 sprite already here", out)
+            code, out, _err = self._run(["library", "list"])
+            self.assertEqual(code, 0)
+            self.assertIn("Knight", out)
+        finally:
+            os.environ["PIXELFORGE_LIBRARY"] = self.lib_dir
+
+    def test_library_import_bad_folder_fails_cleanly(self):
+        code, _out, err = self._run(
+            ["library", "import",
+             os.path.join(self.tmp, "no-such-folder")])
+        self.assertEqual(code, 1)
+        self.assertIn("no library in", err)
+        self.assertNotIn("Traceback", err)
+
     def test_presets_list_shows_builtins(self):
         code, out, _err = self._run(["presets", "list"])
         self.assertEqual(code, 0)

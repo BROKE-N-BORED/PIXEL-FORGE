@@ -112,10 +112,19 @@ bash uninstall.sh
   (selected asset), or Save sheet to library on the Video tab
   (the whole spritesheet PNG + JSON pair as one entry) — each
   save asks for a name and optional tags.
-  In the Library tab, search by name or tag, filter by tag, click
-  a sprite to preview it big, Load into Image tab to rework it,
-  Rename it, Delete it (the file goes too), or Export a copy
-  elsewhere.
+  In the Library tab, search by name or tag, filter by tag, kind,
+  source, or collection, and sort by saved order, name, date, or
+  size. Click a sprite to preview it big, Load into Image tab to
+  rework it (a sheet asks which frame to load), Rename it, Delete
+  it (the file goes too), Export a copy elsewhere, or Edit tags
+  to change its tags and collection. Sheets show a "Sheet" badge
+  in the grid; entries whose file was deleted outside the app
+  show "Missing", and Repair missing drops those stale entries
+  after asking. Find duplicates lists sprites with identical
+  files and removes the extras, keeping the first of each group.
+  Export library backs the whole library up to a folder, and
+  Import library brings one back (entries already in the library
+  are skipped, never overwritten).
 - **Presets:** the Image, Video, and Prompt tabs each have a
   Preset picker. A preset is size + palette + max colors +
   dithering + keep-aspect in one pick — Game Boy 32, PICO-8 64,
@@ -155,6 +164,8 @@ pixel-forge sheet walk-frames/ --cols 4 --padding 2 --fps 12
 pixel-forge library list
 pixel-forge library list --tag hero
 pixel-forge library add sprite.png --name "Red Knight" --tags hero,red
+pixel-forge library export ~/pixel-forge-backup/
+pixel-forge library import ~/pixel-forge-backup/
 pixel-forge presets list
 pixel-forge presets export "My Knight Look" --out knight-look.json
 pixel-forge presets import knight-look.json

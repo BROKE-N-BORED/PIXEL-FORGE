@@ -419,5 +419,266 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(len(lib.skipped_entries()), 1)
 
 
+class LibraryDepthTests(unittest.TestCase):
+    """Library depth (task 24): filters, collections, orphans,
+    duplicates, export/import, tag editing."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.lib = Library(os.path.join(self.tmp, "lib"))
+
+    def _image(self, w=32, h=32, r=255, g=0, b=0):
+        return make_solid_image(w, h, r, g, b)
+
+    def _sheet(self, name="Walk cycle"):
+        png = write_image(self._image(64, 64),
+                          os.path.join(self.tmp, "walk.png"))
+        meta = os.path.join(self.tmp, "walk.json")
+        with open(meta, "w") as f:
+            json.dump({"format": "pixel-forge-spritesheet",
+                       "version": 1, "frames": []}, f)
+        return self.lib.add_sheet(png, meta, name, frames=14)
+
+    def _names(self, entries):
+        return [e["name"] for e in entries]
+
+    # ------------------------------------------------------------ search
+
+    def test_search_filters_compose(self):
+        self.lib.add_image(self._image(), "Knight",
+                           tags=["hero"], source="image")
+        self.lib.add_image(self._image(), "Slime",
+                           tags=["hero"], source="code")
+        self._sheet("Walk cycle")
+        self.assertEqual(
+            self._names(self.lib.search(kind="sheet")),
+            ["Walk cycle"])
+        self.assertEqual(
+            self._names(self.lib.search(source="code")),
+            ["Slime"])
+        self.assertEqual(
+            self._names(self.lib.search(tag="hero",
+                                        source="code")),
+            ["Slime"])
+        self.assertEqual(
+            self._names(self.lib.search(text="knight",
+                                        kind="sheet")),
+            [])
+        self.assertEqual(len(self.lib.search()), 3)
+
+    def test_search_collection_filter(self):
+        knight = self.lib.add_image(self._image(), "Knight")
+        self.lib.add_image(self._image(), "Slime")
+        self.lib.update(knight["id"], collection="heroes")
+        self.assertEqual(
+            self._names(self.lib.search(collection="heroes")),
+            ["Knight"])
+        self.assertEqual(
+            self._names(self.lib.search(collection="")),
+            ["Slime"])
+        self.assertEqual(
+            self._names(self.lib.search(collection="nobody")),
+            [])
+
+    def test_all_collections_sorted(self):
+        first = self.lib.add_image(self._image(), "Knight")
+        second = self.lib.add_image(self._image(), "Slime")
+        self.lib.update(first["id"], collection="walk cycles")
+        self.lib.update(second["id"], collection="Heroes")
+        self.assertEqual(self.lib.all_collections(),
+                         ["Heroes", "walk cycles"])
+        self.lib.update(second["id"], collection="")
+        self.assertEqual(self.lib.all_collections(),
+                         ["walk cycles"])
+
+    def test_collection_is_optional_and_old_indexes_load(self):
+        # An index written before collections existed has no
+        # "collection" key anywhere — it loads unchanged, and the
+        # validator accepts entries with and without one.
+        entry = self._good_entry()
+        self.assertIsNone(validate_entry(entry))
+        self.assertNotIn("collection", entry)
+        with_collection = self._good_entry()
+        with_collection["collection"] = "heroes"
+        self.assertIsNone(validate_entry(with_collection))
+        bad = self._good_entry()
+        bad["collection"] = 7
+        self.assertIsNotNone(validate_entry(bad))
+
+    def _good_entry(self, name="Knight", stem="knight"):
+        return {"id": stem, "name": name, "file": stem + ".png",
+                "kind": "sprite", "tags": ["hero"],
+                "source": "image", "width": 32, "height": 32,
+                "created": "2026-11-12T00:00:00+00:00"}
+
+    # ------------------------------------------------------------ update
+
+    def test_update_tags_and_collection_round_trip(self):
+        entry = self.lib.add_image(self._image(), "Knight",
+                                   tags=["hero"])
+        updated = self.lib.update(entry["id"],
+                                  tags="hero, red, hero ,",
+                                  collection="heroes")
+        self.assertEqual(updated["tags"], ["hero", "red"])
+        self.assertEqual(updated["collection"], "heroes")
+        # The change survives a fresh load from disk.
+        fresh = Library(os.path.join(self.tmp, "lib"))
+        found = fresh.find(entry["id"])
+        self.assertEqual(found["tags"], ["hero", "red"])
+        self.assertEqual(found["collection"], "heroes")
+        # Clearing the collection removes the key; leaving a
+        # field out leaves it alone.
+        cleared = fresh.update(entry["id"], collection="")
+        self.assertNotIn("collection", cleared)
+        self.assertEqual(cleared["tags"], ["hero", "red"])
+
+    def test_update_unknown_id_fails_plainly(self):
+        with self.assertRaises(PixelForgeError):
+            self.lib.update("nope", tags=["x"])
+
+    # ----------------------------------------------------------- orphans
+
+    def test_orphans_and_index_only_removal(self):
+        knight = self.lib.add_image(self._image(), "Knight")
+        self.lib.add_image(self._image(), "Slime")
+        os.unlink(os.path.join(self.tmp, "lib", "knight.png"))
+        self.assertEqual(self._names(self.lib.orphans()),
+                         ["Knight"])
+        # Repair removes the index entry only — and never
+        # auto-runs: the orphan is still listed until removed.
+        self.assertEqual(self._names(self.lib.orphans()),
+                         ["Knight"])
+        self.lib.remove_index_only(knight["id"])
+        self.assertEqual(self.lib.orphans(), [])
+        self.assertEqual(self._names(self.lib.entries()),
+                         ["Slime"])
+        with self.assertRaises(PixelForgeError):
+            self.lib.remove_index_only("nope")
+
+    def test_orphan_repair_leaves_other_files_alone(self):
+        sheet = self._sheet()
+        os.unlink(os.path.join(self.tmp, "lib", sheet["file"]))
+        meta_path = os.path.join(self.tmp, "lib", sheet["meta"])
+        self.assertTrue(os.path.isfile(meta_path))
+        self.lib.remove_index_only(sheet["id"])
+        # The leftover metadata JSON is not ours to delete.
+        self.assertTrue(os.path.isfile(meta_path))
+
+    # -------------------------------------------------------- duplicates
+
+    def test_duplicates_found_by_content_hash(self):
+        self.lib.add_image(self._image(), "Knight")
+        self.lib.add_image(self._image(), "Knight copy")
+        self.lib.add_image(self._image(r=0, g=0, b=255), "Slime")
+        groups = self.lib.duplicates()
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(self._names(groups[0]),
+                         ["Knight", "Knight copy"])
+        # Same name, different pixels: not a duplicate.
+        self.assertNotIn("Slime", self._names(groups[0]))
+
+    def test_duplicates_skip_missing_files(self):
+        self.lib.add_image(self._image(), "Knight")
+        self.lib.add_image(self._image(), "Knight copy")
+        os.unlink(os.path.join(self.tmp, "lib", "knight.png"))
+        # One file gone: no group of two remains.
+        self.assertEqual(self.lib.duplicates(), [])
+
+    # ---------------------------------------------------- export / import
+
+    def test_export_import_round_trip(self):
+        self.lib.add_image(self._image(), "Knight",
+                           tags=["hero"], source="image")
+        self._sheet("Walk cycle")
+        backup = os.path.join(self.tmp, "backup")
+        self.assertEqual(self.lib.export_to(backup), 2)
+        self.assertTrue(os.path.isfile(
+            os.path.join(backup, "knight.png")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(backup, "walk-cycle.png")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(backup, "walk-cycle.json")))
+        with open(os.path.join(backup, "library.json")) as f:
+            index = json.load(f)
+        self.assertEqual(index["format"], LIBRARY_FORMAT)
+        self.assertEqual(len(index["entries"]), 2)
+        fresh = Library(os.path.join(self.tmp, "lib2"))
+        report = fresh.import_from(backup)
+        self.assertEqual(sorted(report["added"]),
+                         ["Knight", "Walk cycle"])
+        self.assertEqual(report["skipped"], [])
+        self.assertEqual(report["missing"], [])
+        self.assertEqual(self._names(fresh.entries()),
+                         ["Knight", "Walk cycle"])
+        sheet = fresh.find("walk-cycle")
+        self.assertEqual(sheet["kind"], "sheet")
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "lib2", sheet["meta"])))
+
+    def test_import_skips_existing_ids_and_reports(self):
+        self.lib.add_image(self._image(), "Knight")
+        backup = os.path.join(self.tmp, "backup")
+        self.lib.export_to(backup)
+        report = self.lib.import_from(backup)
+        self.assertEqual(report["added"], [])
+        self.assertEqual(report["skipped"], ["Knight"])
+        self.assertEqual(report["missing"], [])
+        self.assertEqual(len(self.lib.entries()), 1)
+
+    def test_import_never_overwrites_a_colliding_file(self):
+        # An incoming entry with a new id but a file name this
+        # library already uses: the file gets a fresh name, the
+        # old one stays byte-identical.
+        backup = os.path.join(self.tmp, "backup")
+        os.makedirs(backup)
+        write_image(self._image(r=0, g=0, b=255),
+                    os.path.join(backup, "knight.png"))
+        with open(os.path.join(backup, "library.json"), "w") as f:
+            json.dump({"format": LIBRARY_FORMAT, "version": 1,
+                       "entries": [
+                           {"id": "knight-blue", "name": "Knight",
+                            "file": "knight.png", "kind": "sprite",
+                            "tags": [], "source": "image",
+                            "width": 32, "height": 32,
+                            "created": "2026-11-12T00:00:00+00:00"}]},
+                      f)
+        self.lib.add_image(self._image(), "Knight")
+        before = open(os.path.join(self.tmp, "lib",
+                                  "knight.png"), "rb").read()
+        report = self.lib.import_from(backup)
+        self.assertEqual(report["added"], ["Knight"])
+        self.assertEqual(len(self.lib.entries()), 2)
+        after = open(os.path.join(self.tmp, "lib",
+                                 "knight.png"), "rb").read()
+        self.assertEqual(after, before)
+        files = sorted(e["file"] for e in self.lib.entries())
+        self.assertEqual(files, ["knight-2.png", "knight.png"])
+
+    def test_import_reports_missing_files_and_bad_folders(self):
+        self.lib.add_image(self._image(), "Knight")
+        backup = os.path.join(self.tmp, "backup")
+        self.lib.export_to(backup)
+        os.unlink(os.path.join(backup, "knight.png"))
+        fresh = Library(os.path.join(self.tmp, "lib2"))
+        report = fresh.import_from(backup)
+        self.assertEqual(report["added"], [])
+        self.assertEqual(report["missing"], ["Knight"])
+        with self.assertRaises(PixelForgeError):
+            fresh.import_from(os.path.join(self.tmp, "nope"))
+        empty = os.path.join(self.tmp, "empty")
+        os.makedirs(empty)
+        with self.assertRaises(PixelForgeError):
+            fresh.import_from(empty)
+
+    def test_export_skips_orphans(self):
+        self.lib.add_image(self._image(), "Knight")
+        self.lib.add_image(self._image(), "Slime")
+        os.unlink(os.path.join(self.tmp, "lib", "knight.png"))
+        backup = os.path.join(self.tmp, "backup")
+        self.assertEqual(self.lib.export_to(backup), 1)
+        self.assertFalse(os.path.isfile(
+            os.path.join(backup, "knight.png")))
+
+
 if __name__ == "__main__":
     unittest.main()
