@@ -161,10 +161,15 @@ def extract_frames(video_path, out_dir, fps=DEFAULT_FPS, every=1,
     except OSError as exc:
         raise PixelForgeError("could not run ffmpeg: %s" % exc)
     if proc.returncode != 0:
-        tail = "\n".join(
-            line for line in (proc.stderr or "").splitlines()
-            if line.strip())[-3:]
-        detail = (" — " + "; ".join(tail)) if tail else ""
+        # Slice the LIST of lines, not the joined string: taking
+        # [-3:] of the joined string gave the last 3 characters,
+        # which the old "; ".join then garbled into "p; u; t"
+        # (review B3). The last 3 non-blank lines, each on its
+        # own line; empty output leaves no detail at all.
+        lines = [line for line in (proc.stderr or "").splitlines()
+                 if line.strip()]
+        tail = lines[-3:]
+        detail = ("\n" + "\n".join(tail)) if tail else ""
         raise PixelForgeError(
             "ffmpeg could not read %s%s" % (video.name, detail))
     frames = sorted_frames(out.glob("frame_*.png"))

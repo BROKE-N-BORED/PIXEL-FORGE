@@ -1,5 +1,26 @@
 # Pixel Forge changelog
 
+## 0.14 — 2026-11-12
+
+The ffmpeg failure message reads like English now — task-list
+item #8 (review bug B3). When ffmpeg could not read a video,
+the error dialog was supposed to show the last 3 lines of
+ffmpeg's output, but the code joined the lines into one string
+and then sliced `[-3:]` off the string — the last 3
+characters — and joined those with "; ", so the dialog read
+`ffmpeg could not read not-a-video.mp4 — p; u; t`.
+
+- The slice now applies to the list of lines before joining,
+  so the dialog shows the last 3 non-blank lines of ffmpeg's
+  output, in order, each on its own line.
+- Fewer than 3 lines of output show in full; empty output
+  leaves no detail at all — just "ffmpeg could not read X",
+  no meaningless fragment.
+- Same-class audit: the image-engine failure path
+  (`imagegen.py`) already slices the list of lines, and the
+  installer streams output without trimming, so no other
+  instance of this defect exists.
+
 ## 0.13 — 2026-11-12
 
 The empty Library tab is no longer a void — task-list item #7

@@ -6,6 +6,7 @@ Skipped when ffmpeg is not installed.
 """
 import io
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -110,6 +111,65 @@ class VideoTests(unittest.TestCase):
             video_mod.extract_frames(
                 garbage, os.path.join(self.tmp, "garbage-out"))
         self.assertIn("could not read", str(ctx.exception))
+
+    def _failing_extract(self, stderr, out_name):
+        """Run extract_frames against a stubbed failing ffmpeg."""
+        garbage = os.path.join(self.tmp, "garbage.mp4")
+        if not os.path.exists(garbage):
+            with open(garbage, "w") as f:
+                f.write("this is not a video")
+        proc = mock.Mock(returncode=1, stderr=stderr, stdout="")
+        with mock.patch.object(video_mod.subprocess, "run",
+                               return_value=proc):
+            with self.assertRaises(PixelForgeError) as ctx:
+                video_mod.extract_frames(
+                    garbage, os.path.join(self.tmp, out_name))
+        return str(ctx.exception)
+
+    def test_extract_failure_shows_last_three_lines(self):
+        # Review B3: the old code sliced the last 3 characters
+        # of the joined string, not the last 3 lines.
+        message = self._failing_extract(
+            "line one\nline two\nline three\nline four\nline five\n",
+            "fail-three")
+        self.assertEqual(
+            message,
+            "ffmpeg could not read garbage.mp4\n"
+            "line three\nline four\nline five")
+
+    def test_extract_failure_short_output_shows_in_full(self):
+        message = self._failing_extract("only one line\n", "fail-one")
+        self.assertEqual(
+            message, "ffmpeg could not read garbage.mp4\nonly one line")
+        message = self._failing_extract("first line\nsecond line\n",
+                                        "fail-two")
+        self.assertEqual(
+            message,
+            "ffmpeg could not read garbage.mp4\nfirst line\nsecond line")
+
+    def test_extract_failure_empty_output_has_no_fragment(self):
+        message = self._failing_extract("", "fail-empty")
+        self.assertEqual(message, "ffmpeg could not read garbage.mp4")
+        message = self._failing_extract("\n\n", "fail-blank")
+        self.assertEqual(message, "ffmpeg could not read garbage.mp4")
+
+    def test_extract_failure_message_is_not_garbled(self):
+        # Real ffmpeg on a garbage file: no "p; u; t" style
+        # semicolon-separated single characters, and every
+        # detail line is real text, not a fragment.
+        garbage = os.path.join(self.tmp, "garbage.mp4")
+        with open(garbage, "w") as f:
+            f.write("this is not a video")
+        with self.assertRaises(PixelForgeError) as ctx:
+            video_mod.extract_frames(
+                garbage, os.path.join(self.tmp, "garbage-out2"))
+        message = str(ctx.exception)
+        self.assertNotRegex(
+            message, r"[a-zA-Z]; [a-zA-Z]; [a-zA-Z]")
+        lines = message.splitlines()
+        self.assertGreaterEqual(len(lines), 2)
+        for line in lines[1:]:
+            self.assertGreater(len(line), 1, line)
 
     def test_extract_missing_ffmpeg_is_loud(self):
         with mock.patch.object(video_mod, "find_ffmpeg",
