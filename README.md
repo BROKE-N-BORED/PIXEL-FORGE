@@ -292,6 +292,14 @@ File names come from the entry name, slugified, with `-2`, `-3`,
 so the file on disk stays put. Deleting an entry removes its files
 too (a sheet's JSON goes with its PNG).
 
+An entry missing a field the program reads (`id`, `name`,
+`file`, `kind`, `width`, `height`, `source`, `created`) or with
+a field of the wrong type is skipped when the library loads —
+the app starts with the good entries, the Library tab says how
+many were skipped, and the bad entries stay in `library.json`
+untouched, so fixing them by hand brings them back. A whole
+index file that is not parseable JSON still fails loudly.
+
 `presets.json` holds your saved presets
 (`pixel-forge-presets`, version 1) — built-ins are not stored
 there, they ship in the program:
@@ -314,19 +322,22 @@ A preset needs all six keys: `width` and `height` (1–512),
 (true/false). A hand-edited file with a bad preset fails loudly
 instead of applying nonsense.
 
-## What v0.9 does and does not do
+## What v0.10 does and does not do
 
-v0.9 is Items 1–6 of the plan: image to pixel sprite core, video to
+v0.10 is Items 1–6 of the plan: image to pixel sprite core, video to
 sprite frames, prompt-to-sprite with a local image model,
 spritesheets + animation export, a sprite library with presets,
 and code + game-asset input — plus the window-fit fix (every tab's
 control column scrolls, so the window fits a 768 px screen), the
 texture-import fix (a big photo as a game asset caps at
 512 px and loads on a worker thread instead of freezing the
-window), and the Video tab fix (extraction + pixelize run on a
+window), the Video tab fix (extraction + pixelize run on a
 worker thread with debounced controls, so dragging a slider no
-longer locks the window up). The MIMIK merge is the one remaining
-planned item — none of that is in this build.
+longer locks the window up), and the library validation fix (a
+malformed entry in library.json is skipped with a warning
+instead of bricking startup, and stays in the file so nothing
+is lost). The MIMIK merge is the one remaining planned item —
+none of that is in this build.
 
 ## Requirements
 

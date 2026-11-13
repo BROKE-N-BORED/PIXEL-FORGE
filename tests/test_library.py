@@ -9,8 +9,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from helpers import ensure_app, make_solid_image, write_image  # noqa: E402
-from pixel_forge.library import (Library, default_library_dir,  # noqa: E402
-                                 normalize_tags, slugify)
+from pixel_forge.library import (LIBRARY_FORMAT, Library,  # noqa: E402
+                                 default_library_dir,
+                                 normalize_tags, slugify,
+                                 validate_entry)
 from pixel_forge.pixelize import PixelForgeError  # noqa: E402
 
 
@@ -242,6 +244,121 @@ class LibraryTests(unittest.TestCase):
             Library(lib_dir).entries()
         self.assertIn("not a Pixel Forge library",
                       str(ctx.exception))
+
+    # ------------------------------------------- malformed entries (v0.10)
+
+    def _write_index(self, entries):
+        lib_dir = os.path.join(self.tmp, "lib")
+        os.makedirs(lib_dir, exist_ok=True)
+        path = os.path.join(lib_dir, "library.json")
+        with open(path, "w") as f:
+            json.dump({"format": LIBRARY_FORMAT, "version": 1,
+                       "entries": entries}, f)
+        return path
+
+    def _good_entry(self, name="Knight", stem="knight"):
+        return {"id": stem, "name": name, "file": stem + ".png",
+                "kind": "sprite", "tags": ["hero"],
+                "source": "image", "width": 32, "height": 32,
+                "created": "2026-11-12T00:00:00+00:00"}
+
+    def test_malformed_entries_skipped_not_fatal(self):
+        # One malformed entry used to brick startup with an
+        # uncaught KeyError (review W4). Now the good entries
+        # load and the bad ones are reported, not fatal.
+        no_name = self._good_entry(name="Ghost", stem="ghost")
+        del no_name["name"]
+        no_file = self._good_entry(name="Wisp", stem="wisp")
+        del no_file["file"]
+        self._write_index([self._good_entry(), no_name,
+                           self._good_entry("Slime", "slime"),
+                           no_file])
+        lib = Library(os.path.join(self.tmp, "lib"))
+        entries = lib.entries()
+        self.assertEqual([e["name"] for e in entries],
+                         ["Knight", "Slime"])
+        skipped = lib.skipped_entries()
+        self.assertEqual(len(skipped), 2)
+        self.assertIn("missing 'name'", skipped[0])
+        self.assertIn("missing 'file'", skipped[1])
+        # Every read path works on the loaded library — no
+        # KeyError from the skipped entries.
+        self.assertEqual(len(lib.search()), 2)
+        self.assertEqual(lib.all_tags(), ["hero"])
+        self.assertEqual(lib.find("knight")["name"], "Knight")
+        self.assertIsNone(lib.find("ghost"))
+
+    def test_wrong_typed_fields_skipped(self):
+        tags_str = self._good_entry("Tags", "tags")
+        tags_str["tags"] = "hero,red"
+        width_str = self._good_entry("Width", "width")
+        width_str["width"] = "32"
+        bad_kind = self._good_entry("Kind", "kind")
+        bad_kind["kind"] = "tileset"
+        not_an_entry = "just a string"
+        self._write_index([self._good_entry(), tags_str, width_str,
+                           bad_kind, not_an_entry])
+        lib = Library(os.path.join(self.tmp, "lib"))
+        self.assertEqual([e["name"] for e in lib.entries()],
+                         ["Knight"])
+        skipped = lib.skipped_entries()
+        self.assertEqual(len(skipped), 4)
+        self.assertIn("'tags'", skipped[0])
+        self.assertIn("'width'", skipped[1])
+        self.assertIn("kind", skipped[2])
+        self.assertIn("not an object", skipped[3])
+        # The validator itself: a good entry passes, and every
+        # field the window reads with [] is required.
+        self.assertIsNone(validate_entry(self._good_entry()))
+        for key in ("id", "name", "file", "kind", "width",
+                    "height", "source", "created"):
+            broken = self._good_entry()
+            del broken[key]
+            self.assertIsNotNone(validate_entry(broken), key)
+
+    def test_malformed_entries_left_untouched_on_disk(self):
+        no_name = self._good_entry(name="Ghost", stem="ghost")
+        del no_name["name"]
+        no_file = self._good_entry(name="Wisp", stem="wisp")
+        del no_file["file"]
+        index = [self._good_entry(), no_name,
+                 self._good_entry("Slime", "slime"), no_file]
+        path = self._write_index(index)
+        before = open(path, "rb").read()
+        lib = Library(os.path.join(self.tmp, "lib"))
+        lib.entries()
+        # Loading alone never rewrites the file.
+        self.assertEqual(open(path, "rb").read(), before)
+        # And a later save (a new sprite) keeps the bad entries
+        # verbatim, in their original positions — nothing lost.
+        lib.add_image(self._image(), "Newcomer")
+        with open(path) as f:
+            saved = json.load(f)["entries"]
+        self.assertEqual(len(saved), 5)
+        self.assertEqual(saved[0]["name"], "Knight")
+        self.assertEqual(saved[1], no_name)
+        self.assertEqual(saved[2]["name"], "Slime")
+        self.assertEqual(saved[3], no_file)
+        self.assertEqual(saved[4]["name"], "Newcomer")
+        # The skipped entries are still reported after the save.
+        self.assertEqual(len(lib.skipped_entries()), 2)
+
+    def test_rename_and_remove_work_with_skipped_entries(self):
+        no_name = self._good_entry(name="Ghost", stem="ghost")
+        del no_name["name"]
+        self._write_index([self._good_entry(), no_name,
+                           self._good_entry("Slime", "slime")])
+        lib = Library(os.path.join(self.tmp, "lib"))
+        lib.rename("knight", "Sir Knight")
+        lib.remove("slime")
+        with open(os.path.join(self.tmp, "lib",
+                               "library.json")) as f:
+            saved = json.load(f)["entries"]
+        self.assertEqual(
+            [e.get("name") for e in saved],
+            ["Sir Knight", None])
+        self.assertEqual(saved[1], no_name)
+        self.assertEqual(len(lib.skipped_entries()), 1)
 
 
 if __name__ == "__main__":

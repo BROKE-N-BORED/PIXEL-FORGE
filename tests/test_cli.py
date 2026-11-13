@@ -1,5 +1,6 @@
 """CLI tests — in-process plus one real subprocess smoke test."""
 import io
+import json
 import os
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from helpers import (ensure_app, make_gradient_image, stub_env,  # noqa: E402
 from PySide6.QtGui import QImage  # noqa: E402
 from pixel_forge import __version__  # noqa: E402
 from pixel_forge.cli import main  # noqa: E402
+from pixel_forge.library import LIBRARY_FORMAT  # noqa: E402
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 
@@ -405,6 +407,47 @@ class LibraryCliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("no such file", err)
         self.assertNotIn("Traceback", err)
+
+    def _write_mixed_index(self):
+        os.makedirs(self.lib_dir, exist_ok=True)
+        good = {"id": "knight", "name": "Knight",
+                "file": "knight.png", "kind": "sprite",
+                "tags": ["hero"], "source": "image",
+                "width": 32, "height": 32,
+                "created": "2026-11-12T00:00:00+00:00"}
+        no_name = dict(good, id="ghost", file="ghost.png")
+        del no_name["name"]
+        path = os.path.join(self.lib_dir, "library.json")
+        with open(path, "w") as f:
+            json.dump({"format": LIBRARY_FORMAT, "version": 1,
+                       "entries": [good, no_name]}, f)
+        return path, no_name
+
+    def test_library_list_skips_malformed_entries(self):
+        # v0.10: a malformed entry is skipped with a warning,
+        # not fatal — and left in the file, not deleted.
+        path, _no_name = self._write_mixed_index()
+        before = open(path, "rb").read()
+        code, out, err = self._run(["library", "list"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Knight", out)
+        self.assertIn("skipped 1 malformed entry", err)
+        self.assertEqual(open(path, "rb").read(), before)
+
+    def test_library_add_preserves_malformed_entries(self):
+        # v0.10: adding a sprite re-saves the index — the bad
+        # entry must survive the save verbatim.
+        path, no_name = self._write_mixed_index()
+        code, out, err = self._run(
+            ["library", "add", self.src, "--name", "Newcomer"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Saved Newcomer", out)
+        self.assertIn("skipped 1 malformed entry", err)
+        with open(path) as f:
+            entries = json.load(f)["entries"]
+        self.assertEqual(len(entries), 3)
+        self.assertEqual(entries[1], no_name)
+        self.assertEqual(entries[2]["name"], "Newcomer")
 
     def test_library_add_blank_name_fails_cleanly(self):
         code, _out, err = self._run(

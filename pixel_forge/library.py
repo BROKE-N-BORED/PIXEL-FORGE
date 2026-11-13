@@ -21,6 +21,14 @@ Files are named from the entry name (slugified, with -2, -3, ...
 on collision); renaming an entry renames the display name only,
 so the file on disk stays put.
 
+Entries are validated when the index loads: an entry missing a
+field the window or the CLI reads (or with a field of the wrong
+type) is skipped, not fatal — the app starts with the good
+entries, the skipped ones are reported (see skipped_entries),
+and they stay in library.json verbatim, so a later save never
+deletes data the load could not use. A whole index file that is
+not parseable JSON still fails loudly instead.
+
 Nothing is created on disk until the first save — opening the
 window or listing an empty library never touches the home folder.
 """
@@ -80,6 +88,48 @@ def _stamp():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def validate_entry(entry):
+    """Why an index entry is unusable, or None when it is fine.
+    Every field the window and the CLI read with [] is required
+    (id, name, file, kind, width, height, source, created);
+    optional fields are checked for type when present. A bad
+    entry is skipped at load, never fatal — see Library._load."""
+    if not isinstance(entry, dict):
+        return "not an object"
+    for key in ("id", "name", "file"):
+        value = entry.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return "missing %r" % key
+    if entry.get("kind") not in KINDS:
+        return "missing or unknown kind %r" % (entry.get("kind"),)
+    for key in ("width", "height"):
+        value = entry.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) \
+                or value < 1:
+            return "%r must be a whole number of 1 or more" % key
+    if entry.get("source") not in SOURCES:
+        return "missing or unknown source %r" % (entry.get("source"),)
+    created = entry.get("created")
+    if not isinstance(created, str) or not created.strip():
+        return "missing 'created'"
+    tags = entry.get("tags")
+    if tags is not None and (not isinstance(tags, list) or not all(
+            isinstance(tag, str) for tag in tags)):
+        return "'tags' must be a list of names"
+    if entry.get("palette") is not None and \
+            not isinstance(entry["palette"], str):
+        return "'palette' must be a name"
+    frames = entry.get("frames")
+    if frames is not None and (isinstance(frames, bool)
+                               or not isinstance(frames, int)
+                               or frames < 0):
+        return "'frames' must be a whole number of 0 or more"
+    if entry.get("meta") is not None and \
+            not isinstance(entry["meta"], str):
+        return "'meta' must be a file name"
+    return None
+
+
 class Library:
     """One library folder. The index loads lazily and is written
     back (atomically, via a temp file + rename) on every change."""
@@ -88,6 +138,11 @@ class Library:
         self.directory = (Path(directory) if directory is not None
                           else default_library_dir())
         self._entries = None
+        # The index exactly as loaded (valid + skipped, in order),
+        # so a save can keep skipped entries verbatim; and one
+        # reason string per skipped entry, in index order.
+        self._raw_entries = None
+        self._skipped = None
 
     @property
     def index_path(self):
@@ -101,6 +156,8 @@ class Library:
         path = self.index_path
         if not path.exists():
             self._entries = []
+            self._raw_entries = []
+            self._skipped = []
             return
         try:
             data = json.loads(path.read_text())
@@ -115,16 +172,52 @@ class Library:
         if not isinstance(entries, list):
             raise PixelForgeError(
                 "library index is malformed: %s" % path)
-        self._entries = entries
+        # A bad entry is skipped, not fatal — one malformed entry
+        # used to brick startup with an uncaught KeyError. The
+        # skipped entries stay in the file (see _save); their
+        # reasons are reported through skipped_entries().
+        self._raw_entries = entries
+        self._entries = []
+        self._skipped = []
+        for index, entry in enumerate(entries):
+            reason = validate_entry(entry)
+            if reason is None:
+                self._entries.append(entry)
+            else:
+                self._skipped.append(
+                    "entry %d: %s" % (index + 1, reason))
 
     def _save(self):
         self.directory.mkdir(parents=True, exist_ok=True)
         tmp = self.index_path.with_suffix(".json.tmp")
+        # Skipped entries stay in the file, verbatim and in their
+        # original positions — a save never deletes data the load
+        # could not use. Valid entries keep their positions too
+        # (renames included); new entries go at the end.
+        by_id = {entry["id"]: entry for entry in self._entries}
+        seen = set()
+        out = []
+        for raw in self._raw_entries or []:
+            if validate_entry(raw) is not None:
+                out.append(raw)
+                continue
+            current = by_id.get(raw.get("id"))
+            if current is not None:
+                out.append(current)
+                seen.add(current["id"])
+        for entry in self._entries:
+            if entry["id"] not in seen:
+                out.append(entry)
         payload = {"format": LIBRARY_FORMAT,
                    "version": LIBRARY_VERSION,
-                   "entries": self._entries}
+                   "entries": out}
         tmp.write_text(json.dumps(payload, indent=2) + "\n")
         os.replace(tmp, self.index_path)
+        self._raw_entries = out
+        self._skipped = [
+            "entry %d: %s" % (index + 1, validate_entry(entry))
+            for index, entry in enumerate(out)
+            if validate_entry(entry) is not None]
 
     def _unique_stem(self, name):
         """A file stem no entry (and no stray file) already uses."""
@@ -145,6 +238,13 @@ class Library:
         """All entries, in saved order (copies — edit via rename)."""
         self._load()
         return [dict(entry) for entry in self._entries]
+
+    def skipped_entries(self):
+        """Why each skipped index entry was skipped, in index
+        order ("entry 3: missing 'name'"). Skipped entries stay
+        in library.json — they are never deleted or rewritten."""
+        self._load()
+        return list(self._skipped)
 
     def find(self, entry_id):
         """One entry by id, or None."""

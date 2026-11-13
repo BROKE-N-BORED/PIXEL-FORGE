@@ -315,13 +315,30 @@ def cmd_sheet(args):
     return 0
 
 
+def _warn_skipped(lib):
+    """One stderr line when the index had malformed entries —
+    the same warning the window shows in its status bar."""
+    skipped = lib.skipped_entries()
+    if not skipped:
+        return
+    print("Warning: skipped %s in %s — left in the file, "
+          "not deleted"
+          % ("1 malformed entry" if len(skipped) == 1 else
+             "%d malformed entries" % len(skipped),
+             lib.index_path), file=sys.stderr)
+
+
 def cmd_library_list(args):
     lib = Library()
     entries = lib.search(tag=args.tag)
+    _warn_skipped(lib)
     if not entries:
         if args.tag:
             print("No sprites with tag %r in the library (%s)"
                   % (args.tag, lib.directory))
+        elif lib.skipped_entries():
+            print("Library has no usable sprites — %s"
+                  % lib.directory)
         else:
             print("Library is empty — %s" % lib.directory)
         return 0
@@ -348,6 +365,7 @@ def cmd_library_add(args):
                          source="file")
     print("Saved %s to the library (%s)"
           % (entry["name"], lib.path_for(entry)))
+    _warn_skipped(lib)
     return 0
 
 

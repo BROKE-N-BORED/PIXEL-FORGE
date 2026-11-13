@@ -1,5 +1,28 @@
 # Pixel Forge changelog
 
+## 0.10 — 2026-11-12
+
+One malformed library entry no longer bricks startup — task-list
+item #4, weakness W4 of the v0.6 internal review. A single entry
+in library.json missing a field (say `name` or `file`) used to
+crash the app at startup with an uncaught KeyError.
+
+- Index entries are validated when the library loads: entries
+  missing a field the window or the CLI reads (or with a field
+  of the wrong type) are skipped, not fatal. The app starts with
+  the good entries intact.
+- The skip is warned about, never silent: the Library tab's
+  count label says how many malformed entries were skipped, the
+  status bar says so once at startup, and the `library list` /
+  `library add` CLI commands print a warning to stderr.
+- Skipped entries stay in library.json verbatim, in their
+  original positions — a later save (a new sprite, a rename, a
+  remove) never deletes data the load could not use. Nothing
+  is lost; fix the entries by hand and they load again.
+- A whole index file that is not parseable JSON still fails
+  loudly, as before — this is about bad entries inside a
+  readable index. No other changes in this release.
+
 ## 0.9 — 2026-11-12
 
 Video tab freeze fixed — task-list item #3, weakness W3 of

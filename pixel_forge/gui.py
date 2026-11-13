@@ -492,6 +492,10 @@ class MainWindow(QMainWindow):
         self.library = Library(library_dir)
         self.preset_store = PresetStore(self.library.directory)
         self._applying_preset = False
+        # The malformed-entries warning shows in the status bar
+        # once per window; the Library tab's count label carries
+        # it permanently (see _refresh_library).
+        self._library_skip_warned = False
         self.source_image = None
         self.source_path = None
         self.result_image = None
@@ -2934,6 +2938,17 @@ class MainWindow(QMainWindow):
             self._clear_library_selection()
             return
         selected = self._selected_library_id()
+        skipped = self.library.skipped_entries()
+        if skipped and not self._library_skip_warned:
+            # Same pattern as a corrupt presets file: say so in
+            # the status bar and carry on with the good entries.
+            # The count label below keeps the note permanently.
+            self._library_skip_warned = True
+            self.statusBar().showMessage(
+                "Library: skipped %s — left in library.json, "
+                "not deleted"
+                % ("1 malformed entry" if len(skipped) == 1 else
+                   "%d malformed entries" % len(skipped)))
         combo = self.library_tag_combo
         current_tag = combo.currentData()
         combo.blockSignals(True)
@@ -2968,17 +2983,26 @@ class MainWindow(QMainWindow):
         finally:
             self.library_list.blockSignals(False)
         total = len(self.library.entries())
+        if skipped:
+            note = (" — %s skipped, left in library.json"
+                    % ("1 malformed entry" if len(skipped) == 1
+                       else "%d malformed entries" % len(skipped)))
+        else:
+            note = ""
         if len(entries) == total:
             if total:
                 self.library_count_label.setText(
-                    "%d sprite(s) in the library" % total)
+                    "%d sprite(s) in the library%s" % (total, note))
+            elif skipped:
+                self.library_count_label.setText(
+                    "No usable sprites in the library%s" % note)
             else:
                 self.library_count_label.setText(
                     "Library is empty — save a sprite from the "
                     "Image, Video, Prompt, or Code tab.")
         else:
             self.library_count_label.setText(
-                "%d of %d sprite(s)" % (len(entries), total))
+                "%d of %d sprite(s)%s" % (len(entries), total, note))
         if selected is not None:
             for row in range(self.library_list.count()):
                 item = self.library_list.item(row)

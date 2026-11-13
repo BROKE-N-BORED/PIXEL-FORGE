@@ -6,6 +6,7 @@ Run with the Qt test env (see AGENTS.md):
   ~/workspace/forge-v2-testenv/bin/python -m unittest tests.test_gui
 Skipped when PySide6 is not importable.
 """
+import json
 import os
 import sys
 import tempfile
@@ -1068,6 +1069,40 @@ class LibraryGuiTests(unittest.TestCase):
         for text in visible_texts(self.win):
             self.assertNotIn("&", text, "bare & in visible text: %r"
                              % text)
+
+    def test_malformed_entries_do_not_brick_startup(self):
+        # v0.10: one malformed entry used to brick startup with
+        # an uncaught KeyError (review W4). The window opens,
+        # the good entries list, and the skip is warned about.
+        from pixel_forge.gui import MainWindow
+        lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        os.makedirs(lib_dir)
+        good = {"id": "knight", "name": "Knight",
+                "file": "knight.png", "kind": "sprite",
+                "tags": ["hero"], "source": "image",
+                "width": 32, "height": 32,
+                "created": "2026-11-12T00:00:00+00:00"}
+        no_name = dict(good, id="ghost", file="ghost.png")
+        del no_name["name"]
+        no_file = dict(good, id="wisp", name="Wisp")
+        del no_file["file"]
+        with open(os.path.join(lib_dir, "library.json"), "w") as f:
+            json.dump({"format": "pixel-forge-library", "version": 1,
+                       "entries": [good, no_name, no_file]}, f)
+        win = MainWindow(library_dir=lib_dir)
+        try:
+            win.tabs.setCurrentIndex(4)
+            self.app.processEvents()
+            self.app.processEvents()
+            self.assertEqual(win.library_list.count(), 1)
+            self.assertIn("2 malformed entries skipped",
+                          win.library_count_label.text())
+            self.assertIn("skipped 2 malformed entries",
+                          win.statusBar().currentMessage())
+        finally:
+            win.close()
+            win.deleteLater()
+            self.app.processEvents()
 
     def test_save_dialog_no_bare_ampersand_and_ok_needs_name(self):
         from pixel_forge.gui import SaveToLibraryDialog
