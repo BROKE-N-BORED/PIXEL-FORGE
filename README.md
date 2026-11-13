@@ -157,7 +157,13 @@ it keeps them and prints the way to remove them by hand.
   between frames, and the playback fps, then Preview spritesheet
   to see the sheet and play the animation from it — at the
   frames' own durations — before you export, or Export
-  spritesheet to write the pair straight away. Export GIF
+  spritesheet to write the pair straight away. The Packing
+  combo switches the packer: Grid is the default (same-size
+  frames in rows), MaxRects packs mixed sizes tight into an
+  atlas, with Trim (cut transparent borders), Atlas padding,
+  and Extrude (repeat edge pixels into the padding, so the
+  atlas does not bleed when scaled) — see "Atlas packing"
+  below. Export GIF
   writes the kept frames (or the selected tag's range) as an
   animated GIF with the per-frame durations, looping forever;
   it needs ffmpeg, the same as video import. Export for engine
@@ -423,13 +429,33 @@ Options for `sheet` only:
   `<folder-stem>-sheet.png` next to the folder).
 - `--meta` — output metadata JSON (default: the `--out` name with
   `.json`).
+- `--pack` — packer: `grid` (same-size frames in a grid, the
+  default) or `maxrects` (mixed sizes, packed tight — see
+  "Atlas packing" below).
 - `--cols` — columns in the grid, 0 = automatic square-ish grid
-  (default 0).
-- `--padding` — gap between frames in pixels (default 0).
+  (default 0; grid only).
+- `--padding` — gap between frames in pixels (default 0 for
+  grid, 1 for maxrects; 0-64 under maxrects).
+- `--trim` — cut transparent borders off each frame before
+  packing (maxrects only).
+- `--extrude` — repeat each sprite's edge pixels outward by N
+  pixels into the padding (maxrects only, 0-16, never more
+  than the padding).
+- `--max-size` — largest side of one atlas sheet in pixels
+  (maxrects only, 64-4096, default 1024).
+- `--multipack` — spill to more sheets (`stem_0.png`,
+  `stem_1.png`, ...) when the sprites do not fit in one sheet
+  (maxrects only).
+- `--pivot` — pivot for every frame, X,Y between 0 and 1
+  (maxrects only, default 0.5,0.5).
+- `--slice` — 9-slice borders for every frame, L,T,R,B in
+  pixels (maxrects only).
 - `--fps` — playback fps recorded in the metadata (default 8).
 
-All frames in a folder must be the same size; a folder that mixes
-sizes (or holds no PNGs) fails with a plain message.
+Under the grid packer all frames in a folder must be the same
+size; a folder that mixes sizes (or holds no PNGs) fails with a
+plain message. Under maxrects the frames may be any size — that
+is what the packer is for.
 
 ## Spritesheet metadata format
 
@@ -477,6 +503,88 @@ positions into the frames list in playback order, naming a set
 (walk/idle/attack) inside the one sheet. Names are unique, and
 `from` never comes after `to`. Older metadata without `tags`
 loads unchanged.
+
+## Atlas packing
+
+The other packer: MaxRects bin-packing (Best Short Side Fit)
+for sprites of different sizes, in the Video tab's Spritesheet
+section (Packing combo) and on the command line
+(`pixel-forge sheet DIR --pack maxrects`). It packs sprites
+largest first into a sheet that grows to fit, up to
+`--max-size` (default 1024), and crops the sheet to the
+sprites it holds. Sprites are never rotated — rotating pixel
+art changes its look, so a sprite that fits only sideways does
+not fit. A sprite bigger than the cap refuses plainly naming
+the sprite and the cap.
+
+- **Trim** cuts each sprite to the bounding box of its
+  non-transparent pixels and records the cut insets, so a game
+  can put the sprite back where it was. A fully transparent
+  sprite trims to a 1 x 1 transparent tile and keeps its
+  placement — the frame count never changes silently.
+- **Padding** is a ring kept around every sprite (default 1 px,
+  the atlas convention): the gap between two sprites is twice
+  the padding, and the sheet edge carries one padding ring.
+- **Extrude** repeats each sprite's edge pixels outward into
+  its own padding ring (default 0), the standard fix for
+  bleeding when the atlas is scaled. It can never reach another
+  sprite — extrude larger than the padding is refused plainly.
+- **Multipack** spills to more sheets (`stem_0.png`,
+  `stem_1.png`, ...) when the sprites do not fit in one sheet
+  at the cap; every sprite is placed exactly once, on exactly
+  one sheet. Without it the packer refuses plainly naming the
+  count that did not fit and the cap.
+- **Dedupe** packs byte-identical sprites once (on the trimmed
+  pixels when trim is on); the other names become aliases of
+  the same rect, and the export reports the count. An aliased
+  frame's duration is the first occurrence's duration — the
+  atlas stores one rect per unique sprite, so duplicate frames
+  share the first one's timing.
+- **Pivots** (default center 0.5, 0.5) and optional **9-slice**
+  borders ride in the metadata, per sprite. The packer records
+  9-slice borders; it does not render 9-slice.
+
+The metadata format is new — `pixel-forge-atlas`, version 1 —
+and does not reuse the spritesheet format:
+
+```json
+{
+  "format": "pixel-forge-atlas",
+  "version": 1,
+  "packer": "maxrects-bssf",
+  "max_size": 1024,
+  "padding": 1,
+  "extrude": 0,
+  "trim": false,
+  "deduped": 1,
+  "fps": 8,
+  "sheets": [
+    {"file": "walk-atlas.png", "width": 96, "height": 64}
+  ],
+  "frames": [
+    {"name": "frame_001.png", "index": 0, "sheet": 0,
+     "x": 1, "y": 1, "w": 32, "h": 32,
+     "source_w": 32, "source_h": 32,
+     "trimmed": {"left": 0, "top": 0, "right": 0, "bottom": 0},
+     "pivot": [0.5, 0.5], "slice": null,
+     "aliases": ["frame_003.png"], "duration_ms": 125}
+  ]
+}
+```
+
+Rules the format keeps: frames run in input order, so animation
+frames stay in playback order; `x` and `y` are the sprite's
+top-left corner in its sheet (the `sheet` index says which PNG);
+`w` and `h` are the packed size — the trimmed size when trim is
+on, the source size otherwise — and `source_w`/`source_h` plus
+the `trimmed` insets say where the sprite sat in its source;
+`pivot` is the anchor point as fractions of the sprite (0.5, 0.5
+is the center); `slice` is the 9-slice borders `[left, top,
+right, bottom]` in pixels, or null; `aliases` names the sprites
+that share this rect. Durations and animation tags ride along
+from the Video tab, like the grid format. The atlas is an export
+format — there is no atlas loader, and the library still stores
+grid sheets.
 
 ## Engine-ready export
 

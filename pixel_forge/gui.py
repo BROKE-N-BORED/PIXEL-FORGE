@@ -59,6 +59,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup,
                                QVBoxLayout, QWidget)
 
 from . import __version__
+from .atlas import (DEFAULT_MAX_SIZE, DEFAULT_PADDING,
+                    build_atlas_metadata, pack_atlas, write_atlas)
 from .codeinput import CODE_EXTENSIONS, parse_paths
 from .editor import (distinct_colors, draw_line, draw_rect_outline,
                      flood_fill, line_points, pick_color, rect_points)
@@ -523,10 +525,19 @@ class SpritesheetDialog(QDialog):
     plays the animation FROM the sheet — the frames are cut back
     out with the metadata, so what plays is exactly what a game
     would play from the PNG + JSON pair. Export writes that pair.
+
+    The packer is the caller's choice (task 38): "grid" packs
+    the old way, "maxrects" packs through the atlas packer with
+    the caller's trim/padding/extrude settings. Under maxrects
+    the playback frames are cut per INPUT frame — a deduped
+    frame shares its twin's rect but keeps its own place in
+    the animation, so the count and the timing never change.
     """
 
     def __init__(self, parent, images, names, cols, padding, fps,
-                 default_name, durations=None, tags=None):
+                 default_name, durations=None, tags=None,
+                 pack="grid", trim=False,
+                 atlas_padding=DEFAULT_PADDING, extrude=0):
         super().__init__(parent)
         self.setWindowTitle("Spritesheet preview")
         self.resize(560, 660)
@@ -536,6 +547,10 @@ class SpritesheetDialog(QDialog):
         self.padding = padding
         self.fps = fps
         self.default_name = default_name
+        self.pack = pack
+        self.trim = trim
+        self.atlas_padding = atlas_padding
+        self.extrude = extrude
         # Per-frame durations + tags (task 34), when the caller
         # has them: the preview plays the metadata's own
         # duration_ms, and Export writes the same pair the Video
@@ -544,24 +559,60 @@ class SpritesheetDialog(QDialog):
         self.durations = (list(durations) if durations is not None
                           else None)
         self.tags = (list(tags) if tags is not None else None)
-        self.sheet, self.layout = pack_frames(
-            self.images, cols=cols, padding=padding)
-        frame_w, frame_h = (self.images[0].width(),
-                            self.images[0].height())
-        self.metadata = build_metadata(
-            "", self.names, frame_w, frame_h, self.layout, fps,
-            durations=durations, tags=tags)
-        self.frames = frames_from_sheet(self.sheet, self.metadata)
+        if pack == "maxrects":
+            result = pack_atlas(
+                list(zip(self.names, self.images)),
+                max_size=DEFAULT_MAX_SIZE, padding=atlas_padding,
+                extrude=extrude, trim=trim, multipack=False)
+            self.sheet = result["sheets"][0]
+            self.layout = None
+            self.atlas_result = result
+            self.metadata = build_atlas_metadata(
+                result, [""], fps=fps, durations=durations,
+                tags=tags)
+            # Playback runs over the INPUT frames, not the
+            # placed ones: an aliased frame is cut from the
+            # rect it shares, so a deduped frame still plays
+            # in its own slot at its own duration.
+            by_name = {}
+            for frame in result["frames"]:
+                by_name[frame["name"]] = frame
+                for alias in frame["aliases"]:
+                    by_name[alias] = frame
+            self.frames = [self.sheet.copy(
+                by_name[name]["x"], by_name[name]["y"],
+                by_name[name]["w"], by_name[name]["h"])
+                for name in self.names]
+        else:
+            self.sheet, self.layout = pack_frames(
+                self.images, cols=cols, padding=padding)
+            self.atlas_result = None
+            frame_w, frame_h = (self.images[0].width(),
+                                self.images[0].height())
+            self.metadata = build_metadata(
+                "", self.names, frame_w, frame_h, self.layout, fps,
+                durations=durations, tags=tags)
+            self.frames = frames_from_sheet(self.sheet,
+                                            self.metadata)
         self.current = 0
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._advance)
 
         layout = QVBoxLayout(self)
-        info = ("%d frames, %d x %d grid, sheet %d x %d, %s fps, "
-                "%d px padding"
-                % (len(self.images), self.layout["columns"],
-                   self.layout["rows"], self.sheet.width(),
-                   self.sheet.height(), fps, padding))
+        if pack == "maxrects":
+            deduped = self.atlas_result["deduped"]
+            info = ("%d frames, MaxRects atlas, sheet %d x %d, "
+                    "%s fps, %d px padding"
+                    % (len(self.images), self.sheet.width(),
+                       self.sheet.height(), fps, atlas_padding))
+            if deduped:
+                info += ", %d deduped" % deduped
+        else:
+            info = ("%d frames, %d x %d grid, sheet %d x %d, "
+                    "%s fps, %d px padding"
+                    % (len(self.images), self.layout["columns"],
+                       self.layout["rows"], self.sheet.width(),
+                       self.sheet.height(), fps, padding))
         self.info_label = QLabel(info)
         self.info_label.setWordWrap(True)
         layout.addWidget(self.info_label)
@@ -635,7 +686,13 @@ class SpritesheetDialog(QDialog):
     def _frame_duration(self, index):
         """How long one frame shows, from the metadata's own
         duration_ms (task 34) — the preview plays the real
-        timing, not the uniform fps."""
+        timing, not the uniform fps. Under maxrects the
+        metadata holds one entry per PLACED sprite, so a
+        deduped frame has no entry of its own — the playback
+        durations come from the caller's list instead, which
+        runs over the input frames."""
+        if self.pack == "maxrects" and self.durations is not None:
+            return self.durations[index]
         return self.metadata["frames"][index]["duration_ms"]
 
     def _advance(self):
@@ -662,21 +719,42 @@ class SpritesheetDialog(QDialog):
         if png_path.suffix.lower() != ".png":
             png_path = png_path.with_suffix(".png")
         meta_path = png_path.with_suffix(".json")
-        try:
-            write_sheet(self.images, self.names,
-                        str(png_path), str(meta_path),
-                        cols=self.cols, padding=self.padding,
-                        fps=self.fps, durations=self.durations,
-                        tags=self.tags)
-        except PixelForgeError as exc:
-            warn_dialog(self, "Could not export spritesheet", str(exc))
-            return
+        if self.pack == "maxrects":
+            try:
+                metadata, _files = write_atlas(
+                    self.images, self.names,
+                    str(png_path), str(meta_path),
+                    padding=self.atlas_padding,
+                    extrude=self.extrude, trim=self.trim,
+                    multipack=False, fps=self.fps,
+                    durations=self.durations, tags=self.tags)
+            except PixelForgeError as exc:
+                warn_dialog(self, "Could not export atlas", str(exc))
+                return
+            deduped = metadata["deduped"]
+            message = ("Exported atlas: %s, %s%s"
+                       % (plural(len(metadata["sheets"]), "sheet"),
+                          plural(len(self.images), "frame"),
+                          (", %d deduped" % deduped)
+                          if deduped else ""))
+        else:
+            try:
+                write_sheet(self.images, self.names,
+                            str(png_path), str(meta_path),
+                            cols=self.cols, padding=self.padding,
+                            fps=self.fps, durations=self.durations,
+                            tags=self.tags)
+            except PixelForgeError as exc:
+                warn_dialog(self, "Could not export spritesheet",
+                            str(exc))
+                return
+            message = ("Exported spritesheet: %d frames, %d x %d "
+                       "grid, %s"
+                       % (len(self.images), self.layout["columns"],
+                          self.layout["rows"], png_path.name))
         parent = self.parent()
         if parent is not None and hasattr(parent, "statusBar"):
-            parent.statusBar().showMessage(
-                "Exported spritesheet: %d frames, %d x %d grid, %s"
-                % (len(self.images), self.layout["columns"],
-                   self.layout["rows"], png_path.name))
+            parent.statusBar().showMessage(message)
             # The sheet's folder becomes the last-used export
             # folder, like every other export (task 22).
             if hasattr(parent, "_remember_export_dir"):
@@ -3347,6 +3425,60 @@ class MainWindow(QMainWindow):
         sheet_fps_row.addWidget(self.sheet_fps_spin)
         form.addLayout(sheet_fps_row)
 
+        # Atlas packing (task 38): MaxRects packs mixed-size
+        # sprites tight instead of a grid. Grid is the current
+        # behavior, so the combo starts there — that preserves
+        # the existing default, it is not a pre-selection the
+        # user must make. The atlas controls only apply to
+        # MaxRects and stay disabled under Grid; the grid
+        # columns and padding stay disabled under MaxRects.
+        sheet_pack_row = QHBoxLayout()
+        sheet_pack_row.addWidget(QLabel("Packing"))
+        self.sheet_pack_combo = QComboBox()
+        self.sheet_pack_combo.setToolTip(
+            "How the frames are packed — Grid lays same-size "
+            "frames in rows, MaxRects packs mixed sizes tight")
+        self.sheet_pack_combo.addItem("Grid", "grid")
+        self.sheet_pack_combo.addItem("MaxRects", "maxrects")
+        self.sheet_pack_combo.currentIndexChanged.connect(
+            self._on_sheet_pack_changed)
+        sheet_pack_row.addWidget(self.sheet_pack_combo)
+        form.addLayout(sheet_pack_row)
+
+        self.sheet_trim_check = QCheckBox("Trim transparent borders")
+        self.sheet_trim_check.setToolTip(
+            "Cut transparent borders off each frame before "
+            "packing — the cut is recorded in the metadata")
+        self.sheet_trim_check.setEnabled(False)
+        form.addWidget(self.sheet_trim_check)
+
+        sheet_atlas_padding_row = QHBoxLayout()
+        sheet_atlas_padding_row.addWidget(QLabel("Atlas padding"))
+        self.sheet_atlas_padding_spin = QSpinBox()
+        self.sheet_atlas_padding_spin.setRange(0, 64)
+        self.sheet_atlas_padding_spin.setValue(DEFAULT_PADDING)
+        self.sheet_atlas_padding_spin.setSuffix(" px")
+        self.sheet_atlas_padding_spin.setToolTip(
+            "Empty ring kept around every sprite in a MaxRects "
+            "atlas — the gap between two sprites is twice this")
+        self.sheet_atlas_padding_spin.setEnabled(False)
+        sheet_atlas_padding_row.addWidget(
+            self.sheet_atlas_padding_spin)
+        form.addLayout(sheet_atlas_padding_row)
+
+        sheet_extrude_row = QHBoxLayout()
+        sheet_extrude_row.addWidget(QLabel("Extrude"))
+        self.sheet_extrude_spin = QSpinBox()
+        self.sheet_extrude_spin.setRange(0, 16)
+        self.sheet_extrude_spin.setValue(0)
+        self.sheet_extrude_spin.setSuffix(" px")
+        self.sheet_extrude_spin.setToolTip(
+            "Repeat each sprite's edge pixels outward into the "
+            "padding — stops bleeding when the atlas is scaled")
+        self.sheet_extrude_spin.setEnabled(False)
+        sheet_extrude_row.addWidget(self.sheet_extrude_spin)
+        form.addLayout(sheet_extrude_row)
+
         self.sheet_preview_btn = QPushButton("Preview spritesheet")
         self.sheet_preview_btn.setToolTip(
             "Preview the spritesheet and play its animation")
@@ -4592,6 +4724,28 @@ class MainWindow(QMainWindow):
                 self.sheet_padding_spin.value(),
                 self.sheet_fps_spin.value())
 
+    def _sheet_pack_settings(self):
+        """(pack, trim, atlas padding, extrude) from the atlas
+        packing controls."""
+        return (self.sheet_pack_combo.currentData(),
+                self.sheet_trim_check.isChecked(),
+                self.sheet_atlas_padding_spin.value(),
+                self.sheet_extrude_spin.value())
+
+    def _on_sheet_pack_changed(self):
+        """The packing combo changed — the grid controls
+        (columns, padding) apply to Grid, the atlas controls
+        (trim, atlas padding, extrude) to MaxRects. Each set
+        stays disabled under the other packer, so a control
+        never looks live while its value is ignored."""
+        maxrects = (self.sheet_pack_combo.currentData()
+                    == "maxrects")
+        self.sheet_cols_combo.setEnabled(not maxrects)
+        self.sheet_padding_spin.setEnabled(not maxrects)
+        self.sheet_trim_check.setEnabled(maxrects)
+        self.sheet_atlas_padding_spin.setEnabled(maxrects)
+        self.sheet_extrude_spin.setEnabled(maxrects)
+
     def _kept_sheet_frames(self):
         """Kept frames as (images, names) for packing — the names
         are the export names (frame_001.png, ...), renumbered from
@@ -4613,8 +4767,11 @@ class MainWindow(QMainWindow):
 
     def export_spritesheet(self, png_path):
         """Pack the kept frames and write the PNG + JSON pair (the
-        JSON takes the PNG's name with .json). Returns True on
-        success; on failure shows a message box and returns False.
+        JSON takes the PNG's name with .json). Under MaxRects
+        the pair is an atlas — one PNG per sheet when the
+        frames spill (stem_0.png, stem_1.png) with one JSON
+        naming them all. Returns True on success; on failure
+        shows a message box and returns False.
         """
         kept = self._kept_indices()
         if not kept:
@@ -4625,6 +4782,26 @@ class MainWindow(QMainWindow):
         if path.suffix.lower() != ".png":
             path = path.with_suffix(".png")
         meta_path = path.with_suffix(".json")
+        pack, trim, atlas_padding, extrude = \
+            self._sheet_pack_settings()
+        if pack == "maxrects":
+            try:
+                metadata, _files = write_atlas(
+                    images, names, str(path), str(meta_path),
+                    padding=atlas_padding, extrude=extrude,
+                    trim=trim, multipack=True, fps=fps,
+                    durations=self._kept_durations(),
+                    tags=self.video_tags)
+            except PixelForgeError as exc:
+                warn_dialog(self, "Could not export atlas", str(exc))
+                return False
+            deduped = metadata["deduped"]
+            self.statusBar().showMessage(
+                "Exported atlas: %s, %s%s"
+                % (plural(len(metadata["sheets"]), "sheet"),
+                   plural(len(kept), "frame"),
+                   (", %d deduped" % deduped) if deduped else ""))
+            return True
         try:
             metadata = write_sheet(images, names, str(path),
                                    str(meta_path), cols=cols,
@@ -4654,12 +4831,16 @@ class MainWindow(QMainWindow):
             return
         images, names = self._kept_sheet_frames()
         cols, padding, fps = self._sheet_settings()
+        pack, trim, atlas_padding, extrude = \
+            self._sheet_pack_settings()
         try:
             dialog = SpritesheetDialog(
                 self, images, names, cols, padding, fps,
                 self._sheet_default_name(),
                 durations=self._kept_durations(),
-                tags=self.video_tags)
+                tags=self.video_tags,
+                pack=pack, trim=trim,
+                atlas_padding=atlas_padding, extrude=extrude)
         except PixelForgeError as exc:
             warn_dialog(self, "Could not preview spritesheet", str(exc))
             return

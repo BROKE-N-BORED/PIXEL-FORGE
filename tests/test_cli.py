@@ -570,6 +570,199 @@ class SheetCliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("invalid choice", err)
 
+    def test_sheet_pack_grid_is_the_default(self):
+        # Task 38: the grid path must be byte-identical to the
+        # v0.47 output — the PNG hash and the JSON below were
+        # recorded from the v0.47 CLI before the atlas work,
+        # on this exact fixture (6 solid 32 x 32 frames,
+        # --cols 3 --padding 2 --fps 12, out name ref-sheet.png).
+        import hashlib
+        import json
+        out_png = os.path.join(self.tmp, "ref-sheet.png")
+        code, _out, err = self._run(
+            ["sheet", self.frames, "--out", out_png,
+             "--pack", "grid", "--cols", "3", "--padding", "2",
+             "--fps", "12"])
+        self.assertEqual(code, 0, err)
+        with open(out_png, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+        self.assertEqual(
+            digest,
+            "a9502076a7e883d24e0c82fb09d2ff8b72ea0c14322d712fd516d"
+            "0dd48767542")
+        with open(os.path.join(self.tmp, "ref-sheet.json")) as handle:
+            meta = json.load(handle)
+        self.assertEqual(meta, {
+            "format": "pixel-forge-spritesheet", "version": 1,
+            "sheet": "ref-sheet.png",
+            "sheet_width": 100, "sheet_height": 66,
+            "frame_width": 32, "frame_height": 32,
+            "columns": 3, "rows": 2, "padding": 2, "fps": 12.0,
+            "frames": [
+                {"name": "frame_00%d.png" % i, "index": i - 1,
+                 "x": ((i - 1) % 3) * 34, "y": ((i - 1) // 3) * 34,
+                 "w": 32, "h": 32, "duration_ms": 83}
+                for i in range(1, 7)]})
+
+    def test_sheet_pack_maxrects(self):
+        # Task 38: --pack maxrects writes the atlas format,
+        # and --json reports the files, the sheet count, and
+        # the dedupe count.
+        import json
+        out_png = os.path.join(self.tmp, "atlas-sheet.png")
+        code, out, err = self._run(
+            ["sheet", self.frames, "--out", out_png,
+             "--pack", "maxrects", "--json"])
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["pack"], "maxrects")
+        self.assertEqual(payload["frames"], 6)
+        self.assertEqual(payload["sheets"], 1)
+        self.assertEqual(payload["deduped"], 0)
+        self.assertEqual(payload["files"], [
+            out_png, os.path.join(self.tmp, "atlas-sheet.json")])
+        with open(payload["files"][1]) as handle:
+            meta = json.load(handle)
+        self.assertEqual(meta["format"], "pixel-forge-atlas")
+        self.assertEqual(meta["packer"], "maxrects-bssf")
+        self.assertEqual(meta["padding"], 1)
+        self.assertEqual(meta["extrude"], 0)
+        self.assertFalse(meta["trim"])
+        self.assertEqual(len(meta["frames"]), 6)
+        self.assertEqual(
+            [f["name"] for f in meta["frames"]],
+            ["frame_00%d.png" % i for i in range(1, 7)])
+        for frame in meta["frames"]:
+            self.assertEqual(frame["duration_ms"], 125)
+            self.assertEqual(frame["pivot"], [0.5, 0.5])
+            self.assertIsNone(frame["slice"])
+
+    def test_sheet_pack_maxrects_mixed_sizes(self):
+        # The grid packer refuses mixed sizes; maxrects is the
+        # packer for them.
+        out_png = os.path.join(self.tmp, "mixed-atlas.png")
+        code, _out, err = self._run(
+            ["sheet", self.mixed, "--out", out_png,
+             "--pack", "maxrects"])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(out_png))
+
+    def test_sheet_pack_maxrects_trim_and_dedupe(self):
+        # A bordered frame trims to its content, and a
+        # byte-identical duplicate becomes an alias.
+        import json
+        from helpers import make_solid_image
+        from pixel_forge.image import Image, argb
+        folder = os.path.join(self.tmp, "trim-frames")
+        os.makedirs(folder)
+        bordered = Image(32, 32)
+        for y in range(8, 24):
+            for x in range(8, 24):
+                bordered.setPixel(x, y, argb(255, 0, 0))
+        write_image(bordered,
+                    os.path.join(folder, "frame_001.png"))
+        write_image(make_solid_image(16, 16, 0, 255, 0),
+                    os.path.join(folder, "frame_002.png"))
+        write_image(make_solid_image(16, 16, 0, 255, 0),
+                    os.path.join(folder, "frame_003.png"))
+        out_png = os.path.join(self.tmp, "trim-atlas.png")
+        code, out, err = self._run(
+            ["sheet", folder, "--out", out_png,
+             "--pack", "maxrects", "--trim"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("1 deduped", out)
+        with open(os.path.join(self.tmp, "trim-atlas.json")) as handle:
+            meta = json.load(handle)
+        self.assertTrue(meta["trim"])
+        self.assertEqual(meta["deduped"], 1)
+        frames = {f["name"]: f for f in meta["frames"]}
+        self.assertEqual((frames["frame_001.png"]["w"],
+                          frames["frame_001.png"]["h"]), (16, 16))
+        self.assertEqual(frames["frame_001.png"]["trimmed"],
+                         {"left": 8, "top": 8,
+                          "right": 8, "bottom": 8})
+        self.assertEqual(frames["frame_002.png"]["aliases"],
+                         ["frame_003.png"])
+
+    def test_sheet_pack_maxrects_multipack(self):
+        # Six 32 x 32 frames at a 64 x 64 cap: 4 fit per sheet,
+        # so 2 sheets with --multipack, and a plain refusal
+        # without it.
+        import json
+        out_png = os.path.join(self.tmp, "multi-atlas.png")
+        # Padding 0: each 32 x 32 frame is a 32 x 32 cell, so
+        # 4 fit per 64 x 64 sheet (with the default padding of
+        # 1 the cells are 34 x 34 and only 1 fits).
+        code, _out, err = self._run(
+            ["sheet", self.frames, "--out", out_png,
+             "--pack", "maxrects", "--max-size", "64",
+             "--padding", "0"])
+        self.assertEqual(code, 1)
+        self.assertIn("2 of 6", err)
+        self.assertIn("64 x 64", err)
+        self.assertIn("--multipack", err)
+        self.assertNotIn("Traceback", err)
+        code, out, err = self._run(
+            ["sheet", self.frames, "--out", out_png,
+             "--pack", "maxrects", "--max-size", "64",
+             "--padding", "0", "--multipack"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("2 sheets", out)
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "multi-atlas_0.png")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "multi-atlas_1.png")))
+        with open(os.path.join(self.tmp, "multi-atlas.json")) as handle:
+            meta = json.load(handle)
+        self.assertEqual(len(meta["sheets"]), 2)
+        self.assertEqual(len(meta["frames"]), 6)
+
+    def test_sheet_pack_maxrects_pivot_and_slice(self):
+        import json
+        out_png = os.path.join(self.tmp, "pivot-atlas.png")
+        code, _out, err = self._run(
+            ["sheet", self.frames, "--out", out_png,
+             "--pack", "maxrects", "--pivot", "0,1",
+             "--slice", "2,2,2,2"])
+        self.assertEqual(code, 0, err)
+        with open(os.path.join(self.tmp, "pivot-atlas.json")) as handle:
+            meta = json.load(handle)
+        for frame in meta["frames"]:
+            self.assertEqual(frame["pivot"], [0.0, 1.0])
+            self.assertEqual(frame["slice"], [2, 2, 2, 2])
+
+    def test_sheet_pack_maxrects_bad_flags_fail_cleanly(self):
+        for argv, needle in (
+                (["--pack", "maxrects", "--pivot", "1.5,0.5"],
+                 "--pivot"),
+                (["--pack", "maxrects", "--pivot", "0.5"],
+                 "--pivot"),
+                (["--pack", "maxrects", "--slice", "1,2,3"],
+                 "--slice"),
+                # The equals form: a bare "-1,0,0,0" after
+                # --slice looks like an option to argparse.
+                (["--pack", "maxrects", "--slice=-1,0,0,0"],
+                 "--slice"),
+                (["--pack", "maxrects", "--padding", "1",
+                  "--extrude", "2"], "extrude"),
+                (["--pack", "maxrects", "--max-size", "32"],
+                 "max_size"),
+                (["--pack", "maxrects", "--padding", "65"],
+                 "padding"),
+                (["--pack", "maxrects", "--format", "aseprite"],
+                 "--pack maxrects"),
+                (["--pack", "maxrects", "--cols", "3"], "--cols"),
+                (["--trim"], "--trim"),
+                (["--extrude", "1"], "--extrude"),
+                (["--multipack"], "--multipack"),
+                (["--pivot", "0,0"], "--pivot"),
+                (["--slice", "1,1,1,1"], "--slice")):
+            code, _out, err = self._run(
+                ["sheet", self.frames] + argv)
+            self.assertEqual(code, 1, argv)
+            self.assertIn(needle, err, argv)
+            self.assertNotIn("Traceback", err, argv)
+
 
 class LibraryCliTests(unittest.TestCase):
     @classmethod

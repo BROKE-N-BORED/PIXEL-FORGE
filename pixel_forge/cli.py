@@ -44,6 +44,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .atlas import (DEFAULT_MAX_SIZE, DEFAULT_PADDING, write_atlas)
 from .codeinput import parse_paths
 from .engine_export import (ENGINE_FORMATS, FORMAT_INFO, export_engine)
 from .imagegen import (DEFAULT_NEGATIVE, DEFAULT_SIZE, LCM_CFG,
@@ -79,6 +80,38 @@ def parse_size(text):
     raise PixelForgeError(
         "bad --size %r (use a number like 32, or WIDTHxHEIGHT like 64x48)"
         % text)
+
+
+def parse_pivot(text):
+    """Parse "X,Y" into a (x, y) pivot — each 0 to 1, 0.5, 0.5
+    is the center (task 38)."""
+    parts = [part.strip() for part in text.split(",")]
+    try:
+        if len(parts) == 2:
+            x, y = float(parts[0]), float(parts[1])
+            if 0 <= x <= 1 and 0 <= y <= 1:
+                return x, y
+    except ValueError:
+        pass
+    raise PixelForgeError(
+        "bad --pivot %r (use two numbers between 0 and 1, like "
+        "0.5,0.5)" % text)
+
+
+def parse_slice(text):
+    """Parse "L,T,R,B" into 9-slice border insets — four whole
+    numbers, 0 or more (task 38)."""
+    parts = [part.strip() for part in text.split(",")]
+    try:
+        if len(parts) == 4:
+            values = [int(part) for part in parts]
+            if all(value >= 0 for value in values):
+                return tuple(values)
+    except ValueError:
+        pass
+    raise PixelForgeError(
+        "bad --slice %r (use four whole numbers of 0 or more, "
+        "like 4,4,4,4)" % text)
 
 
 def _add_pixelize_args(parser):
@@ -262,22 +295,56 @@ def build_parser():
                         "<prompt-slug>-prompt in the current folder)")
 
     sheet = sub.add_parser(
-        "sheet", help="pack a folder of same-size PNG frames into "
+        "sheet", help="pack a folder of PNG frames into "
         "a spritesheet PNG + metadata JSON")
-    sheet.add_argument("dir", help="folder of PNG frames, all the "
-                       "same size (frame_001.png, ...)")
+    sheet.add_argument("dir", help="folder of PNG frames "
+                       "(frame_001.png, ...)")
     sheet.add_argument("--out", default=None,
                        help="output sheet PNG (default: "
                        "<folder-stem>-sheet.png next to the folder)")
     sheet.add_argument("--meta", default=None,
                        help="output metadata JSON (default: the "
                        "--out name with .json)")
+    sheet.add_argument("--pack", default="grid",
+                       choices=["grid", "maxrects"],
+                       help="packer: grid (same-size frames in a "
+                       "grid, the default) or maxrects (mixed "
+                       "sizes, packed tight — see --trim, "
+                       "--extrude, --max-size, --multipack)")
     sheet.add_argument("--cols", type=int, default=0,
                        help="columns in the grid, 0 = automatic "
-                       "square-ish grid (default: 0)")
-    sheet.add_argument("--padding", type=int, default=0,
+                       "square-ish grid (default: 0; grid only)")
+    # --padding's default depends on the packer (0 for grid,
+    # 1 for maxrects), so the default here is None and
+    # cmd_sheet resolves it — a shared default would change
+    # one of the two paths.
+    sheet.add_argument("--padding", type=int, default=None,
                        help="gap between frames in pixels "
-                       "(default: 0)")
+                       "(default: 0 for grid, 1 for maxrects; "
+                       "0-64 under maxrects)")
+    sheet.add_argument("--trim", action="store_true",
+                       help="cut transparent borders off each "
+                       "frame before packing (maxrects only)")
+    sheet.add_argument("--extrude", type=int, default=0,
+                       help="repeat each sprite's edge pixels "
+                       "outward by N pixels into the padding "
+                       "(maxrects only, 0-16, never more than "
+                       "the padding)")
+    sheet.add_argument("--max-size", type=int,
+                       default=DEFAULT_MAX_SIZE,
+                       help="largest side of one atlas sheet in "
+                       "pixels (maxrects only, 64-4096, "
+                       "default: %d)" % DEFAULT_MAX_SIZE)
+    sheet.add_argument("--multipack", action="store_true",
+                       help="spill to more sheets (stem_0.png, "
+                       "stem_1.png, ...) when the sprites do not "
+                       "fit in one sheet (maxrects only)")
+    sheet.add_argument("--pivot", default="0.5,0.5",
+                       help="pivot for every frame, X,Y between 0 "
+                       "and 1 (maxrects only, default: 0.5,0.5)")
+    sheet.add_argument("--slice", default=None,
+                       help="9-slice borders for every frame, "
+                       "L,T,R,B in pixels (maxrects only)")
     sheet.add_argument("--fps", type=float, default=DEFAULT_FPS,
                        help="playback fps recorded in the metadata "
                        "(default: %s)" % DEFAULT_FPS)
@@ -611,10 +678,44 @@ def cmd_prompt(args):
 def cmd_sheet(args):
     if args.cols < 0:
         raise PixelForgeError("--cols must be 0 (automatic) or more")
-    if args.padding < 0:
+    if args.padding is not None and args.padding < 0:
         raise PixelForgeError("--padding cannot be negative")
     if args.fps <= 0:
         raise PixelForgeError("fps must be greater than 0")
+    pack = getattr(args, "pack", "grid") or "grid"
+    fmt = getattr(args, "format", "native") or "native"
+    # The packer flags belong to one packer each — passing a
+    # maxrects flag with the grid packer (or --cols with
+    # maxrects) refuses plainly instead of silently ignoring
+    # what the user asked for.
+    if pack == "grid":
+        for flag, changed in (
+                ("--trim", bool(getattr(args, "trim", False))),
+                ("--extrude", getattr(args, "extrude", 0) != 0),
+                ("--max-size",
+                 getattr(args, "max_size", DEFAULT_MAX_SIZE)
+                 != DEFAULT_MAX_SIZE),
+                ("--multipack",
+                 bool(getattr(args, "multipack", False))),
+                ("--pivot",
+                 getattr(args, "pivot", "0.5,0.5") != "0.5,0.5"),
+                ("--slice", getattr(args, "slice", None)
+                 is not None)):
+            if changed:
+                raise PixelForgeError(
+                    "%s only applies to --pack maxrects" % flag)
+    else:
+        if args.cols != 0:
+            raise PixelForgeError(
+                "--cols only applies to --pack grid")
+        if fmt != "native":
+            raise PixelForgeError(
+                "--pack maxrects only applies to the native "
+                "format (engine formats pack a grid)")
+    # Padding resolves per packer: grid keeps its 0, maxrects
+    # takes the atlas convention of 1.
+    padding = (args.padding if args.padding is not None
+               else (DEFAULT_PADDING if pack == "maxrects" else 0))
     folder = Path(args.dir)
     out = args.out
     if out is None:
@@ -622,7 +723,6 @@ def cmd_sheet(args):
     frames = load_frame_dir(folder)
     names = [name for name, _ in frames]
     images = [image for _, image in frames]
-    fmt = getattr(args, "format", "native") or "native"
     if fmt != "native":
         # Engine formats (task 36): the files are written next
         # to --out, named from its stem. A folder of PNGs
@@ -635,7 +735,7 @@ def cmd_sheet(args):
                 "JSON file")
         files = export_engine(fmt, images, names, out_path.parent,
                               out_path.stem, cols=args.cols or None,
-                              padding=args.padding, fps=args.fps,
+                              padding=padding, fps=args.fps,
                               meta_path=args.meta)
         _emit_json(args, {"format": fmt,
                           "files": [str(p) for p in files],
@@ -647,9 +747,42 @@ def cmd_sheet(args):
     meta = args.meta
     if meta is None:
         meta = str(Path(out).with_suffix(".json"))
+    if pack == "maxrects":
+        # A folder of PNGs carries no per-frame durations, so
+        # every frame gets the uniform fps duration (the same
+        # as the engine formats). The pivot and 9-slice flags
+        # apply to every frame.
+        pivot = parse_pivot(getattr(args, "pivot", "0.5,0.5"))
+        borders = None
+        if getattr(args, "slice", None) is not None:
+            borders = parse_slice(args.slice)
+        pivots = {name: pivot for name in names}
+        slices = ({name: borders for name in names}
+                  if borders is not None else None)
+        metadata, files = write_atlas(
+            images, names, out, meta,
+            max_size=getattr(args, "max_size", DEFAULT_MAX_SIZE),
+            padding=padding, extrude=getattr(args, "extrude", 0),
+            trim=bool(getattr(args, "trim", False)),
+            multipack=bool(getattr(args, "multipack", False)),
+            pivots=pivots, slices=slices, fps=args.fps)
+        _emit_json(args, {"pack": "maxrects",
+                          "files": files,
+                          "frames": len(frames),
+                          "sheets": len(metadata["sheets"]),
+                          "deduped": metadata["deduped"],
+                          "fps": args.fps})
+        deduped = metadata["deduped"]
+        _info(args, "%d frames, %s, %s — wrote %s"
+              % (len(frames),
+                 plural(len(metadata["sheets"]), "sheet"),
+                 ("%d deduped" % deduped if deduped
+                  else "nothing deduped"),
+                 ", ".join(Path(p).name for p in files)))
+        return 0
     metadata = write_sheet(images, names, out, meta,
                            cols=args.cols or None,
-                           padding=args.padding, fps=args.fps)
+                           padding=padding, fps=args.fps)
     _emit_json(args, {"sheet": str(out), "meta": str(meta),
                       "frames": len(frames),
                       "columns": metadata["columns"],

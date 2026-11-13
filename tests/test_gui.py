@@ -939,6 +939,166 @@ class SpritesheetGuiTests(unittest.TestCase):
             dialog.close()
             dialog.deleteLater()
 
+    def test_atlas_controls_present_with_defaults(self):
+        # Task 38: the packing combo starts on Grid — that IS
+        # the current behavior, not a pre-selection — and the
+        # atlas controls start disabled with the atlas
+        # defaults (trim off, padding 1, extrude 0).
+        packs = [self.win.sheet_pack_combo.itemData(i)
+                 for i in range(self.win.sheet_pack_combo.count())]
+        self.assertEqual(packs, ["grid", "maxrects"])
+        self.assertEqual(self.win.sheet_pack_combo.currentData(),
+                         "grid")
+        self.assertFalse(self.win.sheet_trim_check.isChecked())
+        self.assertFalse(self.win.sheet_trim_check.isEnabled())
+        self.assertEqual((self.win.sheet_atlas_padding_spin.minimum(),
+                          self.win.sheet_atlas_padding_spin.maximum()),
+                         (0, 64))
+        self.assertEqual(self.win.sheet_atlas_padding_spin.value(), 1)
+        self.assertFalse(
+            self.win.sheet_atlas_padding_spin.isEnabled())
+        self.assertEqual((self.win.sheet_extrude_spin.minimum(),
+                          self.win.sheet_extrude_spin.maximum()),
+                         (0, 16))
+        self.assertEqual(self.win.sheet_extrude_spin.value(), 0)
+        self.assertFalse(self.win.sheet_extrude_spin.isEnabled())
+        self.assertTrue(self.win.sheet_cols_combo.isEnabled())
+        self.assertTrue(self.win.sheet_padding_spin.isEnabled())
+
+    def test_pack_combo_toggles_control_sets(self):
+        # Grid controls live under Grid, atlas controls under
+        # MaxRects — each set is disabled under the other
+        # packer, so a control never looks live while its value
+        # is ignored.
+        index = self.win.sheet_pack_combo.findData("maxrects")
+        self.win.sheet_pack_combo.setCurrentIndex(index)
+        self.assertFalse(self.win.sheet_cols_combo.isEnabled())
+        self.assertFalse(self.win.sheet_padding_spin.isEnabled())
+        self.assertTrue(self.win.sheet_trim_check.isEnabled())
+        self.assertTrue(
+            self.win.sheet_atlas_padding_spin.isEnabled())
+        self.assertTrue(self.win.sheet_extrude_spin.isEnabled())
+        index = self.win.sheet_pack_combo.findData("grid")
+        self.win.sheet_pack_combo.setCurrentIndex(index)
+        self.assertTrue(self.win.sheet_cols_combo.isEnabled())
+        self.assertTrue(self.win.sheet_padding_spin.isEnabled())
+        self.assertFalse(self.win.sheet_trim_check.isEnabled())
+        self.assertFalse(
+            self.win.sheet_atlas_padding_spin.isEnabled())
+        self.assertFalse(self.win.sheet_extrude_spin.isEnabled())
+
+    def test_maxrects_export_writes_atlas_meta(self):
+        import json
+        self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
+        total = len(self.win.video_frames)
+        index = self.win.sheet_pack_combo.findData("maxrects")
+        self.win.sheet_pack_combo.setCurrentIndex(index)
+        png = os.path.join(self.tmp, "atlas-sheet.png")
+        self.assertTrue(self.win.export_spritesheet(png))
+        meta_path = os.path.join(self.tmp, "atlas-sheet.json")
+        self.assertTrue(os.path.isfile(png))
+        self.assertTrue(os.path.isfile(meta_path))
+        with open(meta_path) as handle:
+            meta = json.load(handle)
+        self.assertEqual(meta["format"], "pixel-forge-atlas")
+        self.assertEqual(meta["packer"], "maxrects-bssf")
+        self.assertEqual(meta["padding"], 1)
+        self.assertEqual(len(meta["frames"]), total)
+        self.assertEqual(meta["frames"][0]["name"], "frame_001.png")
+        self.assertEqual([f["duration_ms"] for f in meta["frames"]],
+                         [125] * total)
+        self.assertEqual(meta["sheets"][0]["file"],
+                         "atlas-sheet.png")
+        self.assertIn("Exported atlas: 1 sheet",
+                      self.win.statusBar().currentMessage())
+        self.assertIn("%d frames" % total,
+                      self.win.statusBar().currentMessage())
+
+    def test_maxrects_export_carries_durations_and_tags(self):
+        import json
+        self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
+        self.win.video_durations[0] = 500
+        self.assertTrue(self.win._add_video_tag("walk", 0, 3))
+        index = self.win.sheet_pack_combo.findData("maxrects")
+        self.win.sheet_pack_combo.setCurrentIndex(index)
+        png = os.path.join(self.tmp, "timed-atlas.png")
+        self.assertTrue(self.win.export_spritesheet(png))
+        with open(os.path.join(self.tmp, "timed-atlas.json")) as handle:
+            meta = json.load(handle)
+        self.assertEqual(meta["frames"][0]["duration_ms"], 500)
+        self.assertEqual(meta["frames"][1]["duration_ms"], 125)
+        self.assertEqual(meta["tags"],
+                         [{"name": "walk", "from": 0, "to": 3}])
+
+    def test_grid_export_unchanged_with_pack_controls(self):
+        # The default is still Grid, and a grid export with the
+        # packing controls present writes the old format with
+        # the old status message.
+        import json
+        self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
+        self.assertEqual(self.win.sheet_pack_combo.currentData(),
+                         "grid")
+        png = os.path.join(self.tmp, "still-grid.png")
+        self.assertTrue(self.win.export_spritesheet(png))
+        with open(os.path.join(self.tmp, "still-grid.json")) as handle:
+            meta = json.load(handle)
+        self.assertEqual(meta["format"], "pixel-forge-spritesheet")
+        self.assertIn("grid",
+                      self.win.statusBar().currentMessage())
+
+    def test_preview_dialog_maxrects_shows_packed_sheet(self):
+        from pixel_forge.gui import SpritesheetDialog
+        self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video())
+        images, names = self.win._kept_sheet_frames()
+        durations = self.win._kept_durations()
+        dialog = SpritesheetDialog(
+            self.win, images, names, None, 0, 8,
+            os.path.join(self.tmp, "atlas.png"),
+            durations=durations, pack="maxrects",
+            atlas_padding=1, extrude=0)
+        try:
+            self.assertEqual(dialog.metadata["format"],
+                             "pixel-forge-atlas")
+            self.assertFalse(dialog.sheet.isNull())
+            self.assertIn("MaxRects atlas",
+                          dialog.info_label.text())
+            # Playback runs over the input frames — one per
+            # kept frame, at the input durations.
+            self.assertEqual(len(dialog.frames), len(images))
+            self.assertEqual(dialog._frame_duration(0), 125)
+            dialog._on_play_pause()
+            self.assertEqual(dialog.timer.interval(), 125)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+
+    def test_preview_dialog_maxrects_keeps_deduped_frames(self):
+        # Two identical frames dedupe to one rect in the atlas,
+        # but the preview still plays both, in their own slots.
+        from pixel_forge.gui import SpritesheetDialog
+        frames = [make_solid_image(32, 32, 255, 0, 0),
+                  make_solid_image(32, 32, 255, 0, 0),
+                  make_solid_image(32, 32, 0, 255, 0)]
+        names = ["a.png", "b.png", "c.png"]
+        dialog = SpritesheetDialog(
+            self.win, frames, names, None, 0, 8, "atlas.png",
+            durations=[125, 500, 250], pack="maxrects")
+        try:
+            self.assertEqual(len(dialog.metadata["frames"]), 2)
+            self.assertEqual(
+                dialog.metadata["frames"][0]["aliases"], ["b.png"])
+            self.assertEqual(len(dialog.frames), 3)
+            self.assertEqual(dialog._frame_duration(0), 125)
+            self.assertEqual(dialog._frame_duration(1), 500)
+            self.assertEqual(dialog._frame_duration(2), 250)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+
 
 class PromptGuiTests(unittest.TestCase):
     """Prompt tab — generation runs against the fake sd-cli, so

@@ -1,5 +1,83 @@
 # Pixel Forge changelog
 
+## 0.48 — 2026-11-13
+
+Proper atlas packing — task-list item #38:
+
+- New stdlib-only module pixel_forge/atlas.py: MaxRects
+  bin-packing (Best Short Side Fit) for mixed-size sprites,
+  alongside the grid packer — the grid path is untouched and
+  the `sheet` CLI without --pack is byte-identical to v0.47
+  (pinned by a test against the PNG hash + JSON recorded from
+  the v0.47 CLI). Sprites are never rotated — rotating pixel
+  art changes its look, so a sprite that fits only sideways
+  does not fit. Sprites place largest first; the frames list
+  keeps input order, so animation frames stay in playback
+  order. The sheet grows to fit up to --max-size (default
+  1024) and is cropped to the union of its cells.
+- Trim cuts each sprite to the bounding box of its
+  non-transparent pixels and records the insets, so a game can
+  put the sprite back where it was. A fully transparent sprite
+  trims to a 1 x 1 transparent tile and KEEPS its placement —
+  the frame count never changes silently.
+- Padding is a ring kept around every sprite (default 1, the
+  atlas convention): the gap between two sprites is twice the
+  padding and the sheet edge carries one padding ring. Extrude
+  repeats each sprite's edge pixels outward into its own ring
+  (default 0, never more than the padding — extrude past the
+  padding refuses plainly), the standard fix for bleeding when
+  the atlas is scaled; it can never reach another sprite.
+- Multipack spills to more sheets (stem_0.png, stem_1.png,
+  ...) when the sprites do not fit in one sheet at the cap;
+  every sprite is placed exactly once, on exactly one sheet.
+  Without --multipack the packer refuses plainly naming the
+  count that did not fit and the cap. A sprite bigger than the
+  cap refuses naming the sprite and the cap.
+- Dedupe packs byte-identical sprites once (on the trimmed
+  pixels when trim is on); the other names become aliases of
+  the same rect, and the result reports the count. An aliased
+  frame's duration is the first occurrence's duration — the
+  atlas stores one rect per unique sprite, so duplicate frames
+  share the first one's timing.
+- Pivots (default center 0.5, 0.5) and optional 9-slice
+  borders ride in the metadata, per sprite. The packer records
+  9-slice borders; it does not render 9-slice.
+- New metadata format `pixel-forge-atlas` version 1 (the
+  `pixel-forge-spritesheet` format is not reused or broken):
+  packer name, settings, the sheets list (one PNG per sheet),
+  and the frames list with sheet index, rect, source size,
+  trim insets, pivot, 9-slice borders, aliases, and duration.
+  The JSON write is atomic. Durations and animation tags ride
+  along from the Video tab, like the grid format.
+- CLI: `pixel-forge sheet DIR` gains --pack {grid,maxrects}
+  (default grid), --trim, --padding (default 0 for grid, 1
+  for maxrects), --extrude, --max-size, --multipack, --pivot,
+  --slice. Under maxrects the meta JSON is the atlas format;
+  --json reports the written files, the sheet count, and the
+  dedupe count. A maxrects flag with the grid packer (or
+  --cols with maxrects, or --pack maxrects with an engine
+  format) refuses plainly instead of silently ignoring what
+  was asked for.
+- GUI: the Video tab's Spritesheet section gains a Packing
+  combo (Grid / MaxRects, starting on Grid — that IS the
+  current behavior, not a pre-selection), a Trim checkbox (off
+  by default), an Atlas padding spin (0-64, default 1), and an
+  Extrude spin (0-16, default 0). The grid controls stay
+  disabled under MaxRects and the atlas controls under Grid.
+  Export spritesheet routes through the atlas packer when
+  MaxRects is picked (multipack on, so a big set writes
+  stem_0/stem_1 PNGs with one JSON naming them all) and the
+  status bar names what was written ("Exported atlas: 2
+  sheets, 16 frames, 3 deduped"). The preview dialog shows the
+  packed sheet either way and plays the animation from it —
+  under maxrects a deduped frame still plays in its own slot
+  at its own duration.
+- Deliberately not done: no rotation; no atlas loader (the
+  atlas is an export format — the library still stores grid
+  sheets); the packing controls are not preset fields and
+  have no undo (export settings, like the engine export);
+  the engine exporters still pack a grid.
+
 ## 0.47 — 2026-11-13
 
 Tileset / autotile tools — task-list item #37:
