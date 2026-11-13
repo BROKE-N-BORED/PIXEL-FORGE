@@ -114,12 +114,35 @@ it keeps them and prints the way to remove them by hand.
   the strip; Ctrl+click and Shift+click select several at once
   (Keep selected / Drop selected act on the selection), and frames
   drag to reorder — the export, the sheet, and the playback all
-  follow the strip order. The Spritesheet section packs the kept
-  frames into one sheet PNG + a metadata JSON: pick the columns
-  (Auto makes a square-ish grid), the padding between frames, and
-  the playback fps, then Preview spritesheet to see the sheet and
-  play the animation from it before you export, or Export
-  spritesheet to write the pair straight away.
+  follow the strip order. Every frame has its own duration in
+  milliseconds: a new import starts each frame at 1000 / Sheet
+  fps (125 ms at 8 fps), and the Frame duration spin box sets
+  the current frame's duration (10–5000 ms) — a hold frame is
+  just a long duration. Changing the Preview fps or the Sheet
+  fps resets every frame to the new speed — either fps is the
+  base speed, and the spin fine-tunes single frames on top of
+  it. Durations follow their frames through
+  reorder and keep/drop, and land in the sheet JSON and in GIF
+  export. The scrubber under the preview jumps to any kept
+  frame (dragging it pauses playback), and Onion skin ghosts
+  the previous frame behind the current one at about 40% so
+  the motion between frames is visible — preview only, exports
+  use the plain frames. Animation tags name frame ranges in
+  the kept order (walk/idle/attack sets in one sheet): Add a
+  tag with a name and from/to frames, Play tag plays just that
+  range (looping within it when Loop is on), Delete removes
+  it. Tags are positions, so a reorder moves frames under a
+  tag and a keep/drop shortens or drops tags that run out of
+  frames; a new extraction clears them. The Spritesheet section
+  packs the kept frames into one sheet PNG + a metadata JSON:
+  pick the columns (Auto makes a square-ish grid), the padding
+  between frames, and the playback fps, then Preview spritesheet
+  to see the sheet and play the animation from it — at the
+  frames' own durations — before you export, or Export
+  spritesheet to write the pair straight away. Export GIF
+  writes the kept frames (or the selected tag's range) as an
+  animated GIF with the per-frame durations, looping forever;
+  it needs ffmpeg, the same as video import.
 - **Prompt tab:** type what you want (and what to avoid), press
   Generate, and 3 candidates appear in the strip — each takes a
   few minutes on CPU, and the window stays usable while they
@@ -393,7 +416,10 @@ plays them at the given durations. Nothing to guess:
     {"name": "frame_001.png", "index": 0, "x": 0, "y": 0,
      "w": 32, "h": 32, "duration_ms": 125},
     {"name": "frame_002.png", "index": 1, "x": 32, "y": 0,
-     "w": 32, "h": 32, "duration_ms": 125}
+     "w": 32, "h": 32, "duration_ms": 500}
+  ],
+  "tags": [
+    {"name": "walk", "from": 0, "to": 1}
   ]
 }
 ```
@@ -401,9 +427,17 @@ plays them at the given durations. Nothing to guess:
 Rules the format keeps: frames run left to right, top to bottom, in
 playback order; `x` and `y` are the frame's top-left corner in the
 PNG; padding is the gap *between* frames only, so frame 0 always
-starts at (0, 0); every frame's `duration_ms` is 1000 / fps rounded
-to the nearest millisecond; the sheet background, the padding gaps,
-and any unused cells in a partial last row are all transparent.
+starts at (0, 0); every frame's `duration_ms` is its own duration
+in milliseconds — 1000 / fps rounded to the nearest millisecond
+when every frame shares the sheet fps, or the per-frame duration
+set on the Video tab when they differ; the sheet background, the
+padding gaps, and any unused cells in a partial last row are all
+transparent. `tags` is optional and only present when the sheet
+has animation tags: each tag is a name plus `from`/`to`, 0-based
+positions into the frames list in playback order, naming a set
+(walk/idle/attack) inside the one sheet. Names are unique, and
+`from` never comes after `to`. Older metadata without `tags`
+loads unchanged.
 
 ## Library folder and preset format
 

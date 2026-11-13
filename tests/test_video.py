@@ -431,5 +431,187 @@ class VideoProbeTests(unittest.TestCase):
         self.assertIn(len(frames), (15, 16))
 
 
+class OnionBlendTests(unittest.TestCase):
+    """Task 34: onion skinning is a pure blend — no ffmpeg, no Qt."""
+
+    def _frame(self, values):
+        from pixel_forge.image import Image
+        image = Image(len(values), 1)
+        for index, value in enumerate(values):
+            image.setPixel(index, 0, value)
+        return image
+
+    def test_opaque_frames_mix_60_40(self):
+        # Video frames are opaque, so a plain "over" composite
+        # would hide the ghost entirely — the colors mix instead.
+        out = video_mod.onion_blend(
+            self._frame([0xFFFF0000]),
+            self._frame([0xFF0000FF]))
+        # R = 255 * 153 // 255 = 153, B = 255 * 102 // 255 = 102.
+        self.assertEqual(out.pixel(0, 0), 0xFF990066)
+
+    def test_transparent_current_shows_ghost_at_40_percent(self):
+        out = video_mod.onion_blend(
+            self._frame([0x00000000]),
+            self._frame([0xFF0000FF]))
+        # 255 * 102 // 255 = 102 alpha.
+        self.assertEqual(out.pixel(0, 0), 0x660000FF)
+
+    def test_mostly_opaque_current_mixes(self):
+        out = video_mod.onion_blend(
+            self._frame([0xC0FF0000]),
+            self._frame([0xFF0000FF]))
+        value = out.pixel(0, 0)
+        alpha = (value >> 24) & 0xFF
+        # 192 + 102 * 63 // 255 = 217.
+        self.assertEqual(alpha, 217)
+        # Mostly red (the current frame), some blue (the ghost).
+        self.assertGreater((value >> 16) & 0xFF,
+                           value & 0xFF)
+        self.assertGreater(value & 0xFF, 0)
+
+    def test_nearly_transparent_pixel_no_crash(self):
+        # Alpha 1 rounds both weights to 0, but the pixel still
+        # has a trace of alpha — black at that alpha, never a
+        # division by zero.
+        out = video_mod.onion_blend(
+            self._frame([0x01FF0000]),
+            self._frame([0x00000000]))
+        self.assertEqual(out.pixel(0, 0), 0x01000000)
+
+    def test_inputs_untouched(self):
+        current = self._frame([0x80FF0000])
+        previous = self._frame([0xFF0000FF])
+        video_mod.onion_blend(current, previous)
+        self.assertEqual(current.pixel(0, 0), 0x80FF0000)
+        self.assertEqual(previous.pixel(0, 0), 0xFF0000FF)
+
+    def test_mismatched_sizes_fail_plainly(self):
+        from pixel_forge.image import Image
+        with self.assertRaises(PixelForgeError) as ctx:
+            video_mod.onion_blend(Image(4, 4), Image(8, 4))
+        self.assertIn("same size", str(ctx.exception))
+
+
+@unittest.skipUnless(HAS_FFMPEG, "ffmpeg not installed")
+class GifExportTests(unittest.TestCase):
+    """Task 34: GIF export through real ffmpeg — frame count,
+    per-frame delays, total duration, and transparency."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def _frames(self, colors):
+        from pixel_forge.image import Image
+        frames = []
+        for color in colors:
+            image = Image(16, 16)
+            image.fill(color)
+            frames.append(image)
+        return frames
+
+    def _frame_times(self, gif):
+        """Per-frame (pts_time, duration) from ffprobe."""
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_frames",
+             "-of", "csv=p=0", gif],
+            capture_output=True, text=True, timeout=60)
+        times = []
+        for line in proc.stdout.splitlines():
+            # CSV fields: media_type, stream_index, key_frame,
+            # pkt_pts, pkt_pts_time, pkt_dts, ...
+            # pkt_duration_time is field 10.
+            fields = line.split(",")
+            times.append((float(fields[4]), float(fields[10])))
+        return times
+
+    def test_gif_frame_count_and_delays(self):
+        frames = self._frames([0xFFFF0000, 0xFF00FF00, 0xFF0000FF])
+        gif = os.path.join(self.tmp, "anim.gif")
+        video_mod.write_gif(frames, [125, 500, 250], gif)
+        self.assertTrue(os.path.isfile(gif))
+        times = self._frame_times(gif)
+        # The last frame is written twice (the concat demuxer
+        # drops the last file's duration otherwise), so a 3-frame
+        # animation has 4 frames in the file.
+        self.assertEqual(len(times), 4)
+        # GIF delays are hundredths of a second, so 125 ms lands
+        # as 0.12 and 500 ms as 0.52 (ffmpeg rounds up).
+        self.assertAlmostEqual(times[0][1], 0.12, delta=0.02)
+        self.assertAlmostEqual(times[1][1], 0.52, delta=0.02)
+        # The repeated last frame pair shows for the true
+        # duration: 0.21 + 0.04 = 0.25.
+        self.assertAlmostEqual(times[2][1] + times[3][1], 0.25,
+                               delta=0.02)
+        # Total duration matches the sum of the durations.
+        total = times[-1][0] + times[-1][1]
+        self.assertAlmostEqual(total, 0.875, delta=0.03)
+
+    def test_gif_loops_forever(self):
+        frames = self._frames([0xFFFF0000, 0xFF00FF00])
+        gif = os.path.join(self.tmp, "loop.gif")
+        video_mod.write_gif(frames, [125, 125], gif)
+        with open(gif, "rb") as handle:
+            data = handle.read()
+        # The NETSCAPE2.0 application extension carries the loop
+        # count as two little-endian bytes after the 0x03 0x01
+        # sub-block header; 0 means loop forever. ffprobe does
+        # not expose it, so read the bytes directly.
+        marker = data.find(b"NETSCAPE2.0")
+        self.assertNotEqual(marker, -1)
+        count = data[marker + 13] | (data[marker + 14] << 8)
+        self.assertEqual(count, 0)
+
+    def test_gif_preserves_transparency(self):
+        # One red pixel in a transparent frame: the hardest case
+        # for the GIF encoder — its default picture offsetting
+        # crops a thin frame to a 1x1 transparent block and the
+        # pixel is lost (write_gif turns offsetting off).
+        from pixel_forge.image import Image
+        frame = Image(16, 16)
+        frame.fill(0x00000000)
+        frame.setPixel(0, 0, 0xFFFF0000)
+        gif = os.path.join(self.tmp, "clear.gif")
+        video_mod.write_gif([frame], [125], gif)
+        # Decode frame 0 back to PNG with ffmpeg (load_image
+        # reads only PNG without PySide6), then check the pixels.
+        png = os.path.join(self.tmp, "clear-frame0.png")
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", gif,
+                        "-frames:v", "1", png],
+                       check=True, timeout=60)
+        image = load_image(png)
+        self.assertEqual(image.pixel(0, 0), 0xFFFF0000)
+        self.assertEqual((image.pixel(8, 8) >> 24) & 0xFF, 0)
+
+    def test_write_gif_refuses_without_ffmpeg(self):
+        frames = self._frames([0xFFFF0000])
+        with mock.patch.object(video_mod, "find_ffmpeg",
+                               return_value=None):
+            with self.assertRaises(PixelForgeError) as ctx:
+                video_mod.write_gif(
+                    frames, [125], os.path.join(self.tmp, "x.gif"))
+        self.assertIn("sudo apt install ffmpeg", str(ctx.exception))
+
+    def test_write_gif_validation(self):
+        frames = self._frames([0xFFFF0000, 0xFF00FF00])
+        gif = os.path.join(self.tmp, "x.gif")
+        with self.assertRaises(PixelForgeError):
+            video_mod.write_gif([], [], gif)
+        with self.assertRaises(PixelForgeError) as ctx:
+            video_mod.write_gif(frames, [125], gif)
+        self.assertIn("2 frames but 1 durations", str(ctx.exception))
+        for bad in ([0, 125], [-5, 125], ["125", 125], [True, 125]):
+            with self.assertRaises(PixelForgeError, msg=bad):
+                video_mod.write_gif(frames, bad, gif)
+        mixed = self._frames([0xFFFF0000])
+        from pixel_forge.image import Image
+        big = Image(32, 32)
+        big.fill(0xFF00FF00)
+        mixed.append(big)
+        with self.assertRaises(PixelForgeError) as ctx:
+            video_mod.write_gif(mixed, [125, 125], gif)
+        self.assertIn("frame 2 is 32 x 32", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

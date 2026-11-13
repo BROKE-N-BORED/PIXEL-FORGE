@@ -19,7 +19,7 @@ from pixel_forge.spritesheet import (auto_columns, build_metadata,  # noqa: E402
                                      extract_frame, frames_from_sheet,
                                      layout_frames, load_frame_dir,
                                      load_metadata, pack_frames,
-                                     write_sheet)
+                                     validate_tags, write_sheet)
 
 # The QApplication must exist before the first load_image
 # call takes the Qt path (see helpers.ensure_app_if_qt).
@@ -523,6 +523,149 @@ class SheetPlaybackTests(unittest.TestCase):
         for bad in (-1, 2, 99):
             with self.assertRaises(PixelForgeError, msg=bad):
                 extract_frame(sheet, meta, bad)
+
+
+class DurationsTagsTests(unittest.TestCase):
+    """Task 34: per-frame durations in the sheet metadata and
+    animation tags — build, write, load, and validation."""
+
+    def _layout(self, count=4):
+        _sheet, layout = pack_frames(make_frames(count), cols=2)
+        return layout
+
+    def _names(self, count=4):
+        return ["frame_%03d.png" % (i + 1) for i in range(count)]
+
+    def test_durations_land_in_metadata(self):
+        meta = build_metadata("s.png", self._names(), 32, 32,
+                              self._layout(), 8,
+                              durations=[125, 500, 250, 1000])
+        self.assertEqual([f["duration_ms"] for f in meta["frames"]],
+                         [125, 500, 250, 1000])
+        # The fps still records the base speed.
+        self.assertEqual(meta["fps"], 8)
+
+    def test_fps_default_unchanged_without_durations(self):
+        meta = build_metadata("s.png", self._names(), 32, 32,
+                              self._layout(), 8)
+        self.assertEqual([f["duration_ms"] for f in meta["frames"]],
+                         [125, 125, 125, 125])
+        # And no tags key appears at all.
+        self.assertNotIn("tags", meta)
+
+    def test_durations_length_mismatch_fails(self):
+        with self.assertRaises(PixelForgeError) as ctx:
+            build_metadata("s.png", self._names(), 32, 32,
+                           self._layout(), 8, durations=[125, 500])
+        self.assertIn("4 frames but 2 durations", str(ctx.exception))
+
+    def test_bad_duration_values_fail(self):
+        for bad in ([125, 0, 250, 125], [125, -5, 250, 125],
+                    [125, "250", 250, 125], [125, True, 250, 125]):
+            with self.assertRaises(PixelForgeError, msg=bad):
+                build_metadata("s.png", self._names(), 32, 32,
+                               self._layout(), 8, durations=bad)
+
+    def test_tags_land_in_metadata(self):
+        tags = [{"name": "walk", "from": 0, "to": 1},
+                {"name": "idle", "from": 2, "to": 3}]
+        meta = build_metadata("s.png", self._names(), 32, 32,
+                              self._layout(), 8, tags=tags)
+        self.assertEqual(meta["tags"], tags)
+        # Stored as copies — later edits to the caller's list
+        # must not rewrite the metadata.
+        tags[0]["to"] = 3
+        self.assertEqual(meta["tags"][0]["to"], 1)
+
+    def test_empty_tags_list_stores_no_key(self):
+        meta = build_metadata("s.png", self._names(), 32, 32,
+                              self._layout(), 8, tags=[])
+        self.assertNotIn("tags", meta)
+
+    def test_write_sheet_round_trips_durations_and_tags(self):
+        tmp = tempfile.mkdtemp()
+        png = os.path.join(tmp, "sheet.png")
+        js = os.path.join(tmp, "sheet.json")
+        tags = [{"name": "walk", "from": 0, "to": 2}]
+        meta = write_sheet(make_frames(4), self._names(), png, js,
+                           cols=2, fps=8,
+                           durations=[125, 500, 250, 125],
+                           tags=tags)
+        self.assertEqual(meta["tags"], tags)
+        loaded = load_metadata(js)
+        self.assertEqual(loaded, meta)
+        self.assertEqual([f["duration_ms"]
+                          for f in loaded["frames"]],
+                         [125, 500, 250, 125])
+
+    def test_validate_tags_valid(self):
+        validate_tags([{"name": "walk", "from": 0, "to": 3}], 4)
+        validate_tags([], 4)
+        validate_tags(None, 4)
+
+    def test_validate_tags_rejects_bad(self):
+        cases = [
+            ("not a list", "is not a list"),
+            ([{"name": "a", "from": 0}], "is missing 'to'"),
+            ([{"name": "", "from": 0, "to": 1}],
+             "name must be non-empty text"),
+            ([{"name": 7, "from": 0, "to": 1}],
+             "name must be non-empty text"),
+            ([{"name": "a", "from": True, "to": 1}],
+             "'from' must be a whole number"),
+            ([{"name": "a", "from": 0, "to": "3"}],
+             "'to' must be a whole number"),
+            ([{"name": "a", "from": -1, "to": 1}],
+             "frame positions start at 0"),
+            ([{"name": "a", "from": 2, "to": 1}],
+             "start must not come after the end"),
+            ([{"name": "a", "from": 0, "to": 4}],
+             "only has 4 frames"),
+            ([{"name": "a", "from": 0, "to": 1},
+              {"name": "a", "from": 2, "to": 3}],
+             "appears more than once"),
+        ]
+        for tags, fragment in cases:
+            with self.assertRaises(PixelForgeError,
+                                   msg=repr(tags)) as ctx:
+                validate_tags(tags, 4)
+            self.assertIn(fragment, str(ctx.exception))
+
+    def test_load_metadata_tags_validation(self):
+        tmp = tempfile.mkdtemp()
+        base = {"format": "pixel-forge-spritesheet", "version": 1,
+                "sheet": "s.png", "sheet_width": 66,
+                "sheet_height": 66, "frame_width": 32,
+                "frame_height": 32, "columns": 2, "rows": 2,
+                "padding": 0, "fps": 8,
+                "frames": [{"name": "a.png", "index": 0, "x": 0,
+                            "y": 0, "w": 32, "h": 32,
+                            "duration_ms": 125},
+                           {"name": "b.png", "index": 1, "x": 34,
+                            "y": 0, "w": 32, "h": 32,
+                            "duration_ms": 500}]}
+        # Valid tags load.
+        good = dict(base)
+        good["tags"] = [{"name": "walk", "from": 0, "to": 1}]
+        path = os.path.join(tmp, "good.json")
+        with open(path, "w") as handle:
+            json.dump(good, handle)
+        self.assertEqual(load_metadata(path)["tags"], good["tags"])
+        # Bad tags fail at load with a plain reason.
+        bad = dict(base)
+        bad["tags"] = [{"name": "walk", "from": 0, "to": 5}]
+        path = os.path.join(tmp, "bad.json")
+        with open(path, "w") as handle:
+            json.dump(bad, handle)
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_metadata(path)
+        self.assertIn("only has 2 frames", str(ctx.exception))
+        # Old metadata without tags loads unchanged.
+        path = os.path.join(tmp, "old.json")
+        with open(path, "w") as handle:
+            json.dump(base, handle)
+        loaded = load_metadata(path)
+        self.assertNotIn("tags", loaded)
 
 
 if __name__ == "__main__":

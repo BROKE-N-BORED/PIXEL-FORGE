@@ -1,5 +1,70 @@
 # Pixel Forge changelog
 
+## 0.44 — 2026-11-13
+
+Animation timeline — task-list item #34:
+
+- Per-frame durations: every kept frame has its own duration in
+  milliseconds, shown and changed with a "Frame duration" spin
+  box for the current frame (10–5000 ms). A new import starts
+  every frame at 1000 / Sheet fps (125 ms at 8 fps); changing
+  the Preview fps resets every frame to the new speed, since
+  the fps is the base speed and the spin fine-tunes single
+  frames on top of it. A hold frame is just a long duration —
+  set one frame to 1000 ms and it stays on screen a full
+  second. Durations follow their frames through strip reorder
+  and keep/drop, and land in the sheet JSON's duration_ms per
+  frame and in GIF export. Playback honors them: the timer
+  re-arms from each frame's own duration as it lands.
+  Changing the Sheet fps resets durations the same way the
+  Preview fps does — otherwise the metadata would say one fps
+  while every duration said another.
+- Scrubber: a slider under the video preview jumps to any kept
+  frame; dragging it pauses playback (it resumes only when
+  Play is pressed again), and it tracks the current frame
+  while playing.
+- Onion skinning: an "Onion skin" checkbox ghosts the previous
+  kept frame behind the current one at about 40% strength, so
+  the motion between frames is visible — mixed into the colors
+  where the current frame is opaque (video frames are opaque,
+  so a plain overlay would show nothing) and a 40%-alpha ghost
+  where it is transparent. Preview only: sheets, GIFs, and
+  frame exports all use the plain frames. The first frame has
+  no previous frame, so the toggle changes nothing there.
+- Animation tags: a name plus a frame range over the kept
+  frames (walk/idle/attack sets in one sheet). Add a tag with
+  a name and from/to frames (positions in the kept order,
+  1-based in the dialog); Play tag plays just that range,
+  looping within it when Loop is on; Delete removes it.
+  Nothing is pre-selected. Tag names must be unique — a
+  duplicate is refused with a plain message. Tags are
+  positions, not frame names: a reorder moves frames under a
+  tag, a keep/drop shortens a tag that runs past the end and
+  drops one with no frames left (the status bar says so), and
+  a new extraction clears all tags. Tags are stored in the
+  sheet metadata JSON as a top-level "tags" list, and old
+  metadata without tags still loads. GIF export writes the
+  selected tag's range when one is picked, all kept frames
+  otherwise.
+- GIF export: an "Export GIF" button next to the sheet export
+  writes the kept frames (or the selected tag's range) as an
+  animated GIF with the per-frame durations honored, looping
+  forever. Built on ffmpeg's concat demuxer; a missing ffmpeg
+  refuses loudly with the install fix, and an ffmpeg failure
+  shows its error tail. The last frame is written twice so
+  its duration is honored (the concat demuxer drops it
+  otherwise), and the encoder's picture offsetting is off, so
+  a single-pixel highlight survives (the default crop ate
+  thin frames entirely).
+- The spritesheet preview dialog plays the metadata's own
+  durations and exports the same durations and tags as the
+  direct export — it no longer silently drops them.
+- Fixed in place: playback ignored the strip order after a
+  reorder — the advance compared frame numbers, so it played
+  the original order even though the strip, the frame export,
+  and the sheet all followed the strip. The advance is
+  position-based now, so playback follows the strip.
+
 ## 0.43 — 2026-11-13
 
 Pixel editor — task-list item #33:

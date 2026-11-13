@@ -83,15 +83,16 @@ from .session import (load_session, record_recent, save_session,
                       set_last_code, set_last_image, set_last_video)
 from .skins import (detect_skin, extract_skin, pixelize_texture,
                     skin_figure, skin_parts, texture_target_size)
-from .spritesheet import (build_metadata, extract_frame,
-                          frames_from_sheet, load_metadata,
-                          pack_frames, write_sheet)
+from .spritesheet import (build_metadata, duration_for_fps,
+                          extract_frame, frames_from_sheet,
+                          load_metadata, pack_frames, validate_tags,
+                          write_sheet)
 from .undo import Command as UndoCommand
 from .undo import UndoStack
 from .video import (DEFAULT_FPS, FPS_PRESETS, FRAME_COUNT_CONFIRM,
                     VIDEO_EXTENSIONS, estimate_frame_count,
-                    extract_frames, parse_time, probe_duration,
-                    require_ffmpeg)
+                    extract_frames, onion_blend, parse_time,
+                    probe_duration, require_ffmpeg, write_gif)
 
 SIZE_PRESETS = [16, 32, 48, 64, 128]
 MAX_DISPLAY = 1600  # longest side of a preview pixmap, in pixels
@@ -516,7 +517,7 @@ class SpritesheetDialog(QDialog):
     """
 
     def __init__(self, parent, images, names, cols, padding, fps,
-                 default_name):
+                 default_name, durations=None, tags=None):
         super().__init__(parent)
         self.setWindowTitle("Spritesheet preview")
         self.resize(560, 660)
@@ -526,12 +527,21 @@ class SpritesheetDialog(QDialog):
         self.padding = padding
         self.fps = fps
         self.default_name = default_name
+        # Per-frame durations + tags (task 34), when the caller
+        # has them: the preview plays the metadata's own
+        # duration_ms, and Export writes the same pair the Video
+        # tab's direct export writes — the dialog must never
+        # silently drop them.
+        self.durations = (list(durations) if durations is not None
+                          else None)
+        self.tags = (list(tags) if tags is not None else None)
         self.sheet, self.layout = pack_frames(
             self.images, cols=cols, padding=padding)
         frame_w, frame_h = (self.images[0].width(),
                             self.images[0].height())
         self.metadata = build_metadata(
-            "", self.names, frame_w, frame_h, self.layout, fps)
+            "", self.names, frame_w, frame_h, self.layout, fps,
+            durations=durations, tags=tags)
         self.frames = frames_from_sheet(self.sheet, self.metadata)
         self.current = 0
         self.timer = QTimer(self)
@@ -613,8 +623,16 @@ class SpritesheetDialog(QDialog):
         self.counter_label.setText(
             "Frame %d of %d" % (self.current + 1, len(self.frames)))
 
+    def _frame_duration(self, index):
+        """How long one frame shows, from the metadata's own
+        duration_ms (task 34) — the preview plays the real
+        timing, not the uniform fps."""
+        return self.metadata["frames"][index]["duration_ms"]
+
     def _advance(self):
         self.current = (self.current + 1) % len(self.frames)
+        if self.timer.isActive():
+            self.timer.start(self._frame_duration(self.current))
         self._refresh_frame()
 
     def _on_play_pause(self):
@@ -622,8 +640,7 @@ class SpritesheetDialog(QDialog):
             self.timer.stop()
             self.play_btn.setText("Play")
             return
-        interval = max(1, int(round(1000 / self.fps)))
-        self.timer.start(interval)
+        self.timer.start(self._frame_duration(self.current))
         self.play_btn.setText("Pause")
 
     def _on_export(self):
@@ -640,7 +657,8 @@ class SpritesheetDialog(QDialog):
             write_sheet(self.images, self.names,
                         str(png_path), str(meta_path),
                         cols=self.cols, padding=self.padding,
-                        fps=self.fps)
+                        fps=self.fps, durations=self.durations,
+                        tags=self.tags)
         except PixelForgeError as exc:
             warn_dialog(self, "Could not export spritesheet", str(exc))
             return
@@ -822,6 +840,66 @@ class SheetFrameDialog(QDialog):
         """The picked frame's index, or None for the packed
         sheet."""
         return self._choice
+
+
+class TagDialog(QDialog):
+    """Name one animation tag and its frame range (task 34).
+
+    "From" and "to" are 1-based positions in the kept order —
+    what the strip shows — so frame 1 is the first kept frame.
+    The window converts to 0-based for storage and validates the
+    name (non-empty, unique) and the range; this dialog only
+    collects the values. Nothing is pre-filled except the range,
+    which starts at the whole animation (1 to the last kept
+    frame) — the only range that is always valid.
+    """
+
+    def __init__(self, parent, frame_count):
+        super().__init__(parent)
+        self.setWindowTitle("Add tag")
+        self.resize(320, 200)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Tag name"))
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("walk")
+        self.name_edit.setToolTip("A name for this set of frames")
+        layout.addWidget(self.name_edit)
+        from_row = QHBoxLayout()
+        from_row.addWidget(QLabel("From frame"))
+        self.from_spin = QSpinBox()
+        self.from_spin.setRange(1, max(1, frame_count))
+        self.from_spin.setValue(1)
+        self.from_spin.setToolTip(
+            "First kept frame of the tag, counting from 1")
+        from_row.addWidget(self.from_spin)
+        layout.addLayout(from_row)
+        to_row = QHBoxLayout()
+        to_row.addWidget(QLabel("To frame"))
+        self.to_spin = QSpinBox()
+        self.to_spin.setRange(1, max(1, frame_count))
+        self.to_spin.setValue(max(1, frame_count))
+        self.to_spin.setToolTip(
+            "Last kept frame of the tag, counting from 1")
+        to_row.addWidget(self.to_spin)
+        layout.addLayout(to_row)
+        layout.addStretch(1)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.ok_btn = QPushButton("Add")
+        self.ok_btn.setObjectName("export")
+        self.ok_btn.setToolTip("Add this tag")
+        self.ok_btn.clicked.connect(self.accept)
+        button_row.addWidget(self.ok_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_row.addWidget(cancel_btn)
+        layout.addLayout(button_row)
+
+    def tag_values(self):
+        """(name, from, to) — from and to 0-based, for storage."""
+        return (self.name_edit.text().strip(),
+                self.from_spin.value() - 1,
+                self.to_spin.value() - 1)
 
 
 # ------------------------------------------------------- undo commands
@@ -1089,6 +1167,25 @@ class MainWindow(QMainWindow):
         # the sheet follow it (task 25) — _kept_indices reads it,
         # never plain range().
         self.video_order = []
+        # Per-frame durations in milliseconds (task 34), indexed
+        # by ORIGINAL frame number — parallel to video_frames and
+        # video_keep. Indexing by frame, not by kept position,
+        # means a duration follows its frame through a reorder or
+        # a keep/drop with no bookkeeping at all. A new import
+        # starts every frame at 1000 / Sheet fps; a re-pixelize
+        # with the same frame count keeps them.
+        self.video_durations = []
+        # Animation tags (task 34): {"name", "from", "to"} dicts,
+        # "from" and "to" 0-based positions in the KEPT order —
+        # a tag is a range of positions in the current animation,
+        # so a reorder moves frames under it and a keep/drop
+        # clamps it (see _clamp_video_tags). A new extraction
+        # clears them: the frames are entirely new.
+        self.video_tags = []
+        # The tag currently playing, or None for the whole kept
+        # animation. Set only by "Play tag"; the main Play button
+        # clears it and plays everything.
+        self.video_play_tag = None
         # The clip's length in seconds, probed with ffprobe at
         # import (None = unknown — no estimate, no confirm).
         self.video_duration = None
@@ -2771,7 +2868,9 @@ class MainWindow(QMainWindow):
         self.sheet_fps_spin.setRange(1, 30)
         self.sheet_fps_spin.setValue(DEFAULT_FPS)
         self.sheet_fps_spin.setToolTip(
-            "Playback speed stored in the sheet metadata")
+            "Sheet speed — sets every frame to this speed")
+        self.sheet_fps_spin.valueChanged.connect(
+            self._on_sheet_fps_changed)
         self.sheet_fps_spin.valueChanged.connect(
             lambda _v: self._mark_video_preset_custom("sheet_fps"))
         sheet_fps_row.addWidget(self.sheet_fps_spin)
@@ -2784,6 +2883,40 @@ class MainWindow(QMainWindow):
         self.sheet_preview_btn.clicked.connect(
             self._on_preview_spritesheet)
         form.addWidget(self.sheet_preview_btn)
+
+        # Animation tags (task 34): named ranges over the kept
+        # frames — walk/idle/attack sets in one sheet. Nothing is
+        # selected by default; Play tag and Delete need a pick.
+        form.addWidget(self._section("Animation tags"))
+        self.video_tag_list = QListWidget()
+        self.video_tag_list.setToolTip(
+            "Named frame ranges — pick one to play it or export "
+            "it as a GIF")
+        self.video_tag_list.setMaximumHeight(96)
+        self.video_tag_list.itemSelectionChanged.connect(
+            self._on_video_tag_selected)
+        form.addWidget(self.video_tag_list)
+        tag_btn_row = QHBoxLayout()
+        self.video_tag_add_btn = QPushButton("Add tag")
+        self.video_tag_add_btn.setToolTip(
+            "Name a range of kept frames")
+        self.video_tag_add_btn.setEnabled(False)
+        self.video_tag_add_btn.clicked.connect(self._on_video_tag_add)
+        tag_btn_row.addWidget(self.video_tag_add_btn)
+        self.video_tag_play_btn = QPushButton("Play tag")
+        self.video_tag_play_btn.setToolTip(
+            "Play only the picked tag's frames")
+        self.video_tag_play_btn.setEnabled(False)
+        self.video_tag_play_btn.clicked.connect(
+            self._on_video_tag_play)
+        tag_btn_row.addWidget(self.video_tag_play_btn)
+        self.video_tag_delete_btn = QPushButton("Delete tag")
+        self.video_tag_delete_btn.setToolTip("Delete the picked tag")
+        self.video_tag_delete_btn.setEnabled(False)
+        self.video_tag_delete_btn.clicked.connect(
+            self._on_video_tag_delete)
+        tag_btn_row.addWidget(self.video_tag_delete_btn)
+        form.addLayout(tag_btn_row)
 
         form.addStretch(1)
         self.video_info_label = QLabel("No video loaded")
@@ -2807,6 +2940,15 @@ class MainWindow(QMainWindow):
         self.sheet_export_btn.clicked.connect(
             self._on_export_spritesheet)
         form.addWidget(self.sheet_export_btn)
+
+        self.video_gif_btn = QPushButton("Export GIF")
+        self.video_gif_btn.setObjectName("export")
+        self.video_gif_btn.setToolTip(
+            "Export the animation as a GIF — the picked tag, or "
+            "all kept frames when no tag is picked")
+        self.video_gif_btn.setEnabled(False)
+        self.video_gif_btn.clicked.connect(self._on_export_gif)
+        form.addWidget(self.video_gif_btn)
 
         self.sheet_library_btn = QPushButton("Save sheet to library")
         self.sheet_library_btn.setToolTip(
@@ -2836,6 +2978,18 @@ class MainWindow(QMainWindow):
         self.video_preview_scroll.setWidget(self.video_preview_label)
         preview_layout.addWidget(self.video_preview_scroll, 1)
 
+        # Scrubber (task 34): jump to any kept frame. Dragging
+        # pauses playback — it resumes only when Play is pressed
+        # again, never on its own. The slider tracks the current
+        # frame while playing (see _refresh_video_preview).
+        self.video_scrub_slider = QSlider(Qt.Orientation.Horizontal)
+        self.video_scrub_slider.setToolTip(
+            "Scrub through the kept frames")
+        self.video_scrub_slider.setEnabled(False)
+        self.video_scrub_slider.valueChanged.connect(
+            self._on_video_scrub)
+        preview_layout.addWidget(self.video_scrub_slider)
+
         playback_row = QHBoxLayout()
         self.video_play_btn = QPushButton("Play")
         self.video_play_btn.setToolTip(
@@ -2848,7 +3002,7 @@ class MainWindow(QMainWindow):
         self.video_play_fps_spin.setRange(1, 30)
         self.video_play_fps_spin.setValue(DEFAULT_FPS)
         self.video_play_fps_spin.setToolTip(
-            "Playback speed of the preview")
+            "Playback speed — sets every frame to this speed")
         self.video_play_fps_spin.valueChanged.connect(
             self._on_play_fps_changed)
         self.video_play_fps_spin.valueChanged.connect(
@@ -2860,6 +3014,31 @@ class MainWindow(QMainWindow):
             "Loop the animation preview")
         self.video_loop_check.setChecked(True)
         playback_row.addWidget(self.video_loop_check)
+        # Per-frame duration (task 34): how long the CURRENT frame
+        # shows, in milliseconds. A long duration holds the frame.
+        playback_row.addWidget(QLabel("Frame duration"))
+        self.video_duration_spin = QSpinBox()
+        self.video_duration_spin.setRange(10, 5000)
+        self.video_duration_spin.setSuffix(" ms")
+        self.video_duration_spin.setToolTip(
+            "How long the current frame shows — a long duration "
+            "holds the frame")
+        self.video_duration_spin.setEnabled(False)
+        self.video_duration_spin.valueChanged.connect(
+            self._on_video_duration_changed)
+        playback_row.addWidget(self.video_duration_spin)
+        # Onion skin (task 34): the previous kept frame ghosted
+        # behind the current one. Off by default; never leaks into
+        # exports — the preview composites it, the frames stay
+        # plain.
+        self.video_onion_check = QCheckBox("Onion skin")
+        self.video_onion_check.setToolTip(
+            "Show the previous frame ghosted behind the current "
+            "one")
+        self.video_onion_check.setEnabled(False)
+        self.video_onion_check.toggled.connect(
+            self._refresh_video_preview)
+        playback_row.addWidget(self.video_onion_check)
         self.video_counter_label = QLabel("")
         playback_row.addWidget(self.video_counter_label)
         playback_row.addStretch(1)
@@ -3157,10 +3336,34 @@ class MainWindow(QMainWindow):
             # order (task 25). A re-pixelize keeps the user's
             # order — the frame count is unchanged there.
             self.video_order = list(range(len(result["frames"])))
+            # Durations + tags (task 34): a new extraction is new
+            # frames entirely, so every frame starts at the Sheet
+            # fps default and the tags go — they named ranges over
+            # frames that no longer exist.
+            self.video_durations = [self._video_default_duration()] \
+                * len(result["frames"])
+            self.video_tags = []
+            self.video_play_tag = None
+            self._refresh_video_tag_list()
         elif len(self.video_keep) != len(result["frames"]):
             self.video_keep = [True] * len(result["frames"])
             self.video_order = list(range(len(result["frames"])))
+            # Same reset when a re-pixelize changes the frame
+            # count — the old durations and tags named frames by
+            # position, and the positions moved.
+            self.video_durations = [self._video_default_duration()] \
+                * len(result["frames"])
+            self.video_tags = []
+            self.video_play_tag = None
+            self._refresh_video_tag_list()
         self.video_frames = result["frames"]
+        # Belt and braces: durations parallel the frames, and any
+        # path that changed the frame count without resetting them
+        # (none is known, but the list is cheap to rebuild) gets
+        # the Sheet fps default rather than an index error later.
+        if len(self.video_durations) != len(self.video_frames):
+            self.video_durations = [self._video_default_duration()] \
+                * len(self.video_frames)
         kept = self._kept_indices()
         self.video_current = kept[0] if kept else 0
         self._rebuild_strip()
@@ -3170,13 +3373,7 @@ class MainWindow(QMainWindow):
             # (task 22). A re-pixelize keeps the user's zoom.
             self._on_fit_video_zoom()
         self._update_video_info()
-        self.video_export_btn.setEnabled(bool(kept))
-        self.video_play_btn.setEnabled(bool(kept))
-        self.sheet_preview_btn.setEnabled(bool(kept))
-        self.sheet_export_btn.setEnabled(bool(kept))
-        self.sheet_library_btn.setEnabled(bool(kept))
-        self.video_keep_all_btn.setEnabled(bool(result["frames"]))
-        self.video_drop_all_btn.setEnabled(bool(result["frames"]))
+        self._update_video_buttons()
         if result["fresh"]:
             self.statusBar().showMessage(
                 "Loaded %s (%d frames)"
@@ -3363,13 +3560,224 @@ class MainWindow(QMainWindow):
         if not self.video_frames:
             return
         frame = self.video_frames[self.video_current]
+        if self.video_onion_check.isChecked():
+            frame = self._onion_frame()
         pixmap = checkerboard_pixmap(frame, self.video_zoom_slider.value(),
                                      smooth=False)
         self.video_preview_label.setPixmap(pixmap)
-        kept = len(self._kept_indices())
+        kept = self._kept_indices()
         self.video_counter_label.setText(
             "Frame %d of %d (%d kept)"
-            % (self.video_current + 1, len(self.video_frames), kept))
+            % (self.video_current + 1, len(self.video_frames),
+               len(kept)))
+        # The scrubber tracks the current frame — signals blocked,
+        # because the slider's own handler pauses playback, and
+        # playback must not pause itself. Its range is the kept
+        # list; a dropped frame clicked in the strip is not in it
+        # and reads as position 0.
+        self.video_scrub_slider.blockSignals(True)
+        try:
+            self.video_scrub_slider.setRange(0, max(0, len(kept) - 1))
+            position = (kept.index(self.video_current)
+                        if self.video_current in kept else 0)
+            self.video_scrub_slider.setValue(position)
+        finally:
+            self.video_scrub_slider.blockSignals(False)
+        # The duration spin shows the current frame's duration —
+        # signals blocked, or setting it would write back.
+        self.video_duration_spin.blockSignals(True)
+        try:
+            self.video_duration_spin.setValue(
+                self._video_frame_duration(self.video_current))
+        finally:
+            self.video_duration_spin.blockSignals(False)
+
+    def _onion_frame(self):
+        """The current frame with the previous kept frame ghosted
+        behind it (task 34) — the preview only; exports use the
+        plain frames. The first kept frame has no previous frame,
+        so it shows plain, and so does a dropped frame clicked in
+        the strip."""
+        kept = self._kept_indices()
+        if self.video_current not in kept:
+            return self.video_frames[self.video_current]
+        position = kept.index(self.video_current)
+        if position == 0:
+            return self.video_frames[self.video_current]
+        return onion_blend(self.video_frames[self.video_current],
+                           self.video_frames[kept[position - 1]])
+
+    # --------------------------------------------- timeline: durations
+
+    def _video_default_duration(self):
+        """Milliseconds per frame at the Sheet fps (8 fps ->
+        125 ms) — the duration a new import starts every frame
+        at (task 34)."""
+        return duration_for_fps(self.sheet_fps_spin.value())
+
+    def _video_frame_duration(self, index):
+        """The duration of one frame, in milliseconds — the stored
+        one, or the Sheet fps default when no duration was ever
+        stored for it."""
+        if 0 <= index < len(self.video_durations):
+            return self.video_durations[index]
+        return self._video_default_duration()
+
+    def _kept_durations(self):
+        """Durations of the kept frames, in strip order — parallel
+        to _kept_indices, for the sheet metadata and GIF export."""
+        return [self._video_frame_duration(index)
+                for index in self._kept_indices()]
+
+    def _on_video_duration_changed(self, value):
+        """The duration spin changed — the CURRENT frame's
+        duration, and nothing else (task 34). No re-pixelize, no
+        worker: timing is metadata, not pixels."""
+        if not self.video_frames:
+            return
+        if len(self.video_durations) != len(self.video_frames):
+            self.video_durations = [self._video_default_duration()] \
+                * len(self.video_frames)
+        self.video_durations[self.video_current] = value
+        if self.video_timer.isActive():
+            # The frame now showing just got longer or shorter —
+            # restart its own interval so the change lands at once.
+            self.video_timer.start(value)
+
+    def _on_video_scrub(self, value):
+        """The scrubber moved — pause playback and jump to that
+        kept frame (task 34). Playback resumes only when Play is
+        pressed again, never on its own."""
+        kept = self._kept_indices()
+        if not kept:
+            return
+        self._stop_playback()
+        self.video_current = kept[max(0, min(value, len(kept) - 1))]
+        self._refresh_video_preview()
+
+    # ------------------------------------------------- timeline: tags
+
+    def _video_tag_label(self, tag):
+        """How a tag reads in the list — 1-based, what the strip
+        shows ("walk — frames 1–4")."""
+        return "%s — frames %d–%d" % (tag["name"], tag["from"] + 1,
+                                     tag["to"] + 1)
+
+    def _refresh_video_tag_list(self):
+        """Rebuild the tag list from video_tags, keeping the
+        selection when the picked tag still exists."""
+        selected = self._selected_video_tag()
+        self.video_tag_list.blockSignals(True)
+        try:
+            self.video_tag_list.clear()
+            for tag in self.video_tags:
+                self.video_tag_list.addItem(
+                    self._video_tag_label(tag))
+        finally:
+            self.video_tag_list.blockSignals(False)
+        if selected is not None:
+            for row, tag in enumerate(self.video_tags):
+                if tag["name"] == selected["name"]:
+                    self.video_tag_list.setCurrentRow(row)
+                    break
+        self._on_video_tag_selected()
+
+    def _selected_video_tag(self):
+        """The picked tag, or None when nothing is picked."""
+        row = self.video_tag_list.currentRow()
+        if 0 <= row < len(self.video_tags):
+            return self.video_tags[row]
+        return None
+
+    def _on_video_tag_selected(self):
+        """Play tag and Delete tag need a picked tag."""
+        picked = self._selected_video_tag() is not None
+        self.video_tag_play_btn.setEnabled(picked)
+        self.video_tag_delete_btn.setEnabled(picked)
+
+    def _add_video_tag(self, name, start, end):
+        """Add a tag after validating it (task 34): the name must
+        be non-empty text and unique, and the range must sit
+        inside the kept frames. Returns True when the tag landed;
+        on failure shows a plain warning and returns False. The
+        dialog handler and the tests both come through here."""
+        kept = len(self._kept_indices())
+        candidate = {"name": name, "from": start, "to": end}
+        try:
+            validate_tags(self.video_tags + [candidate], kept)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not add tag", str(exc))
+            return False
+        self.video_tags.append(candidate)
+        self._refresh_video_tag_list()
+        self.statusBar().showMessage(
+            "Added tag %s" % self._video_tag_label(candidate))
+        return True
+
+    def _on_video_tag_add(self):
+        kept = len(self._kept_indices())
+        if not kept:
+            return
+        dialog = TagDialog(self, kept)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        name, start, end = dialog.tag_values()
+        self._add_video_tag(name, start, end)
+
+    def _on_video_tag_delete(self):
+        tag = self._selected_video_tag()
+        if tag is None:
+            return
+        self.video_tags = [other for other in self.video_tags
+                           if other is not tag]
+        if self.video_play_tag is tag:
+            # The playing tag is gone — playback carries on over
+            # all kept frames from the current frame.
+            self.video_play_tag = None
+        self._refresh_video_tag_list()
+        self.statusBar().showMessage("Deleted tag %s" % tag["name"])
+
+    def _on_video_tag_play(self):
+        tag = self._selected_video_tag()
+        if tag is None:
+            return
+        kept = self._kept_indices()
+        start = max(0, tag["from"])
+        end = min(tag["to"], len(kept) - 1)
+        if start > end:
+            return
+        self.video_play_tag = tag
+        self.video_current = kept[start]
+        self._refresh_video_preview()
+        self.video_timer.start(
+            self._video_frame_duration(self.video_current))
+        self.video_play_btn.setText("Pause")
+
+    def _clamp_video_tags(self):
+        """Keep the tags inside the kept list after a keep/drop
+        change (task 34): a tag that runs past the end is
+        shortened; one that falls entirely outside is dropped,
+        and the status bar says so. A reorder needs no clamp —
+        tags are positions, and positions survive a reorder."""
+        kept = len(self._kept_indices())
+        surviving = []
+        dropped = []
+        for tag in self.video_tags:
+            if tag["from"] >= kept:
+                dropped.append(tag)
+                continue
+            tag["to"] = min(tag["to"], kept - 1)
+            surviving.append(tag)
+        if len(surviving) != len(self.video_tags):
+            self.video_tags = surviving
+            if (self.video_play_tag is not None
+                    and self.video_play_tag not in surviving):
+                self.video_play_tag = None
+            self._refresh_video_tag_list()
+            if dropped:
+                self.statusBar().showMessage(
+                    "Dropped %s — no frames left in its range"
+                    % ", ".join(tag["name"] for tag in dropped))
 
     def _update_video_info(self):
         if not self.video_frames:
@@ -3407,31 +3815,47 @@ class MainWindow(QMainWindow):
                                  index + 1)))
         self._set_strip_item_dimmed(item, not self.video_keep[index])
         kept = self._kept_indices()
-        self.video_export_btn.setEnabled(bool(kept))
-        self.video_play_btn.setEnabled(bool(kept))
-        self.sheet_preview_btn.setEnabled(bool(kept))
-        self.sheet_export_btn.setEnabled(bool(kept))
-        self.sheet_library_btn.setEnabled(bool(kept))
+        self._update_video_buttons()
         if not kept:
             self._stop_playback()
         elif self.video_current not in kept:
             self.video_current = kept[0]
+        self._clamp_video_tags()
         self._refresh_video_preview()
         self._update_video_info()
+
+    def _update_video_buttons(self):
+        """Enable the Video tab's buttons and timeline controls
+        for the current frames — one place, so a control cannot be
+        enabled in one path and forgotten in another (task 34).
+        Exports and the timeline need kept frames; Keep/Drop all
+        need frames at all; Play tag and Delete tag need a picked
+        tag (see _on_video_tag_selected)."""
+        kept = bool(self._kept_indices())
+        has_frames = bool(self.video_frames)
+        for button in (self.video_export_btn, self.video_play_btn,
+                       self.sheet_preview_btn, self.sheet_export_btn,
+                       self.sheet_library_btn, self.video_gif_btn):
+            button.setEnabled(kept)
+        for button in (self.video_keep_all_btn,
+                       self.video_drop_all_btn):
+            button.setEnabled(has_frames)
+        self.video_tag_add_btn.setEnabled(kept)
+        self.video_duration_spin.setEnabled(kept)
+        self.video_scrub_slider.setEnabled(kept)
+        self.video_onion_check.setEnabled(kept)
+        self._on_video_tag_selected()
 
     def _refresh_after_keep_change(self):
         """Buttons, playback, and preview after any keep/drop
         change — shared by Keep/Drop all and Keep/Drop selected."""
         kept = self._kept_indices()
-        self.video_export_btn.setEnabled(bool(kept))
-        self.video_play_btn.setEnabled(bool(kept))
-        self.sheet_preview_btn.setEnabled(bool(kept))
-        self.sheet_export_btn.setEnabled(bool(kept))
-        self.sheet_library_btn.setEnabled(bool(kept))
+        self._update_video_buttons()
         if not kept:
             self._stop_playback()
         else:
             self.video_current = kept[0]
+        self._clamp_video_tags()
         self._refresh_video_preview()
         self._update_video_info()
 
@@ -3503,16 +3927,38 @@ class MainWindow(QMainWindow):
 
     # -------------------------------------------------------- playback
 
+    def _playback_range(self):
+        """The kept indices playback walks (task 34): the playing
+        tag's slice of the kept list, or all kept frames when no
+        tag is playing. A tag that no longer fits the kept list
+        (frames dropped since it was made) is clamped, not
+        trusted — a range that clamps away entirely plays
+        everything instead."""
+        kept = self._kept_indices()
+        tag = self.video_play_tag
+        if tag is None:
+            return kept
+        start = max(0, tag["from"])
+        end = min(tag["to"], len(kept) - 1)
+        if start > end:
+            return kept
+        return kept[start:end + 1]
+
     def _on_play_pause(self):
         if self.video_timer.isActive():
             self._stop_playback()
             return
-        if not self._kept_indices():
+        kept = self._kept_indices()
+        if not kept:
             return
-        if self.video_current not in self._kept_indices():
-            self.video_current = self._kept_indices()[0]
-        interval = max(1, 1000 // self.video_play_fps_spin.value())
-        self.video_timer.start(interval)
+        # Play means the whole animation, from the current frame:
+        # a playing tag is cleared, and "Play tag" is how a tag is
+        # played. Each frame shows for its own duration.
+        self.video_play_tag = None
+        if self.video_current not in kept:
+            self.video_current = kept[0]
+        self.video_timer.start(
+            self._video_frame_duration(self.video_current))
         self.video_play_btn.setText("Pause")
 
     def _stop_playback(self):
@@ -3521,25 +3967,65 @@ class MainWindow(QMainWindow):
         self.video_play_btn.setText("Play")
 
     def _on_play_fps_changed(self):
+        """Preview fps changed — every frame takes the new speed
+        (task 34). The fps is the base speed; the per-frame
+        duration spin fine-tunes single frames on top of it. A
+        playing preview re-arms on the current frame's new
+        duration at once."""
+        if not self.video_frames:
+            return
+        duration = duration_for_fps(self.video_play_fps_spin.value())
+        self.video_durations = [duration] * len(self.video_frames)
+        self._refresh_video_preview()
         if self.video_timer.isActive():
-            interval = max(1, 1000 // self.video_play_fps_spin.value())
-            self.video_timer.start(interval)
+            self.video_timer.start(duration)
+
+    def _on_sheet_fps_changed(self):
+        """Sheet fps changed — every frame takes the new speed
+        (task 34), the same as the Preview fps. The sheet fps is
+        the base speed for the sheet: without this reset, the
+        metadata would say fps 12 while every duration_ms still
+        said 125, and a game reading one would disagree with a
+        game reading the other."""
+        if not self.video_frames:
+            return
+        duration = duration_for_fps(self.sheet_fps_spin.value())
+        self.video_durations = [duration] * len(self.video_frames)
+        self._refresh_video_preview()
+        if self.video_timer.isActive():
+            self.video_timer.start(duration)
 
     def _advance_video_frame(self):
-        """One playback step: next kept frame, wrapping when Loop is
-        on, stopping at the last kept frame when it is off."""
-        kept = self._kept_indices()
-        if not kept:
+        """One playback step: the next frame in the playback
+        range, wrapping when Loop is on, stopping at the last one
+        when it is off. The step is by POSITION in the range, not
+        by frame number — comparing frame numbers played the
+        original order after a strip reorder, not the strip order
+        (found while building task 34: the export and the sheet
+        followed the strip, the playback did not). Each frame
+        shows for its own duration: the timer is re-armed from
+        the frame it just landed on, so a long duration holds
+        the frame."""
+        playing = self._playback_range()
+        if not playing:
             self._stop_playback()
             return
-        later = [i for i in kept if i > self.video_current]
-        if later:
-            self.video_current = later[0]
-        elif self.video_loop_check.isChecked():
-            self.video_current = kept[0]
+        if self.video_current in playing:
+            position = playing.index(self.video_current)
         else:
-            self.video_current = kept[-1]
+            position = -1
+        if position + 1 < len(playing):
+            self.video_current = playing[position + 1]
+        elif self.video_loop_check.isChecked():
+            self.video_current = playing[0]
+        else:
+            self.video_current = playing[-1]
             self._stop_playback()
+            self._refresh_video_preview()
+            return
+        if self.video_timer.isActive():
+            self.video_timer.start(
+                self._video_frame_duration(self.video_current))
         self._refresh_video_preview()
 
     # --------------------------------------------------------- export
@@ -3660,7 +4146,9 @@ class MainWindow(QMainWindow):
         try:
             metadata = write_sheet(images, names, str(path),
                                    str(meta_path), cols=cols,
-                                   padding=padding, fps=fps)
+                                   padding=padding, fps=fps,
+                                   durations=self._kept_durations(),
+                                   tags=self.video_tags)
         except PixelForgeError as exc:
             warn_dialog(self, "Could not export spritesheet", str(exc))
             return False
@@ -3687,11 +4175,60 @@ class MainWindow(QMainWindow):
         try:
             dialog = SpritesheetDialog(
                 self, images, names, cols, padding, fps,
-                self._sheet_default_name())
+                self._sheet_default_name(),
+                durations=self._kept_durations(),
+                tags=self.video_tags)
         except PixelForgeError as exc:
             warn_dialog(self, "Could not preview spritesheet", str(exc))
             return
         dialog.exec()
+
+    # ------------------------------------------------------- GIF export
+
+    def _gif_default_name(self):
+        if self.video_path:
+            src = Path(self.video_path)
+            return str(src.with_name(src.stem + "-anim.gif"))
+        return self._export_default("animation.gif")
+
+    def export_gif(self, path, tag=None):
+        """Write the kept frames — or one tag's range — as an
+        animated GIF with the per-frame durations, looping
+        forever (task 34). Returns True on success; on failure
+        shows a message box and returns False. A missing ffmpeg
+        refuses loudly, the same as video import."""
+        kept = self._kept_indices()
+        if not kept:
+            return False
+        if tag is not None:
+            start = max(0, tag["from"])
+            end = min(tag["to"], len(kept) - 1)
+            if start > end:
+                return False
+            kept = kept[start:end + 1]
+        images = [self.video_frames[i] for i in kept]
+        durations = [self._video_frame_duration(i) for i in kept]
+        out = Path(path)
+        if out.suffix.lower() != ".gif":
+            out = out.with_suffix(".gif")
+        try:
+            write_gif(images, durations, str(out))
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not export GIF", str(exc))
+            return False
+        self.statusBar().showMessage(
+            "Exported GIF: %d frames, %s" % (len(kept), out.name))
+        return True
+
+    def _on_export_gif(self):
+        if not self._kept_indices():
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export GIF", self._gif_default_name(),
+            "GIF images (*.gif)")
+        if path and self.export_gif(path,
+                                    self._selected_video_tag()):
+            self._remember_export_dir(Path(path).parent)
 
     # =========================================================== prompt tab
 
@@ -7087,7 +7624,9 @@ class MainWindow(QMainWindow):
             png_path = os.path.join(tmp, "sheet.png")
             meta_path = os.path.join(tmp, "sheet.json")
             write_sheet(images, names, png_path, meta_path,
-                        cols=cols, padding=padding, fps=fps)
+                        cols=cols, padding=padding, fps=fps,
+                        durations=self._kept_durations(),
+                        tags=self.video_tags)
             entry = self.library.add_sheet(
                 png_path, meta_path, name, tags, source="video",
                 frames=len(kept))

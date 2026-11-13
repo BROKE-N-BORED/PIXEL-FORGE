@@ -6008,5 +6008,330 @@ class PixelEditorTests(unittest.TestCase):
         self.assertEqual(back.pixel(3, 4), self.red)
 
 
+class AnimationTimelineTests(unittest.TestCase):
+    """Task 34: per-frame durations, the scrubber, onion skinning,
+    animation tags, and GIF export — all on the Video tab."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        from pixel_forge import video as video_mod
+        if video_mod.find_ffmpeg() is None:
+            raise unittest.SkipTest("ffmpeg not installed")
+        # 2 seconds at 24 fps, 8 fps extraction = 16 frames.
+        cls.clip = make_test_video(os.path.join(cls.tmp, "clip.mp4"))
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.win = MainWindow()
+        self.win.tabs.setCurrentIndex(1)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _wait_for_video(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.video_worker is None
+                    and not self.win._video_debounce_timer.isActive()):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _load(self):
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        self.assertEqual(len(self.win.video_frames), 16)
+
+    def _show_frame(self, position):
+        kept = self.win._kept_indices()
+        self.win.video_current = kept[position]
+        self.win._refresh_video_preview()
+        self.app.processEvents()
+
+    def _preview_pixels(self):
+        from PySide6.QtGui import QImage
+        pixmap = self.win.video_preview_label.pixmap()
+        image = pixmap.toImage().convertToFormat(
+            QImage.Format.Format_ARGB32)
+        pixels = []
+        for y in range(0, image.height(), 7):
+            for x in range(0, image.width(), 7):
+                pixels.append(image.pixel(x, y))
+        return pixels
+
+    def test_durations_default_from_sheet_fps(self):
+        self._load()
+        # Sheet fps is 8 by default: 1000 / 8 = 125 ms a frame.
+        self.assertEqual(len(self.win.video_durations), 16)
+        self.assertEqual(set(self.win.video_durations), {125})
+        self.assertEqual(self.win.video_duration_spin.value(), 125)
+
+    def test_duration_spin_changes_only_current_frame(self):
+        self._load()
+        self._show_frame(3)
+        self.assertEqual(self.win.video_duration_spin.value(), 125)
+        self.win.video_duration_spin.setValue(500)
+        self.app.processEvents()
+        self.assertEqual(self.win.video_durations[3], 500)
+        others = [d for i, d in enumerate(self.win.video_durations)
+                  if i != 3]
+        self.assertEqual(set(others), {125})
+
+    def test_durations_follow_reorder(self):
+        from PySide6.QtCore import QModelIndex
+        self._load()
+        # Give every frame a distinct duration, then drag row 0
+        # to position 2 through the model (the same rowsMoved
+        # path a real drag takes).
+        for i in range(16):
+            self.win.video_durations[i] = 100 + i * 10
+        model = self.win.video_strip.model()
+        self.assertTrue(model.moveRows(
+            QModelIndex(), 0, 1, QModelIndex(), 3))
+        self.app.processEvents()
+        self.assertEqual(self.win.video_order[2], 0)
+        # The duration followed the frame: position 2 holds
+        # original frame 0, whose duration is 100.
+        self.assertEqual(self.win._kept_durations()[2], 100)
+        self.assertEqual(self.win._kept_durations()[0], 110)
+
+    def test_durations_survive_keep_drop(self):
+        self._load()
+        self.win.video_durations[0] = 500
+        self.win.video_durations[1] = 250
+        self.win.video_strip.item(0).setCheckState(Qt.CheckState.Unchecked)
+        self.app.processEvents()
+        self.assertEqual(self.win._kept_durations()[0], 250)
+        # The dropped frame's duration is still stored — keeping
+        # it again brings the 500 ms back.
+        self.win.video_strip.item(0).setCheckState(Qt.CheckState.Checked)
+        self.app.processEvents()
+        self.assertEqual(self.win._kept_durations()[0], 500)
+
+    def test_playback_interval_follows_duration(self):
+        self._load()
+        self.win.video_durations[0] = 500
+        self.win.video_durations[1] = 100
+        self._show_frame(0)
+        self.win._on_play_pause()
+        self.assertTrue(self.win.video_timer.isActive())
+        self.assertEqual(self.win.video_timer.interval(), 500)
+        self.win._advance_video_frame()
+        self.assertEqual(self.win.video_current, 1)
+        self.assertEqual(self.win.video_timer.interval(), 100)
+        self.win._stop_playback()
+
+    def test_playback_follows_strip_order_after_reorder(self):
+        # Found while building task 34: the old advance compared
+        # frame NUMBERS, so after a reorder playback played the
+        # original order even though the strip, the export, and
+        # the sheet all followed the strip.
+        from PySide6.QtCore import QModelIndex
+        self._load()
+        model = self.win.video_strip.model()
+        self.assertTrue(model.moveRows(
+            QModelIndex(), 0, 1, QModelIndex(), 3))
+        self.app.processEvents()
+        # Strip order is now [1, 2, 0, 3, ...]. From position 2
+        # (original frame 0), the next frame in strip order is
+        # original frame 3 — the old code would have gone to
+        # frame 1, the next HIGHER number.
+        self._show_frame(2)
+        self.assertEqual(self.win.video_current, 0)
+        self.win._advance_video_frame()
+        self.assertEqual(self.win.video_current, 3)
+
+    def test_scrubber_jumps_and_pauses(self):
+        self._load()
+        self.win._on_play_pause()
+        self.assertTrue(self.win.video_timer.isActive())
+        self.win.video_scrub_slider.setValue(5)
+        self.app.processEvents()
+        self.assertFalse(self.win.video_timer.isActive())
+        self.assertEqual(self.win.video_current, 5)
+        # And the scrubber tracks playback: start again, advance
+        # once, the slider follows.
+        self.win._on_play_pause()
+        self.win._advance_video_frame()
+        self.assertEqual(self.win.video_scrub_slider.value(), 6)
+        self.win._stop_playback()
+
+    def test_onion_toggle_changes_preview(self):
+        self._load()
+        self._show_frame(1)
+        off = self._preview_pixels()
+        self.win.video_onion_check.setChecked(True)
+        self.app.processEvents()
+        on = self._preview_pixels()
+        self.assertNotEqual(off, on)
+        # The first frame has no previous frame — the onion
+        # toggle changes nothing there.
+        self._show_frame(0)
+        first_on = self._preview_pixels()
+        self.win.video_onion_check.setChecked(False)
+        self.app.processEvents()
+        first_off = self._preview_pixels()
+        self.assertEqual(first_on, first_off)
+
+    def test_no_tag_preselected(self):
+        self._load()
+        self.assertEqual(self.win.video_tag_list.currentRow(), -1)
+        self.assertFalse(self.win.video_tag_play_btn.isEnabled())
+        self.assertFalse(self.win.video_tag_delete_btn.isEnabled())
+
+    def test_tag_add_play_delete(self):
+        self._load()
+        self.assertTrue(self.win._add_video_tag("walk", 0, 3))
+        self.assertEqual(self.win.video_tag_list.count(), 1)
+        self.assertEqual(self.win.video_tag_list.item(0).text(),
+                         "walk — frames 1–4")
+        self.win.video_tag_list.setCurrentRow(0)
+        self.win._on_video_tag_play()
+        self.assertIsNotNone(self.win.video_play_tag)
+        self.assertEqual(self.win.video_current, 0)
+        self.assertTrue(self.win.video_timer.isActive())
+        # Playback stays inside the tag and wraps within it
+        # when Loop is on.
+        self.win.video_loop_check.setChecked(True)
+        for expected in (1, 2, 3, 0, 1):
+            self.win._advance_video_frame()
+            self.assertEqual(self.win.video_current, expected)
+        self.win._stop_playback()
+        # Main Play clears the tag: playback is all frames again.
+        self.win._on_play_pause()
+        self.assertIsNone(self.win.video_play_tag)
+        self.win._stop_playback()
+        self.win.video_tag_list.setCurrentRow(0)
+        self.win._on_video_tag_delete()
+        self.assertEqual(self.win.video_tag_list.count(), 0)
+        self.assertEqual(self.win.video_tags, [])
+
+    def test_duplicate_tag_name_refused(self):
+        from unittest import mock
+        self._load()
+        self.assertTrue(self.win._add_video_tag("walk", 0, 3))
+        with mock.patch("pixel_forge.gui.warn_dialog") as warned:
+            self.assertFalse(self.win._add_video_tag("walk", 4, 7))
+        self.assertEqual(self.win.video_tag_list.count(), 1)
+        warned.assert_called_once()
+        self.assertEqual(warned.call_args[0][1], "Could not add tag")
+
+    def test_tag_clamped_on_keep_drop(self):
+        self._load()
+        self.assertTrue(self.win._add_video_tag("walk", 0, 15))
+        self.assertTrue(self.win._add_video_tag("idle", 12, 15))
+        for row in (12, 13, 14, 15):
+            self.win.video_strip.item(row).setCheckState(
+                Qt.CheckState.Unchecked)
+        self.app.processEvents()
+        # "walk" shortened to the frames left; "idle" had no
+        # frames left in its range, so it is gone.
+        self.assertEqual(self.win.video_tags,
+                         [{"name": "walk", "from": 0, "to": 11}])
+        self.assertIn("idle", self.win.statusBar().currentMessage())
+
+    def _gif_frame_times(self, gif):
+        import subprocess
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_frames",
+             "-of", "csv=p=0", gif],
+            capture_output=True, text=True, timeout=60)
+        times = []
+        for line in proc.stdout.splitlines():
+            fields = line.split(",")
+            times.append((float(fields[4]), float(fields[10])))
+        return times
+
+    def test_gif_export_end_to_end(self):
+        self._load()
+        gif = os.path.join(self.tmp, "anim.gif")
+        self.assertTrue(self.win.export_gif(gif))
+        self.assertTrue(os.path.isfile(gif))
+        times = self._gif_frame_times(gif)
+        # 16 frames + the repeated last frame.
+        self.assertEqual(len(times), 17)
+        total = times[-1][0] + times[-1][1]
+        self.assertAlmostEqual(total, 2.0, delta=0.1)
+        self.assertIn("Exported GIF", self.win.statusBar().currentMessage())
+
+    def test_gif_export_one_tag(self):
+        self._load()
+        self.assertTrue(self.win._add_video_tag("walk", 0, 3))
+        gif = os.path.join(self.tmp, "walk.gif")
+        self.assertTrue(self.win.export_gif(
+            gif, self.win.video_tags[0]))
+        times = self._gif_frame_times(gif)
+        self.assertEqual(len(times), 5)
+        total = times[-1][0] + times[-1][1]
+        self.assertAlmostEqual(total, 0.5, delta=0.1)
+
+    def test_sheet_export_carries_durations_and_tags(self):
+        self._load()
+        self.win.video_durations[0] = 500
+        self.win.video_durations[1] = 250
+        self.assertTrue(self.win._add_video_tag("walk", 0, 3))
+        png = os.path.join(self.tmp, "timed-sheet.png")
+        self.assertTrue(self.win.export_spritesheet(png))
+        meta_path = os.path.join(self.tmp, "timed-sheet.json")
+        with open(meta_path) as handle:
+            meta = json.load(handle)
+        self.assertEqual(meta["frames"][0]["duration_ms"], 500)
+        self.assertEqual(meta["frames"][1]["duration_ms"], 250)
+        self.assertEqual(meta["frames"][2]["duration_ms"], 125)
+        self.assertEqual(meta["tags"],
+                         [{"name": "walk", "from": 0, "to": 3}])
+
+    def test_preview_fps_change_resets_durations(self):
+        self._load()
+        self.win.video_durations[0] = 500
+        self.win.video_durations[5] = 900
+        self.win.video_play_fps_spin.setValue(4)
+        self.app.processEvents()
+        # 1000 / 4 = 250 ms for every frame.
+        self.assertEqual(set(self.win.video_durations), {250})
+
+    def test_sheet_fps_change_resets_durations(self):
+        # The Sheet fps is the sheet's base speed: changing it
+        # resets durations the same way, or the metadata would
+        # say fps 12 while every duration_ms still said 125.
+        self._load()
+        self.win.video_durations[0] = 500
+        self.win.video_durations[5] = 900
+        self.win.sheet_fps_spin.setValue(12)
+        self.app.processEvents()
+        # 1000 / 12 = 83 ms for every frame.
+        self.assertEqual(set(self.win.video_durations), {83})
+
+    def test_preview_dialog_plays_durations(self):
+        from pixel_forge.gui import SpritesheetDialog
+        frames = [make_solid_image(32, 32, 255, 0, 0),
+                  make_solid_image(32, 32, 0, 255, 0),
+                  make_solid_image(32, 32, 0, 0, 255)]
+        names = ["a.png", "b.png", "c.png"]
+        dialog = SpritesheetDialog(
+            self.win, frames, names, 3, 0, 8, "sheet.png",
+            durations=[125, 500, 250],
+            tags=[{"name": "walk", "from": 0, "to": 2}])
+        try:
+            self.assertEqual(
+                [f["duration_ms"]
+                 for f in dialog.metadata["frames"]],
+                [125, 500, 250])
+            self.assertEqual(dialog.metadata["tags"],
+                             [{"name": "walk", "from": 0, "to": 2}])
+            dialog._on_play_pause()
+            self.assertEqual(dialog.timer.interval(), 125)
+            dialog._advance()
+            self.assertEqual(dialog.timer.interval(), 500)
+        finally:
+            dialog.close()
+
+
 if __name__ == "__main__":
     unittest.main()

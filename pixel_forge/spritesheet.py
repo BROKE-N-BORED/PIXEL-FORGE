@@ -125,30 +125,113 @@ def duration_for_fps(fps):
     return max(1, int(round(1000 / fps)))
 
 
+def validate_tags(tags, frame_count, path=""):
+    """Check a tags list against a frame count (task 34). A tag is
+    {"name", "from", "to"} — "from" and "to" are 0-based positions
+    in the frame list, in playback order. Names must be unique,
+    non-empty text; from and to must be whole numbers with
+    0 <= from <= to < frame_count. Raises PixelForgeError naming
+    the tag and the problem — never a traceback. path is the file
+    the tags came from, for the message; empty when they were
+    built in memory. None means no tags — valid, nothing to
+    check.
+    """
+    if tags is None:
+        return
+    where = ("%s " % path) if path else ""
+    if not isinstance(tags, list):
+        raise PixelForgeError(
+            "%stags is not a list (got %s)"
+            % (where, type(tags).__name__))
+    seen = set()
+    for position, tag in enumerate(tags):
+        if not isinstance(tag, dict):
+            raise PixelForgeError(
+                "%stag %d is not an object (got %s)"
+                % (where, position,
+                   "null" if tag is None else type(tag).__name__))
+        for key in ("name", "from", "to"):
+            if key not in tag:
+                raise PixelForgeError(
+                    "%stag %d is missing %r" % (where, position, key))
+        name = tag["name"]
+        if not isinstance(name, str) or not name.strip():
+            raise PixelForgeError(
+                "%stag %d name must be non-empty text (got %r)"
+                % (where, position, name))
+        if name in seen:
+            raise PixelForgeError(
+                "%stag %r appears more than once — tag names must "
+                "be unique" % (where, name))
+        seen.add(name)
+        for key in ("from", "to"):
+            if not _is_whole(tag[key]):
+                raise PixelForgeError(
+                    "%stag %r %r must be a whole number (got %r)"
+                    % (where, name, key, tag[key]))
+        start, end = tag["from"], tag["to"]
+        if start < 0 or end < 0:
+            raise PixelForgeError(
+                "%stag %r runs from %d to %d — frame positions "
+                "start at 0" % (where, name, start, end))
+        if start > end:
+            raise PixelForgeError(
+                "%stag %r runs from %d to %d — the start must not "
+                "come after the end" % (where, name, start, end))
+        if end >= frame_count:
+            raise PixelForgeError(
+                "%stag %r runs to frame %d but the sheet only has "
+                "%d %s" % (where, name, end, frame_count,
+                           "frame" if frame_count == 1 else "frames"))
+
+
 def build_metadata(sheet_name, frame_names, frame_w, frame_h,
-                   layout, fps):
+                   layout, fps, durations=None, tags=None):
     """The metadata dict for a packed sheet.
 
     sheet_name is the PNG file's name ("" when the sheet has not
     been saved yet, as in the preview dialog — the name is filled
     in at export). frame_names are the source names in playback
-    order. Every frame carries the same duration from fps.
+    order. Every frame carries the same duration from fps — unless
+    durations is given, one millisecond count per frame, in
+    playback order (task 34: varied timing). tags, when given, is
+    a list of {"name", "from", "to"} animation tags, validated
+    before it is stored; an empty or missing list leaves the
+    "tags" key out, so old output is byte-identical.
     """
-    duration = duration_for_fps(fps)
+    if durations is not None:
+        if len(durations) != len(frame_names):
+            raise PixelForgeError(
+                "internal error: %d frames but %d durations"
+                % (len(frame_names), len(durations)))
+        for duration in durations:
+            if (not isinstance(duration, int)
+                    or isinstance(duration, bool) or duration < 1):
+                raise PixelForgeError(
+                    "frame durations must be whole numbers of at "
+                    "least 1 ms (got %r)" % (duration,))
+    if tags:
+        validate_tags(tags, len(frame_names))
+    default_duration = duration_for_fps(fps)
     frames = []
     for index, (name, (x, y)) in enumerate(
             zip(frame_names, layout["positions"])):
+        duration = (default_duration if durations is None
+                    else durations[index])
         frames.append({"name": name, "index": index,
                        "x": x, "y": y, "w": frame_w, "h": frame_h,
                        "duration_ms": duration})
-    return {"format": FORMAT_NAME, "version": FORMAT_VERSION,
-            "sheet": sheet_name,
-            "sheet_width": layout["sheet_width"],
-            "sheet_height": layout["sheet_height"],
-            "frame_width": frame_w, "frame_height": frame_h,
-            "columns": layout["columns"], "rows": layout["rows"],
-            "padding": layout["padding"],
-            "fps": fps, "frames": frames}
+    metadata = {"format": FORMAT_NAME, "version": FORMAT_VERSION,
+                "sheet": sheet_name,
+                "sheet_width": layout["sheet_width"],
+                "sheet_height": layout["sheet_height"],
+                "frame_width": frame_w, "frame_height": frame_h,
+                "columns": layout["columns"], "rows": layout["rows"],
+                "padding": layout["padding"],
+                "fps": fps, "frames": frames}
+    if tags:
+        metadata["tags"] = [dict(tag) for tag in tags]
+    return metadata
 
 
 def load_frame_dir(directory):
@@ -179,13 +262,17 @@ def load_frame_dir(directory):
 
 
 def write_sheet(images, names, out_png, out_json, cols=None,
-                padding=0, fps=8):
+                padding=0, fps=8, durations=None, tags=None):
     """Pack images, save the sheet PNG + metadata JSON.
 
     Parent folders are created as needed. The JSON's "sheet" field
     is the PNG file's name, so the pair stays linked when moved
-    together. Returns the metadata dict. Raises PixelForgeError
-    with a readable message on any failure.
+    together. durations is one millisecond count per frame, in
+    playback order (task 34: varied timing) — when it is missing,
+    every frame gets 1000 / fps, exactly as before. tags is a list
+    of {"name", "from", "to"} animation tags, stored under "tags"
+    when non-empty. Returns the metadata dict. Raises
+    PixelForgeError with a readable message on any failure.
     """
     if len(images) != len(names):
         raise PixelForgeError(
@@ -200,7 +287,8 @@ def write_sheet(images, names, out_png, out_json, cols=None,
     png_path = Path(out_png)
     json_path = Path(out_json)
     metadata = build_metadata(png_path.name, names,
-                              frame_w, frame_h, layout, fps)
+                              frame_w, frame_h, layout, fps,
+                              durations=durations, tags=tags)
     png_path.parent.mkdir(parents=True, exist_ok=True)
     if not sheet.save(str(png_path), "PNG"):
         raise PixelForgeError("could not write: %s" % png_path)
@@ -327,6 +415,11 @@ def load_metadata(path):
                 "%s %s ends at (%d, %d) but the sheet is only "
                 "%d x %d" % (path, label, x + w, y + h,
                              sheet_w, sheet_h))
+    # Animation tags (task 34) are optional — a sheet written
+    # before tags existed has no "tags" key and loads unchanged.
+    # A present key is validated against the frame count.
+    if "tags" in metadata:
+        validate_tags(metadata["tags"], len(frames), path=str(path))
     return metadata
 
 

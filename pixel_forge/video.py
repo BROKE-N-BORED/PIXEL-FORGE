@@ -31,6 +31,16 @@ DEFAULT_FPS = 8
 # extracting (task 25): a long clip at 24 fps would otherwise
 # write tens of thousands of PNGs with no warning.
 FRAME_COUNT_CONFIRM = 500
+# The GIF muxer gives the LAST frame a fixed 40 ms delay (1/25 s)
+# — it computes every delay from the gap to the NEXT frame, and
+# the last frame has no next frame. GIF export (task 34) works
+# around it by repeating the last frame and shaving this much off
+# its own duration, so the repeated pair shows for exactly the
+# last frame's duration (see write_gif).
+GIF_LAST_FRAME_DELAY_MS = 40
+# Onion skinning (task 34): the previous frame ghosts behind the
+# current one at this alpha (102 of 255, about 40%).
+ONION_GHOST_ALPHA = 102
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v",
                     ".ogv", ".flv", ".wmv", ".mpg", ".mpeg", ".3gp",
                     ".gif"}
@@ -300,3 +310,170 @@ def video_to_frames(video_path, out_dir, fps=DEFAULT_FPS, every=1,
             max_colors=max_colors, dither=dither)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+def onion_blend(current, previous, ghost_alpha=ONION_GHOST_ALPHA):
+    """The current frame with the previous one ghosted through it
+    (task 34): onion skinning for the animation preview. The
+    previous frame shows at about 40% strength (ghost_alpha) —
+    as a 40%-alpha ghost where the current frame is transparent,
+    and mixed 60/40 into the colors where the current frame is
+    opaque. A plain Porter-Duff "over" would be useless here:
+    video frames are opaque, so the current frame would win
+    outright and the ghost would never show. The output keeps
+    the current frame's coverage (opaque stays opaque); only the
+    colors carry the ghost. Returns a new Image; neither input
+    is touched. Both frames must be the same size — a mismatched
+    pair is a plain error, never a crash.
+    """
+    from .image import Image
+
+    if (current.width() != previous.width()
+            or current.height() != previous.height()):
+        raise PixelForgeError(
+            "onion skin needs two frames of the same size (%d x %d "
+            "and %d x %d)" % (current.width(), current.height(),
+                             previous.width(), previous.height()))
+    out = Image(current.width(), current.height())
+    src = current.data
+    ghost = previous.data
+    dst = out.data
+    for offset in range(0, len(src), 4):
+        ca = src[offset + 3]
+        # The ghost's strength, and the current frame's own
+        # weight after the ghost's share is taken out.
+        ga = ghost[offset + 3] * ghost_alpha // 255
+        weight_cur = ca * (255 - ghost_alpha) // 255
+        weight_ghost = ga
+        total = weight_cur + weight_ghost
+        # Coverage is still Porter-Duff "over": the current
+        # frame's alpha is preserved, the ghost only adds
+        # coverage where the current frame has none.
+        alpha = ca + ga * (255 - ca) // 255
+        if alpha == 0:
+            dst[offset:offset + 4] = b"\x00\x00\x00\x00"
+            continue
+        if total == 0:
+            # A nearly-transparent current pixel over a
+            # transparent ghost: both weights round to 0, but the
+            # pixel still has a trace of alpha — black at that
+            # alpha, never a division by zero.
+            dst[offset:offset + 3] = b"\x00\x00\x00"
+            dst[offset + 3] = alpha
+            continue
+        dst[offset] = (src[offset] * weight_cur
+                       + ghost[offset] * weight_ghost) // total
+        dst[offset + 1] = (src[offset + 1] * weight_cur
+                           + ghost[offset + 1] * weight_ghost) // total
+        dst[offset + 2] = (src[offset + 2] * weight_cur
+                           + ghost[offset + 2] * weight_ghost) // total
+        dst[offset + 3] = alpha
+    return out
+
+
+def write_gif(images, durations, out_path, loop=0):
+    """Write an animated GIF from pixelized frames (task 34).
+
+    images are buffer Images, all the same size; durations are
+    milliseconds per frame, one per image, each at least 1. The
+    GIF loops forever when loop is 0 (the default), or the given
+    number of times. Returns the output path as a string.
+
+    Built on ffmpeg's concat demuxer, which takes per-file
+    durations — the only ffmpeg route that honours varied timing
+    (a plain image input is uniform fps). Two quirks are handled
+    here, so callers never see them: the concat demuxer drops the
+    LAST file's duration unless the file is repeated, and the GIF
+    muxer gives a frame with no successor a fixed 40 ms delay — so
+    the last frame is written twice, with GIF_LAST_FRAME_DELAY_MS
+    shaved off its own duration, and the repeated pair shows for
+    exactly that duration. (A last frame shorter than 40 ms keeps
+    its full duration and shows up to 40 ms longer — the shave
+    never goes below 10 ms.) The palette is built from the frames
+    themselves (palettegen, one slot reserved for transparency),
+    so the GIF keeps the frames' own colors instead of ffmpeg's
+    fixed palette. The encoder's picture offsetting is turned
+    OFF (-gifflags -offsetting): by default it crops each frame
+    to its changed bounding box, and that crop misfires on thin
+    content — a single-pixel highlight or a one-pixel-tall line
+    is cropped away entirely (verified 2026-11-13: a frame with
+    8 red pixels in a row encoded as a 1x1 transparent block).
+    Every frame is written whole instead.
+
+    Raises PixelForgeError with a readable message on any failure
+    — missing ffmpeg (with the exact fix), no frames, mismatched
+    durations, mixed frame sizes, or ffmpeg failing (its error
+    tail, last 3 lines, like extract_frames).
+    """
+    ffmpeg = require_ffmpeg()
+    if not images:
+        raise PixelForgeError("no frames to export as a GIF")
+    if len(images) != len(durations):
+        raise PixelForgeError(
+            "internal error: %d frames but %d durations"
+            % (len(images), len(durations)))
+    for duration in durations:
+        if (not isinstance(duration, int)
+                or isinstance(duration, bool) or duration < 1):
+            raise PixelForgeError(
+                "frame durations must be whole numbers of at least "
+                "1 ms (got %r)" % (duration,))
+    first_w, first_h = images[0].width(), images[0].height()
+    for index, image in enumerate(images[1:], start=1):
+        if image.width() != first_w or image.height() != first_h:
+            raise PixelForgeError(
+                "frame %d is %d x %d but frame 1 is %d x %d — a GIF "
+                "needs every frame the same size"
+                % (index + 1, image.width(), image.height(),
+                   first_w, first_h))
+    out = Path(out_path)
+    tmp = tempfile.mkdtemp(prefix="pixel-forge-gif-")
+    try:
+        paths = []
+        for index, image in enumerate(images):
+            path = Path(tmp) / ("frame_%03d.png" % (index + 1))
+            if not image.save(str(path), "PNG"):
+                raise PixelForgeError(
+                    "could not write: %s" % path)
+            paths.append(path)
+        # The concat list: one duration line after each file. The
+        # last file is repeated so its duration is honoured (see
+        # the docstring), with the muxer's fixed last-frame delay
+        # shaved off so the pair lands on the true duration.
+        lines = []
+        for index, path in enumerate(paths):
+            lines.append("file '%s'" % path)
+            duration = durations[index]
+            if index == len(paths) - 1:
+                duration = max(10, duration
+                               - GIF_LAST_FRAME_DELAY_MS)
+            lines.append("duration %.3f" % (duration / 1000))
+        lines.append("file '%s'" % paths[-1])
+        list_path = Path(tmp) / "list.txt"
+        list_path.write_text("\n".join(lines) + "\n")
+        cmd = [ffmpeg, "-y", "-v", "error", "-f", "concat",
+               "-safe", "0", "-i", str(list_path),
+               "-vf", "split[s0][s1];[s0]palettegen=max_colors=255:"
+               "reserve_transparent=1[p];[s1][p]paletteuse",
+               "-gifflags", "-offsetting",
+               "-loop", str(loop), str(out)]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=1800)
+        except subprocess.TimeoutExpired:
+            raise PixelForgeError(
+                "ffmpeg took too long writing %s — try fewer frames"
+                % out.name)
+        except OSError as exc:
+            raise PixelForgeError("could not run ffmpeg: %s" % exc)
+        if proc.returncode != 0:
+            # Slice the LIST of lines, not the joined string
+            # (review B3 — see extract_frames).
+            lines = [line for line in (proc.stderr or "").splitlines()
+                     if line.strip()]
+            tail = lines[-3:]
+            detail = ("\n" + "\n".join(tail)) if tail else ""
+            raise PixelForgeError(
+                "ffmpeg could not write %s" % (out.name, detail))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return str(out)
