@@ -582,6 +582,103 @@ class LibraryCliTests(unittest.TestCase):
         self.assertIn("size", err)
         self.assertNotIn("Traceback", err)
 
+    def test_presets_list_shows_video_fields(self):
+        from pixel_forge.presets import PresetStore
+        store = PresetStore(self.lib_dir)
+        store.save("Video Look",
+                   {"width": 32, "height": 32, "keep_aspect": False,
+                    "palette": "pico8", "max_colors": 16,
+                    "dither": True, "extract_fps": 4,
+                    "preview_fps": 12, "sheet_fps": 8,
+                    "sheet_cols": 4, "sheet_padding": 2})
+        code, out, _err = self._run(["presets", "list"])
+        self.assertEqual(code, 0)
+        self.assertIn("Video Look — 32 x 32, pico8, 16 colors", out)
+        self.assertIn("extract 4 fps", out)
+        self.assertIn("preview 12 fps", out)
+        self.assertIn("sheet 8 fps", out)
+        self.assertIn("sheet columns 4", out)
+        self.assertIn("sheet padding 2 px", out)
+
+    def test_presets_export_writes_shareable_file(self):
+        out_file = os.path.join(tempfile.mkdtemp(), "shared.json")
+        code, out, _err = self._run(
+            ["presets", "export", "Tiny 16", "--out", out_file])
+        self.assertEqual(code, 0)
+        self.assertIn("Exported preset Tiny 16", out)
+        with open(out_file) as handle:
+            data = json.load(handle)
+        self.assertEqual(data["format"], "pixel-forge-preset")
+        self.assertEqual(data["name"], "Tiny 16")
+        self.assertEqual(data["settings"]["width"], 16)
+
+    def test_presets_export_unknown_name_fails_plainly(self):
+        out_file = os.path.join(tempfile.mkdtemp(), "shared.json")
+        code, _out, err = self._run(
+            ["presets", "export", "No Such Preset",
+             "--out", out_file])
+        self.assertEqual(code, 1)
+        self.assertIn("no preset named 'No Such Preset'", err)
+        self.assertNotIn("Traceback", err)
+        self.assertFalse(os.path.exists(out_file))
+
+    def test_presets_export_import_round_trip(self):
+        from pixel_forge.presets import PresetStore
+        store = PresetStore(self.lib_dir)
+        store.save("Video Look",
+                   {"width": 32, "height": 32, "keep_aspect": False,
+                    "palette": "pico8", "max_colors": 16,
+                    "dither": True, "extract_fps": 4,
+                    "sheet_cols": None})
+        shared = os.path.join(tempfile.mkdtemp(), "shared.json")
+        code, _out, _err = self._run(
+            ["presets", "export", "Video Look", "--out", shared])
+        self.assertEqual(code, 0)
+        # Import into a fresh library: the preset arrives whole.
+        fresh = os.path.join(tempfile.mkdtemp(), "fresh-lib")
+        os.environ["PIXELFORGE_LIBRARY"] = fresh
+        code, out, _err = self._run(["presets", "import", shared])
+        self.assertEqual(code, 0)
+        self.assertIn("Imported preset Video Look", out)
+        code, out, _err = self._run(["presets", "list"])
+        self.assertIn("Video Look — 32 x 32, pico8, 16 colors", out)
+        self.assertIn("extract 4 fps", out)
+        self.assertIn("sheet columns auto", out)
+
+    def test_presets_import_bad_file_fails_plainly(self):
+        bad = os.path.join(tempfile.mkdtemp(), "bad.json")
+        with open(bad, "w") as handle:
+            handle.write("{not json")
+        code, _out, err = self._run(["presets", "import", bad])
+        self.assertEqual(code, 1)
+        self.assertIn("not valid JSON", err)
+        self.assertNotIn("Traceback", err)
+        code, out, _err = self._run(["presets", "list"])
+        self.assertNotIn("Bad", out)
+
+    def test_presets_import_clash_refuses(self):
+        from pixel_forge.presets import PresetStore
+        store = PresetStore(self.lib_dir)
+        store.save("Mine", {"width": 32, "height": 32,
+                            "keep_aspect": False, "palette": "pico8",
+                            "max_colors": 16, "dither": True})
+        shared = os.path.join(tempfile.mkdtemp(), "shared.json")
+        with open(shared, "w") as handle:
+            json.dump({"format": "pixel-forge-preset", "version": 1,
+                       "name": "Mine",
+                       "settings": {"width": 16, "height": 16,
+                                    "keep_aspect": False,
+                                    "palette": "pico8",
+                                    "max_colors": 16,
+                                    "dither": True}}, handle)
+        code, _out, err = self._run(["presets", "import", shared])
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", err)
+        self.assertIn("delete it first", err)
+        self.assertNotIn("Traceback", err)
+        # The old preset survives the refusal.
+        self.assertEqual(store.get("Mine")["width"], 32)
+
 
 class CodeCliTests(unittest.TestCase):
     @classmethod

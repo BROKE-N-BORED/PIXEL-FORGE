@@ -2060,13 +2060,22 @@ class PresetGuiTests(unittest.TestCase):
             items = [combo.itemText(i)
                      for i in range(combo.count())]
             self.assertEqual(items, ["Custom", "Game Boy 32",
-                                     "PICO-8 64", "Detailed 64"])
+                                     "PICO-8 64", "Detailed 64",
+                                     "Tiny 16", "Large 128",
+                                     "Tall 32x64", "Wide 64x32",
+                                     "Game Boy 64"])
             data = [combo.itemData(i)
                     for i in range(combo.count())]
             self.assertEqual(data, [None, "builtin:Game Boy 32",
                                     "builtin:PICO-8 64",
-                                    "builtin:Detailed 64"])
+                                    "builtin:Detailed 64",
+                                    "builtin:Tiny 16",
+                                    "builtin:Large 128",
+                                    "builtin:Tall 32x64",
+                                    "builtin:Wide 64x32",
+                                    "builtin:Game Boy 64"])
         self.assertFalse(self.win.preset_delete_btn.isEnabled())
+        self.assertFalse(self.win.preset_export_btn.isEnabled())
 
     def test_apply_builtin_preset_moves_all_controls(self):
         # Move every control away from Game Boy 32 first.
@@ -2277,12 +2286,337 @@ class PresetGuiTests(unittest.TestCase):
             items = [combo.itemText(i)
                      for i in range(combo.count())]
             self.assertEqual(items, ["Custom", "Game Boy 32",
-                                     "PICO-8 64", "Detailed 64"])
+                                     "PICO-8 64", "Detailed 64",
+                                     "Tiny 16", "Large 128",
+                                     "Tall 32x64", "Wide 64x32",
+                                     "Game Boy 64"])
 
     def test_no_warning_label_when_no_skips(self):
         for label in self._warning_labels():
             self.assertTrue(label.isHidden())
             self.assertEqual(label.text(), "")
+
+    # --------------------------------------------------- task 23
+
+    def test_new_builtins_apply(self):
+        self._pick(self.win.preset_combo, "builtin:Tiny 16")
+        self.assertEqual((self.win.width_spin.value(),
+                          self.win.height_spin.value()), (16, 16))
+        self.assertEqual(self.win.size_combo.currentData(), 16)
+        self._pick(self.win.preset_combo, "builtin:Large 128")
+        self.assertEqual((self.win.width_spin.value(),
+                          self.win.height_spin.value()), (128, 128))
+        self._pick(self.win.preset_combo, "builtin:Tall 32x64")
+        self.assertEqual((self.win.width_spin.value(),
+                          self.win.height_spin.value()), (32, 64))
+        # Non-square: the size combo has no such preset, so it
+        # reads Custom.
+        self.assertIsNone(self.win.size_combo.currentData())
+        self._pick(self.win.preset_combo, "builtin:Wide 64x32")
+        self.assertEqual((self.win.width_spin.value(),
+                          self.win.height_spin.value()), (64, 32))
+        self._pick(self.win.preset_combo, "builtin:Game Boy 64")
+        self.assertEqual((self.win.width_spin.value(),
+                          self.win.height_spin.value()), (64, 64))
+        self.assertEqual(self.win.palette_combo.currentData(),
+                         "gameboy")
+        self.assertEqual(self.win.colors_spin.value(), 4)
+
+    def _save_video_preset(self, name="Video Look", **overrides):
+        settings = {"width": 32, "height": 32, "keep_aspect": False,
+                    "palette": "pico8", "max_colors": 16,
+                    "dither": True, "extract_fps": 4,
+                    "preview_fps": 12, "sheet_fps": 8,
+                    "sheet_cols": 4, "sheet_padding": 2}
+        settings.update(overrides)
+        self.win.preset_store.save(name, settings)
+        self.win._refresh_preset_combos()
+        return settings
+
+    def _video_control_values(self):
+        return (self.win.video_fps_combo.currentData(),
+                self.win.video_play_fps_spin.value(),
+                self.win.sheet_fps_spin.value(),
+                self.win.sheet_cols_combo.currentData(),
+                self.win.sheet_padding_spin.value())
+
+    def test_video_preset_applies_video_fields(self):
+        self._save_video_preset()
+        self._pick(self.win.video_preset_combo, "user:Video Look")
+        self.assertEqual(self._video_control_values(),
+                         (4, 12, 8, 4, 2))
+        # The shared fields apply too.
+        self.assertEqual((self.win.video_width_spin.value(),
+                          self.win.video_height_spin.value()),
+                         (32, 32))
+        self.assertEqual(self.win.video_palette_combo.currentData(),
+                         "pico8")
+
+    def test_preset_without_video_fields_leaves_them_alone(self):
+        # Move every video control away from its default, then
+        # pick a preset with no video fields: the shared fields
+        # apply, the video controls stay exactly where they were.
+        self.win.video_fps_combo.setCurrentIndex(
+            self.win.video_fps_combo.findData(24))
+        self.win.video_play_fps_spin.setValue(2)
+        self.win.sheet_fps_spin.setValue(30)
+        self.win.sheet_cols_combo.setCurrentIndex(
+            self.win.sheet_cols_combo.findData(8))
+        self.win.sheet_padding_spin.setValue(5)
+        before = self._video_control_values()
+        self.assertEqual(before, (24, 2, 30, 8, 5))
+        self._pick(self.win.video_preset_combo, "builtin:PICO-8 64")
+        self.assertEqual(self._video_control_values(), before)
+        self.assertEqual((self.win.video_width_spin.value(),
+                          self.win.video_height_spin.value()),
+                         (64, 64))
+
+    def test_video_fields_ignored_on_image_and_prompt_tabs(self):
+        self._save_video_preset()
+        self.win.video_fps_combo.setCurrentIndex(
+            self.win.video_fps_combo.findData(24))
+        before = self._video_control_values()
+        self._pick(self.win.preset_combo, "user:Video Look")
+        self.assertEqual(self._video_control_values(), before)
+        self.assertEqual((self.win.width_spin.value(),
+                          self.win.height_spin.value()), (32, 32))
+        self._pick(self.win.prompt_preset_combo, "user:Video Look")
+        self.assertEqual(self._video_control_values(), before)
+        self.assertEqual((self.win.prompt_width_spin.value(),
+                          self.win.prompt_height_spin.value()),
+                         (32, 32))
+
+    def test_video_preset_with_auto_columns(self):
+        self._save_video_preset(sheet_cols=None)
+        self.win.sheet_cols_combo.setCurrentIndex(
+            self.win.sheet_cols_combo.findData(4))
+        self._pick(self.win.video_preset_combo, "user:Video Look")
+        self.assertIsNone(self.win.sheet_cols_combo.currentData())
+
+    def test_applying_video_preset_keeps_picker_on_it(self):
+        self._save_video_preset()
+        self._pick(self.win.video_preset_combo, "user:Video Look")
+        self.assertEqual(self.win.video_preset_combo.currentText(),
+                         "Video Look")
+        self.assertTrue(
+            self.win.video_preset_export_btn.isEnabled())
+
+    def test_hand_changing_video_control_marks_preset_custom(self):
+        self._save_video_preset()
+        self._pick(self.win.video_preset_combo, "user:Video Look")
+        self.win.sheet_fps_spin.setValue(30)
+        self.assertEqual(self.win.video_preset_combo.currentText(),
+                         "Custom")
+        self.assertFalse(
+            self.win.video_preset_export_btn.isEnabled())
+        # Same for the extract fps: re-pick, then change it.
+        self._pick(self.win.video_preset_combo, "user:Video Look")
+        self.win.video_fps_combo.setCurrentIndex(
+            self.win.video_fps_combo.findData(24))
+        self.assertEqual(self.win.video_preset_combo.currentText(),
+                         "Custom")
+
+    def test_hand_changing_video_control_keeps_plain_preset(self):
+        # A preset without video fields does not cover fps or
+        # sheet settings, so changing them invalidates nothing —
+        # the picker stays on the preset.
+        self._pick(self.win.video_preset_combo, "builtin:PICO-8 64")
+        self.win.sheet_fps_spin.setValue(30)
+        self.win.video_fps_combo.setCurrentIndex(
+            self.win.video_fps_combo.findData(24))
+        self.win.sheet_cols_combo.setCurrentIndex(
+            self.win.sheet_cols_combo.findData(8))
+        self.assertEqual(self.win.video_preset_combo.currentText(),
+                         "PICO-8 64")
+
+    def test_video_tab_save_captures_video_fields(self):
+        from unittest import mock
+        self.win.video_fps_combo.setCurrentIndex(
+            self.win.video_fps_combo.findData(12))
+        self.win.video_play_fps_spin.setValue(2)
+        self.win.sheet_fps_spin.setValue(24)
+        self.win.sheet_cols_combo.setCurrentIndex(
+            self.win.sheet_cols_combo.findData(6))
+        self.win.sheet_padding_spin.setValue(3)
+        with mock.patch.object(QInputDialog, "getText",
+                               return_value=("Video Look", True)):
+            self.win._on_save_preset("video")
+        stored = self.win.preset_store.get("Video Look")
+        self.assertEqual(stored["extract_fps"], 12)
+        self.assertEqual(stored["preview_fps"], 2)
+        self.assertEqual(stored["sheet_fps"], 24)
+        self.assertEqual(stored["sheet_cols"], 6)
+        self.assertEqual(stored["sheet_padding"], 3)
+
+    def test_image_tab_save_has_no_video_fields(self):
+        from unittest import mock
+        with mock.patch.object(QInputDialog, "getText",
+                               return_value=("Still Look", True)):
+            self.win._on_save_preset("image")
+        stored = self.win.preset_store.get("Still Look")
+        for field in ("extract_fps", "preview_fps", "sheet_fps",
+                      "sheet_cols", "sheet_padding"):
+            self.assertNotIn(field, stored)
+
+    def test_export_import_buttons_present_on_all_tabs(self):
+        for prefix in ("", "video_", "prompt_"):
+            export_btn = getattr(self.win,
+                                 prefix + "preset_export_btn")
+            import_btn = getattr(self.win,
+                                 prefix + "preset_import_btn")
+            self.assertEqual(export_btn.text(), "Export preset")
+            self.assertEqual(import_btn.text(), "Import preset")
+            self.assertTrue(export_btn.toolTip().strip())
+            self.assertTrue(import_btn.toolTip().strip())
+            # Export disabled with no preset picked; Import
+            # always available.
+            self.assertFalse(export_btn.isEnabled())
+            self.assertTrue(import_btn.isEnabled())
+
+    def test_export_button_enabled_with_preset_picked(self):
+        self._pick(self.win.preset_combo, "builtin:Game Boy 32")
+        self.assertTrue(self.win.preset_export_btn.isEnabled())
+        self.win.preset_combo.setCurrentIndex(0)  # Custom
+        self.assertFalse(self.win.preset_export_btn.isEnabled())
+        self._save_video_preset()
+        self._pick(self.win.video_preset_combo, "user:Video Look")
+        self.assertTrue(
+            self.win.video_preset_export_btn.isEnabled())
+        # A hand-changed control drops the picker to Custom and
+        # disables Export again.
+        self.win.video_colors_spin.setValue(4)
+        self.assertFalse(
+            self.win.video_preset_export_btn.isEnabled())
+
+    def test_export_preset_writes_file(self):
+        from unittest import mock
+        path = os.path.join(tempfile.mkdtemp(), "shared.json")
+        self._pick(self.win.preset_combo, "builtin:Tiny 16")
+        with mock.patch.object(
+                QFileDialog, "getSaveFileName",
+                return_value=(path, "Pixel Forge preset (*.json)")):
+            self.win._on_export_preset("image")
+        with open(path) as handle:
+            data = json.load(handle)
+        self.assertEqual(data["format"], "pixel-forge-preset")
+        self.assertEqual(data["name"], "Tiny 16")
+        self.assertEqual(data["settings"]["width"], 16)
+        self.assertIn("Exported preset Tiny 16",
+                      self.win.statusBar().currentMessage())
+
+    def test_export_preset_cancelled_writes_nothing(self):
+        from unittest import mock
+        path = os.path.join(tempfile.mkdtemp(), "shared.json")
+        self._pick(self.win.preset_combo, "builtin:Tiny 16")
+        with mock.patch.object(
+                QFileDialog, "getSaveFileName",
+                return_value=("", "")):
+            self.win._on_export_preset("image")
+        self.assertFalse(os.path.exists(path))
+
+    def test_import_preset_round_trip(self):
+        from unittest import mock
+        from pixel_forge.presets import write_preset_export
+        path = os.path.join(tempfile.mkdtemp(), "shared.json")
+        write_preset_export(path, "Shared Look",
+                            {"width": 48, "height": 48,
+                             "keep_aspect": True, "palette": "pico8",
+                             "max_colors": 8, "dither": False,
+                             "extract_fps": 4})
+        with mock.patch.object(
+                QFileDialog, "getOpenFileName",
+                return_value=(path, "Pixel Forge preset (*.json)")):
+            self.win._on_import_preset("image")
+        stored = self.win.preset_store.get("Shared Look")
+        self.assertEqual(stored["width"], 48)
+        self.assertEqual(stored["extract_fps"], 4)
+        self.assertEqual(self.win.preset_combo.currentText(),
+                         "Shared Look")
+        self.assertIn("Imported preset Shared Look",
+                      self.win.statusBar().currentMessage())
+
+    def test_import_bad_file_refuses_and_touches_nothing(self):
+        from unittest import mock
+        import pixel_forge.gui as gui_mod
+        path = os.path.join(tempfile.mkdtemp(), "bad.json")
+        with open(path, "w") as handle:
+            handle.write("{not json")
+        with mock.patch.object(
+                QFileDialog, "getOpenFileName",
+                return_value=(path, "Pixel Forge preset (*.json)")), \
+                mock.patch.object(gui_mod, "warn_dialog") as warned:
+            self.win._on_import_preset("image")
+        warned.assert_called_once()
+        self.assertEqual(warned.call_args[0][1],
+                         "Could not import preset")
+        self.assertEqual(self.win.preset_store.user_presets(), {})
+
+    def test_import_shadowing_builtin_needs_no_question(self):
+        from unittest import mock
+        from pixel_forge.presets import write_preset_export
+        path = os.path.join(tempfile.mkdtemp(), "shared.json")
+        write_preset_export(path, "Game Boy 32",
+                            {"width": 64, "height": 64,
+                             "keep_aspect": False,
+                             "palette": "gameboy", "max_colors": 4,
+                             "dither": False})
+        with mock.patch.object(
+                QFileDialog, "getOpenFileName",
+                return_value=(path, "Pixel Forge preset (*.json)")), \
+                mock.patch.object(
+                    QMessageBox, "question",
+                    side_effect=AssertionError(
+                        "no question for a built-in name")):
+            self.win._on_import_preset("image")
+        items = [self.win.preset_combo.itemText(i)
+                 for i in range(self.win.preset_combo.count())]
+        self.assertIn("Game Boy 32 (custom)", items)
+        self.assertEqual(self.win.preset_store.get("Game Boy 32")
+                         ["width"], 64)
+        self.assertEqual(
+            self.win.preset_store.get("Game Boy 32",
+                                      builtin=True)["width"], 32)
+
+    def _import_file_named(self, name, width, answer):
+        """Import a preset file over an existing user preset,
+        answering the replace question with `answer`."""
+        from unittest import mock
+        from pixel_forge.presets import write_preset_export
+        path = os.path.join(tempfile.mkdtemp(), "shared.json")
+        write_preset_export(path, name,
+                            {"width": width, "height": 32,
+                             "keep_aspect": False, "palette": "pico8",
+                             "max_colors": 16, "dither": True})
+        with mock.patch.object(
+                QFileDialog, "getOpenFileName",
+                return_value=(path, "Pixel Forge preset (*.json)")), \
+                mock.patch.object(
+                    QMessageBox, "question",
+                    return_value=answer) as asked:
+            self.win._on_import_preset("image")
+        return asked
+
+    def test_import_clash_declined_keeps_old_preset(self):
+        self.win.preset_store.save(
+            "Mine", {"width": 32, "height": 32, "keep_aspect": False,
+                     "palette": "pico8", "max_colors": 16,
+                     "dither": True})
+        asked = self._import_file_named(
+            "Mine", 16, QMessageBox.StandardButton.No)
+        asked.assert_called_once()
+        self.assertEqual(self.win.preset_store.get("Mine")["width"],
+                         32)
+
+    def test_import_clash_accepted_replaces_preset(self):
+        self.win.preset_store.save(
+            "Mine", {"width": 32, "height": 32, "keep_aspect": False,
+                     "palette": "pico8", "max_colors": 16,
+                     "dither": True})
+        asked = self._import_file_named(
+            "Mine", 16, QMessageBox.StandardButton.Yes)
+        asked.assert_called_once()
+        self.assertEqual(self.win.preset_store.get("Mine")["width"],
+                         16)
 
 
 class SheetLibraryGuiTests(unittest.TestCase):

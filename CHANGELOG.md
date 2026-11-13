@@ -1,6 +1,37 @@
 # Pixel Forge changelog
 
-## 0.33 — 2026-11-13
+## 0.34 — 2026-11-13
+
+Presets — task-list item #23, three sub-items in one release:
+
+- Five more built-in presets, so the common sizes are one pick
+  away: "Tiny 16" (16x16, PICO-8, 16 colors, dithered), "Large
+  128" (128x128, from the image, 16 colors, dithered), "Tall
+  32x64" and "Wide 64x32" (non-square, PICO-8, 16 colors,
+  dithered), and "Game Boy 64" (64x64, Game Boy, 4 colors).
+  Built-ins stay read-only, as before.
+- Presets now cover the Video tab too. A preset may carry
+  extract fps, preview fps, sheet fps, sheet columns, and sheet
+  padding; picking it on the Video tab sets those controls, and
+  "Save current as preset" on the Video tab captures them. The
+  fields are optional — a preset without one leaves that control
+  alone, and the Image and Prompt tabs ignore them entirely. A
+  preset with a bad video field is skipped with a reason, the
+  same fail-soft rule as any other bad preset. Hand-changing a
+  video control drops the picker to Custom when the picked
+  preset covers that control — a preset without video fields
+  stays picked, since changing fps never invalidated one.
+- Presets can be shared as one JSON file. Export and Import
+  buttons sit under the preset picker on all three tabs; the
+  file carries a format marker, the name, and the settings, and
+  imports back identically. Importing a name that matches a
+  built-in shadows it as "(custom)"; importing a name that
+  matches an existing user preset asks Yes/No (default No)
+  before replacing it in the window, and refuses plainly in the
+  CLI (`pixel-forge presets export NAME --out FILE`,
+  `pixel-forge presets import FILE`). A bad file refuses plainly
+  and touches nothing.
+
 
 Polish pass — task-list item #22, thirteen sub-items in one
 release. Nothing here changes what Pixel Forge does; everything

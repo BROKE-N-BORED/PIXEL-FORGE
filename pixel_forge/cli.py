@@ -201,11 +201,23 @@ def build_parser():
                          help="comma-separated tags")
 
     presets = sub.add_parser(
-        "presets", help="list pixelize presets (built-in and saved)")
+        "presets", help="manage pixelize presets (built-in and "
+        "saved): list, export, import")
     pre_sub = presets.add_subparsers(dest="presets_command",
                                      metavar="command")
     pre_sub.required = True
     pre_sub.add_parser("list", help="list all presets")
+    pre_export = pre_sub.add_parser(
+        "export", help="export a preset to a JSON file to share")
+    pre_export.add_argument("name", help="preset name (built-in "
+                            "or saved — a saved preset wins when "
+                            "both exist)")
+    pre_export.add_argument("--out", required=True,
+                            help="JSON file to write")
+    pre_import = pre_sub.add_parser(
+        "import", help="import a preset from a shared JSON file")
+    pre_import.add_argument("file", help="preset JSON file to "
+                            "import")
 
     code = sub.add_parser(
         "code", help="reproduce pixel-art assets from source code "
@@ -407,19 +419,60 @@ def cmd_library_add(args):
 def cmd_presets_list(_args):
     store = PresetStore()
     for name, settings, builtin in store.all_presets():
-        print("%s%s — %d x %d, %s, %d colors, dither %s, "
-              "keep aspect %s" % (
-                  name, " (built-in)" if builtin else "",
-                  settings["width"], settings["height"],
-                  settings["palette"], settings["max_colors"],
-                  "on" if settings["dither"] else "off",
-                  "on" if settings["keep_aspect"] else "off"))
+        line = ("%s%s — %d x %d, %s, %d colors, dither %s, "
+                "keep aspect %s" % (
+                    name, " (built-in)" if builtin else "",
+                    settings["width"], settings["height"],
+                    settings["palette"], settings["max_colors"],
+                    "on" if settings["dither"] else "off",
+                    "on" if settings["keep_aspect"] else "off"))
+        video = []
+        if "extract_fps" in settings:
+            video.append("extract %d fps" % settings["extract_fps"])
+        if "preview_fps" in settings:
+            video.append("preview %d fps" % settings["preview_fps"])
+        if "sheet_fps" in settings:
+            video.append("sheet %d fps" % settings["sheet_fps"])
+        if "sheet_cols" in settings:
+            cols = settings["sheet_cols"]
+            video.append("sheet columns %s"
+                         % ("auto" if cols is None else cols))
+        if "sheet_padding" in settings:
+            video.append("sheet padding %d px"
+                         % settings["sheet_padding"])
+        if video:
+            line += ", video: " + ", ".join(video)
+        print(line)
     # Files that failed to parse are reported, never swallowed:
     # one line each, name + reason, on stderr — the good presets
     # still listed above.
     for name, reason in store.skipped_presets():
         print("pixel-forge: skipped preset %r: %s"
               % (name, reason), file=sys.stderr)
+    return 0
+
+
+def cmd_presets_export(args):
+    store = PresetStore()
+    # A saved preset wins when a name exists in both slots —
+    # the user one is the one they would mean.
+    if store.get(args.name) is not None:
+        builtin = False
+    elif store.get(args.name, builtin=True) is not None:
+        builtin = True
+    else:
+        raise PixelForgeError("no preset named %r" % args.name)
+    store.export_preset(args.name, args.out, builtin=builtin)
+    print("Exported preset %s to %s" % (args.name, args.out))
+    return 0
+
+
+def cmd_presets_import(args):
+    store = PresetStore()
+    # A name clash refuses plainly — no --force; delete the old
+    # preset first. (The window asks Yes/No instead.)
+    name = store.import_preset(args.file)
+    print("Imported preset %s" % name)
     return 0
 
 
@@ -522,6 +575,10 @@ def main(argv=None):
         if args.command == "presets":
             if args.presets_command == "list":
                 return cmd_presets_list(args)
+            if args.presets_command == "export":
+                return cmd_presets_export(args)
+            if args.presets_command == "import":
+                return cmd_presets_import(args)
         if args.command == "code":
             return cmd_code(args)
         if args.command == "skin":

@@ -69,7 +69,8 @@ from .palettes import PALETTE_LABELS
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
                        count_opaque_colors, load_image, pixelize_image,
                        plural)
-from .presets import BUILTIN_PRESETS, PresetStore
+from .presets import (BUILTIN_PRESETS, SHEET_COLS_VALUES, PresetStore,
+                      read_preset_export)
 from .qtimage import to_qimage
 from .skins import (detect_skin, extract_skin, pixelize_texture,
                     skin_figure, skin_parts)
@@ -952,6 +953,30 @@ class MainWindow(QMainWindow):
         button_row.addWidget(delete_btn)
         setattr(self, prefix + "preset_delete_btn", delete_btn)
         form.addLayout(button_row)
+        # A second row for sharing: Export writes the picked
+        # preset to a JSON file, Import reads one back. Same
+        # slim padding — the row fits the 252 px viewport.
+        share_row = QHBoxLayout()
+        export_btn = QPushButton("Export preset")
+        export_btn.setStyleSheet(
+            "padding-left: 6px; padding-right: 6px;")
+        export_btn.setToolTip(
+            "Save the selected preset as a JSON file to share")
+        export_btn.setEnabled(False)
+        export_btn.clicked.connect(
+            lambda _c, t=tab: self._on_export_preset(t))
+        share_row.addWidget(export_btn)
+        setattr(self, prefix + "preset_export_btn", export_btn)
+        import_btn = QPushButton("Import preset")
+        import_btn.setStyleSheet(
+            "padding-left: 6px; padding-right: 6px;")
+        import_btn.setToolTip(
+            "Load a preset from a shared JSON file")
+        import_btn.clicked.connect(
+            lambda _c, t=tab: self._on_import_preset(t))
+        share_row.addWidget(import_btn)
+        setattr(self, prefix + "preset_import_btn", import_btn)
+        form.addLayout(share_row)
 
     # ============================================================ image tab
 
@@ -1466,6 +1491,9 @@ class MainWindow(QMainWindow):
             FPS_PRESETS.index(DEFAULT_FPS))
         self.video_fps_combo.currentIndexChanged.connect(
             self._on_video_extract_changed)
+        self.video_fps_combo.currentIndexChanged.connect(
+            lambda _i: self._mark_video_preset_custom(
+                "extract_fps"))
         fps_row.addWidget(self.video_fps_combo)
         form.addLayout(fps_row)
 
@@ -1599,8 +1627,10 @@ class MainWindow(QMainWindow):
         self.sheet_cols_combo.setToolTip(
             "Columns in the packed spritesheet")
         self.sheet_cols_combo.addItem("Auto", None)
-        for count in (2, 3, 4, 5, 6, 8, 10, 12, 16):
+        for count in SHEET_COLS_VALUES:
             self.sheet_cols_combo.addItem(str(count), count)
+        self.sheet_cols_combo.currentIndexChanged.connect(
+            lambda _i: self._mark_video_preset_custom("sheet_cols"))
         sheet_cols_row.addWidget(self.sheet_cols_combo)
         form.addLayout(sheet_cols_row)
 
@@ -1612,6 +1642,9 @@ class MainWindow(QMainWindow):
         self.sheet_padding_spin.setSuffix(" px")
         self.sheet_padding_spin.setToolTip(
             "Blank pixels between frames in the sheet")
+        self.sheet_padding_spin.valueChanged.connect(
+            lambda _v: self._mark_video_preset_custom(
+                "sheet_padding"))
         sheet_padding_row.addWidget(self.sheet_padding_spin)
         form.addLayout(sheet_padding_row)
 
@@ -1622,6 +1655,8 @@ class MainWindow(QMainWindow):
         self.sheet_fps_spin.setValue(DEFAULT_FPS)
         self.sheet_fps_spin.setToolTip(
             "Playback speed stored in the sheet metadata")
+        self.sheet_fps_spin.valueChanged.connect(
+            lambda _v: self._mark_video_preset_custom("sheet_fps"))
         sheet_fps_row.addWidget(self.sheet_fps_spin)
         form.addLayout(sheet_fps_row)
 
@@ -1699,6 +1734,9 @@ class MainWindow(QMainWindow):
             "Playback speed of the preview")
         self.video_play_fps_spin.valueChanged.connect(
             self._on_play_fps_changed)
+        self.video_play_fps_spin.valueChanged.connect(
+            lambda _v: self._mark_video_preset_custom(
+                "preview_fps"))
         playback_row.addWidget(self.video_play_fps_spin)
         self.video_loop_check = QCheckBox("Loop")
         self.video_loop_check.setToolTip(
@@ -4028,16 +4066,32 @@ class MainWindow(QMainWindow):
             "preset_warning": getattr(
                 self, prefix + "preset_warning_label"),
             "delete_btn": getattr(self, prefix + "preset_delete_btn"),
+            "export_btn": getattr(self, prefix + "preset_export_btn"),
         }
 
     def _read_tab_settings(self, tab):
         controls = self._tab_controls(tab)
-        return {"width": controls["width"].value(),
-                "height": controls["height"].value(),
-                "keep_aspect": controls["aspect"].isChecked(),
-                "palette": controls["palette"].currentData(),
-                "max_colors": controls["colors"].value(),
-                "dither": controls["dither"].isChecked()}
+        settings = {"width": controls["width"].value(),
+                    "height": controls["height"].value(),
+                    "keep_aspect": controls["aspect"].isChecked(),
+                    "palette": controls["palette"].currentData(),
+                    "max_colors": controls["colors"].value(),
+                    "dither": controls["dither"].isChecked()}
+        # The Video tab's save captures the video fps + sheet
+        # settings too, so a saved video preset re-applies the
+        # whole look; the other tabs have no such controls and
+        # save without them.
+        if tab == "video":
+            settings["extract_fps"] = \
+                self.video_fps_combo.currentData()
+            settings["preview_fps"] = \
+                self.video_play_fps_spin.value()
+            settings["sheet_fps"] = self.sheet_fps_spin.value()
+            settings["sheet_cols"] = \
+                self.sheet_cols_combo.currentData()
+            settings["sheet_padding"] = \
+                self.sheet_padding_spin.value()
+        return settings
 
     def _apply_settings_to_tab(self, tab, settings):
         """Set a tab's controls from a preset. The live preview
@@ -4065,6 +4119,34 @@ class MainWindow(QMainWindow):
                 controls["palette"].setCurrentIndex(index)
             controls["colors"].setValue(settings["max_colors"])
             controls["dither"].setChecked(settings["dither"])
+            if tab == "video":
+                # The video fields are optional: a preset
+                # carrying one sets that control, a preset
+                # without it leaves the control alone — never
+                # reset to a default. The other tabs have no
+                # such controls and ignore the fields entirely.
+                # Every value here is in its control's range
+                # (validate_settings checked it), so findData
+                # always lands; the guard is belt-and-braces.
+                if "extract_fps" in settings:
+                    index = self.video_fps_combo.findData(
+                        settings["extract_fps"])
+                    if index >= 0:
+                        self.video_fps_combo.setCurrentIndex(index)
+                if "preview_fps" in settings:
+                    self.video_play_fps_spin.setValue(
+                        settings["preview_fps"])
+                if "sheet_fps" in settings:
+                    self.sheet_fps_spin.setValue(
+                        settings["sheet_fps"])
+                if "sheet_cols" in settings:
+                    index = self.sheet_cols_combo.findData(
+                        settings["sheet_cols"])
+                    if index >= 0:
+                        self.sheet_cols_combo.setCurrentIndex(index)
+                if "sheet_padding" in settings:
+                    self.sheet_padding_spin.setValue(
+                        settings["sheet_padding"])
         finally:
             self._applying_preset = False
 
@@ -4089,6 +4171,38 @@ class MainWindow(QMainWindow):
         delete_btn = getattr(self, prefix + "preset_delete_btn", None)
         if delete_btn is not None:
             delete_btn.setEnabled(False)
+        export_btn = getattr(self, prefix + "preset_export_btn", None)
+        if export_btn is not None:
+            export_btn.setEnabled(False)
+
+    def _mark_video_preset_custom(self, field):
+        """A video control changed by hand — if the picked preset
+        carries that field, the tab no longer matches it, so the
+        picker goes back to Custom. A preset WITHOUT the field
+        is unaffected (its look does not cover that control), so
+        the picker stays — changing fps never invalidated a
+        shared-only preset, and still does not. Suppressed while
+        a preset is being applied, and a no-op while the tab is
+        still being built (its picker does not exist yet — the
+        fps combo fires during construction). A corrupt presets
+        file never breaks a control change: the marking is
+        cosmetic, so a store error just skips it."""
+        if self._applying_preset:
+            return
+        combo = getattr(self, "video_preset_combo", None)
+        if combo is None:
+            return
+        data = combo.currentData()
+        if data is None:
+            return
+        kind, name = data.split(":", 1)
+        try:
+            settings = self.preset_store.get(
+                name, builtin=(kind == "builtin"))
+        except PixelForgeError:
+            return
+        if settings is not None and field in settings:
+            self._mark_preset_custom("video")
 
     def _refresh_preset_combos(self):
         """Rebuild all three preset pickers from the store,
@@ -4136,15 +4250,17 @@ class MainWindow(QMainWindow):
                 combo.setCurrentIndex(index)
             finally:
                 combo.blockSignals(False)
-            self._update_preset_delete_button(tab)
+            self._update_preset_buttons(tab)
 
-    def _update_preset_delete_button(self, tab):
+    def _update_preset_buttons(self, tab):
         """Delete is only for a selected USER preset — Custom and
-        built-ins keep it disabled."""
+        built-ins keep it disabled. Export is for any selected
+        preset, built-in or user — Custom keeps it disabled."""
         controls = self._tab_controls(tab)
         data = controls["preset_combo"].currentData()
         controls["delete_btn"].setEnabled(
             data is not None and data.startswith("user:"))
+        controls["export_btn"].setEnabled(data is not None)
 
     def _select_preset(self, tab, data):
         """Set a tab's picker to the preset with this data key
@@ -4156,13 +4272,13 @@ class MainWindow(QMainWindow):
                 combo.setCurrentIndex(i)
                 combo.blockSignals(False)
                 break
-        self._update_preset_delete_button(tab)
+        self._update_preset_buttons(tab)
 
     def _on_library_preset(self, tab):
         """A preset was picked — apply it to this tab."""
         controls = self._tab_controls(tab)
         data = controls["preset_combo"].currentData()
-        self._update_preset_delete_button(tab)
+        self._update_preset_buttons(tab)
         if data is None:
             return
         kind, name = data.split(":", 1)
@@ -4214,6 +4330,66 @@ class MainWindow(QMainWindow):
             return
         self._refresh_preset_combos()
         self.statusBar().showMessage("Deleted preset %s" % name)
+
+    def _on_export_preset(self, tab):
+        """Write the picked preset — built-in or user — to a
+        JSON file to share. Disabled with no preset picked."""
+        controls = self._tab_controls(tab)
+        data = controls["preset_combo"].currentData()
+        if data is None:
+            return
+        kind, name = data.split(":", 1)
+        default = self._export_default("%s.json" % name)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export preset", default,
+            "Pixel Forge preset (*.json)")
+        if not path:
+            return
+        try:
+            self.preset_store.export_preset(
+                name, path, builtin=(kind == "builtin"))
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not export preset", str(exc))
+            return
+        self._remember_export_dir(Path(path).parent)
+        self.statusBar().showMessage(
+            "Exported preset %s to %s" % (name, path))
+
+    def _on_import_preset(self, tab):
+        """Read a shared preset file into the user presets. A
+        bad file refuses plainly and touches nothing. A name
+        matching a built-in shadows it as "(custom)"; a name
+        matching an existing user preset asks Yes/No (default
+        No) before replacing it."""
+        last = self._last_export_dir() or ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import preset", last,
+            "Pixel Forge preset (*.json)")
+        if not path:
+            return
+        try:
+            name, _settings = read_preset_export(path)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not import preset", str(exc))
+            return
+        if self.preset_store.get(name) is not None:
+            answer = QMessageBox.question(
+                self, "Replace preset",
+                "A preset named %s already exists. Replace it?"
+                % name,
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            self.preset_store.import_preset(path, overwrite=True)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not import preset", str(exc))
+            return
+        self._refresh_preset_combos()
+        self._select_preset(tab, "user:%s" % name)
+        self.statusBar().showMessage("Imported preset %s" % name)
 
     # ======================================================= library tab
 

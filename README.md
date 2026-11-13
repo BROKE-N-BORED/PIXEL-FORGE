@@ -156,6 +156,8 @@ pixel-forge library list
 pixel-forge library list --tag hero
 pixel-forge library add sprite.png --name "Red Knight" --tags hero,red
 pixel-forge presets list
+pixel-forge presets export "My Knight Look" --out knight-look.json
+pixel-forge presets import knight-look.json
 pixel-forge code game.py --list
 pixel-forge code game.py --asset HERO --out hero.png
 pixel-forge code src/ --list
@@ -352,7 +354,27 @@ A preset needs all six keys: `width` and `height` (1–512),
 `keep_aspect` (true/false), `palette` (`image`, `pico8`,
 `gameboy`, `grayscale`), `max_colors` (2–256), `dither`
 (true/false). A hand-edited file with a bad preset fails loudly
-instead of applying nonsense.
+instead of applying nonsense. A preset may also carry five
+optional video fields — `extract_fps` (2, 4, 8, 12, or 24),
+`preview_fps` and `sheet_fps` (1–30), `sheet_cols` (automatic,
+or 2, 3, 4, 5, 6, 8, 10, 12, 16), `sheet_padding` (0–32) — which
+only the Video tab uses; the other tabs ignore them, and a
+preset without one leaves that control alone. Saving a preset
+from the Video tab captures them; saving from the Image or
+Prompt tab does not.
+
+Eight presets ship built in: "Game Boy 32", "PICO-8 64",
+"Detailed 64", "Tiny 16", "Large 128", "Tall 32x64",
+"Wide 64x32", and "Game Boy 64". Any preset — built-in or saved
+— can be exported to one JSON file from the Export button under
+the preset picker (or `pixel-forge presets export NAME --out
+FILE`) and imported back with the Import button (or `pixel-forge
+presets import FILE`). The file carries a format marker
+(`pixel-forge-preset`, version 1), the name, and the settings.
+Importing a name that matches a built-in saves it as a user
+preset shown as "(custom)"; importing a name that already exists
+as a user preset asks before replacing it in the window, and
+refuses in the CLI until the old one is deleted.
 
 ## What v0.30 does and does not do
 

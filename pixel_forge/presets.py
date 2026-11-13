@@ -13,6 +13,24 @@ own slot and never overwrites the built-in; the two are told apart
 by the builtin flag, and the window shows the user one as
 "Name (custom)".
 
+A preset may also carry video fields — extract_fps, preview_fps,
+sheet_fps, sheet_cols, sheet_padding — which only the Video tab
+uses; the other tabs ignore them, and a preset without them
+leaves the Video tab's controls alone. All five are optional and
+validated like the rest: a bad video field skips the preset with
+a reason, the same fail-soft rule as any other bad field.
+
+A preset can be shared as one JSON file:
+
+    {"format": "pixel-forge-preset", "version": 1,
+     "name": "My Knight Look",
+     "settings": {"width": 32, ...}}
+
+write_preset_export writes one, read_preset_export reads and
+validates one. Importing a name that matches a built-in shadows
+it as a user preset; importing a name that already exists as a
+user preset needs overwrite=True.
+
     ~/pixel-forge-library/presets.json
     {
       "format": "pixel-forge-presets",
@@ -32,11 +50,29 @@ from pathlib import Path
 from .library import default_library_dir
 from .palettes import PALETTE_LABELS
 from .pixelize import MAX_COLORS, MIN_COLORS, PixelForgeError
+from .video import FPS_PRESETS
 
 PRESETS_FORMAT = "pixel-forge-presets"
 PRESETS_VERSION = 1
 PRESETS_NAME = "presets.json"
 MAX_PRESET_SIZE = 512
+
+# One preset shared as a file — the format marker + version the
+# export file carries, so an import can tell a preset file from
+# any other JSON.
+PRESET_EXPORT_FORMAT = "pixel-forge-preset"
+PRESET_EXPORT_VERSION = 1
+
+# The video fields' ranges, matching the Video tab's controls:
+# preview/sheet fps are spin boxes (1..30), extract fps is the
+# extraction combo (FPS_PRESETS), sheet columns is the columns
+# combo (Auto, or one of these), padding is a spin box (0..32).
+VIDEO_FPS_MIN = 1
+VIDEO_FPS_MAX = 30
+SHEET_COLS_VALUES = (2, 3, 4, 5, 6, 8, 10, 12, 16)
+SHEET_PADDING_MAX = 32
+VIDEO_FIELDS = ("extract_fps", "preview_fps", "sheet_fps",
+                "sheet_cols", "sheet_padding")
 
 BUILTIN_PRESETS = {
     "Game Boy 32": {"width": 32, "height": 32, "keep_aspect": False,
@@ -48,14 +84,67 @@ BUILTIN_PRESETS = {
     "Detailed 64": {"width": 64, "height": 64, "keep_aspect": False,
                     "palette": "image", "max_colors": 16,
                     "dither": True},
+    "Tiny 16": {"width": 16, "height": 16, "keep_aspect": False,
+                "palette": "pico8", "max_colors": 16,
+                "dither": True},
+    "Large 128": {"width": 128, "height": 128, "keep_aspect": False,
+                  "palette": "image", "max_colors": 16,
+                  "dither": True},
+    "Tall 32x64": {"width": 32, "height": 64, "keep_aspect": False,
+                   "palette": "pico8", "max_colors": 16,
+                   "dither": True},
+    "Wide 64x32": {"width": 64, "height": 32, "keep_aspect": False,
+                   "palette": "pico8", "max_colors": 16,
+                   "dither": True},
+    "Game Boy 64": {"width": 64, "height": 64, "keep_aspect": False,
+                    "palette": "gameboy", "max_colors": 4,
+                    "dither": False},
 }
+
+
+def _is_whole(value):
+    """A whole number — a bool is not one (True is int 1)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_video_field(field, value):
+    """One optional video field, checked against its control's
+    range. Raises PixelForgeError naming the field and the
+    range, so a bad video field skips the preset like any
+    other bad field."""
+    if field == "extract_fps":
+        if not _is_whole(value) or value not in FPS_PRESETS:
+            raise PixelForgeError(
+                "preset extract fps must be one of: %s"
+                % ", ".join(str(fps) for fps in FPS_PRESETS))
+    elif field in ("preview_fps", "sheet_fps"):
+        if not _is_whole(value) or value < VIDEO_FPS_MIN \
+                or value > VIDEO_FPS_MAX:
+            raise PixelForgeError(
+                "preset %s must be a whole number from %d to %d"
+                % (field.replace("_", " "), VIDEO_FPS_MIN,
+                   VIDEO_FPS_MAX))
+    elif field == "sheet_cols":
+        if value is not None:
+            if not _is_whole(value) or value not in SHEET_COLS_VALUES:
+                raise PixelForgeError(
+                    "preset sheet columns must be automatic or "
+                    "one of: %s"
+                    % ", ".join(str(c) for c in SHEET_COLS_VALUES))
+    elif field == "sheet_padding":
+        if not _is_whole(value) or value < 0 \
+                or value > SHEET_PADDING_MAX:
+            raise PixelForgeError(
+                "preset sheet padding must be a whole number "
+                "from 0 to %d" % SHEET_PADDING_MAX)
 
 
 def validate_settings(settings):
     """Check a settings dict and return a clean copy with exactly
-    the six known keys. Raises PixelForgeError on anything out
-    of range, so a hand-edited presets.json fails loudly instead
-    of silently applying nonsense."""
+    the six known keys, plus any of the five optional video
+    fields that were present and valid. Raises PixelForgeError
+    on anything out of range, so a hand-edited presets.json
+    fails loudly instead of silently applying nonsense."""
     if not isinstance(settings, dict):
         raise PixelForgeError("preset settings must be an object")
     for key in ("width", "height", "keep_aspect", "palette",
@@ -84,11 +173,69 @@ def validate_settings(settings):
             not isinstance(settings["keep_aspect"], bool):
         raise PixelForgeError(
             "preset dither and keep_aspect must be true or false")
-    return {"width": width, "height": height,
-            "keep_aspect": settings["keep_aspect"],
-            "palette": settings["palette"],
-            "max_colors": colors,
-            "dither": settings["dither"]}
+    clean = {"width": width, "height": height,
+             "keep_aspect": settings["keep_aspect"],
+             "palette": settings["palette"],
+             "max_colors": colors,
+             "dither": settings["dither"]}
+    # The video fields are optional: a preset without one leaves
+    # that Video tab control alone. A preset WITH a bad one is
+    # skipped with a reason, like any other bad preset.
+    for field in VIDEO_FIELDS:
+        if field in settings:
+            _validate_video_field(field, settings[field])
+            clean[field] = settings[field]
+    return clean
+
+
+def preset_export_payload(name, settings):
+    """The shareable file's contents as a dict — format marker,
+    name, and validated settings."""
+    if not str(name).strip():
+        raise PixelForgeError("give the preset a name")
+    return {"format": PRESET_EXPORT_FORMAT,
+            "version": PRESET_EXPORT_VERSION,
+            "name": str(name).strip(),
+            "settings": validate_settings(settings)}
+
+
+def write_preset_export(path, name, settings):
+    """Write one preset to a shareable JSON file, atomically
+    (temp file + replace, so a crash mid-write never leaves a
+    half-written file behind)."""
+    payload = preset_export_payload(name, settings)
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n")
+    os.replace(tmp, path)
+
+
+def read_preset_export(path):
+    """Read a shared preset file back — (name, settings).
+    Raises PixelForgeError naming the problem on anything that
+    is not a valid preset file, and never touches the store."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except OSError as exc:
+        raise PixelForgeError(
+            "cannot read preset file: %s (%s)" % (path, exc))
+    except ValueError as exc:
+        raise PixelForgeError(
+            "preset file is not valid JSON: %s (%s)" % (path, exc))
+    if not isinstance(data, dict) or \
+            data.get("format") != PRESET_EXPORT_FORMAT:
+        raise PixelForgeError(
+            "not a Pixel Forge preset file: %s" % path)
+    name = data.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise PixelForgeError(
+            "preset file has no name: %s" % path)
+    try:
+        settings = validate_settings(data.get("settings"))
+    except PixelForgeError as exc:
+        raise PixelForgeError(
+            "preset file %r has bad settings: %s" % (path, exc))
+    return name.strip(), settings
 
 
 class PresetStore:
@@ -241,3 +388,29 @@ class PresetStore:
             raise PixelForgeError("no preset named %r" % name)
         del self._user[name]
         self._save()
+
+    def export_preset(self, name, path, builtin=False):
+        """Write one preset (built-in or user) to a shareable
+        JSON file. Raises PixelForgeError when no preset with
+        that name exists in the chosen slot."""
+        settings = self.get(name, builtin=builtin)
+        if settings is None:
+            raise PixelForgeError("no preset named %r" % name)
+        write_preset_export(path, name, settings)
+
+    def import_preset(self, path, overwrite=False):
+        """Read a shared preset file into the user slot and
+        return its name. A name matching a built-in shadows it
+        as "(custom)" — the built-in is never touched. A name
+        that already exists as a user preset refuses plainly
+        unless overwrite is True; the file is validated before
+        anything is checked, so a bad file never touches the
+        store either way."""
+        name, settings = read_preset_export(path)
+        self._load()
+        if name in self._user and not overwrite:
+            raise PixelForgeError(
+                "a preset named %r already exists — delete it "
+                "first" % name)
+        self.save(name, settings)
+        return name
