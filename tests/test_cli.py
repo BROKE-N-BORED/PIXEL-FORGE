@@ -963,5 +963,397 @@ class SkinCliTests(unittest.TestCase):
         self.assertNotIn("Traceback", err)
 
 
+class BatchProcessingCliTests(unittest.TestCase):
+    """Task 28: folder convert, code --all, library remove/rename,
+    presets save/delete, --json / --quiet, and no raw tracebacks."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.src = write_image(make_gradient_image(),
+                              os.path.join(cls.tmp, "photo.png"))
+        cls.game = os.path.join(cls.tmp, "game.py")
+        with open(cls.game, "w") as handle:
+            handle.write('PALETTE = ["#ff0000", "#00ff00"]\n'
+                         "HERO = [[0, 1], [1, 0]]\n"
+                         "GEM = [[1, 0], [0, 1]]\n")
+
+    def setUp(self):
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self._saved = os.environ.get("PIXELFORGE_LIBRARY")
+        os.environ["PIXELFORGE_LIBRARY"] = self.lib_dir
+        self.work = tempfile.mkdtemp()
+        self._cwd = os.getcwd()
+        os.chdir(self.work)
+
+    def tearDown(self):
+        os.chdir(self._cwd)
+        if self._saved is None:
+            os.environ.pop("PIXELFORGE_LIBRARY", None)
+        else:
+            os.environ["PIXELFORGE_LIBRARY"] = self._saved
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = main(argv)
+        except SystemExit as exc:
+            code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def _add(self, name):
+        code, _out, err = self._run(
+            ["library", "add", self.src, "--name", name])
+        self.assertEqual(code, 0, err)
+
+    def _convert_folder(self, name="shots"):
+        folder = os.path.join(self.work, name)
+        os.mkdir(folder)
+        write_image(make_gradient_image(),
+                    os.path.join(folder, "a.png"))
+        write_image(make_gradient_image(),
+                    os.path.join(folder, "b.png"))
+        # A bad file in the middle: a .png that is not a PNG.
+        with open(os.path.join(folder, "broken.png"), "wb") as f:
+            f.write(b"not a png at all")
+        # A non-image file: ignored, never reported.
+        with open(os.path.join(folder, "notes.txt"), "w") as f:
+            f.write("not an image\n")
+        return folder
+
+    # ------------------------------------------------ folder convert
+
+    def test_convert_folder_bad_file_skipped(self):
+        folder = self._convert_folder()
+        code, out, err = self._run(["convert", folder])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(
+            os.path.join(folder, "a-pixel.png")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(folder, "b-pixel.png")))
+        self.assertFalse(os.path.isfile(
+            os.path.join(folder, "broken-pixel.png")))
+        self.assertIn("skipped broken.png", err)
+        self.assertIn("a-pixel.png", out)
+        self.assertIn("b-pixel.png", out)
+        self.assertNotIn("notes", err)
+
+    def test_convert_folder_out_dir(self):
+        folder = self._convert_folder()
+        out_dir = os.path.join(self.work, "sprites")
+        code, _out, err = self._run(
+            ["convert", folder, "--out", out_dir])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(
+            os.path.join(out_dir, "a-pixel.png")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(out_dir, "b-pixel.png")))
+        self.assertFalse(os.path.isfile(
+            os.path.join(folder, "a-pixel.png")))
+
+    def test_convert_folder_no_images_fails_cleanly(self):
+        folder = os.path.join(self.work, "empty")
+        os.mkdir(folder)
+        with open(os.path.join(folder, "notes.txt"), "w") as f:
+            f.write("nothing to see\n")
+        code, _out, err = self._run(["convert", folder])
+        self.assertEqual(code, 1)
+        self.assertIn("no images", err)
+        self.assertIn("empty", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_convert_folder_all_bad_fails_cleanly(self):
+        folder = os.path.join(self.work, "allbad")
+        os.mkdir(folder)
+        with open(os.path.join(folder, "broken.png"), "wb") as f:
+            f.write(b"not a png at all")
+        code, _out, err = self._run(["convert", folder])
+        self.assertEqual(code, 1)
+        self.assertIn("could not convert anything", err)
+        self.assertIn("skipped broken.png", err)
+        self.assertNotIn("Traceback", err)
+
+    # ----------------------------------------------------- code --all
+
+    def test_code_all_renders_every_asset(self):
+        code, out, err = self._run(
+            ["code", self.game, "--all"])
+        self.assertEqual(code, 0, err)
+        out_dir = os.path.join(self.work, "game-sprites")
+        for name in ("palette.png", "hero.png", "gem.png"):
+            self.assertTrue(os.path.isfile(
+                os.path.join(out_dir, name)), name)
+        self.assertIn("HERO", out)
+        self.assertIn("GEM", out)
+        hero = load_image(os.path.join(out_dir, "hero.png"))
+        self.assertEqual((hero.width(), hero.height()), (2, 2))
+
+    def test_code_all_out_dir(self):
+        out_dir = os.path.join(self.work, "all")
+        code, _out, err = self._run(
+            ["code", self.game, "--all", "--out", out_dir])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(
+            os.path.join(out_dir, "hero.png")))
+
+    def test_code_all_with_asset_rejected(self):
+        code, _out, err = self._run(
+            ["code", self.game, "--all", "--asset", "HERO"])
+        self.assertEqual(code, 2)
+        self.assertIn("not allowed with", err)
+
+    def test_code_all_no_assets_fails_cleanly(self):
+        empty = os.path.join(self.work, "empty.py")
+        with open(empty, "w") as handle:
+            handle.write("# no sprites here\n")
+        code, _out, err = self._run(["code", empty, "--all"])
+        self.assertEqual(code, 1)
+        self.assertIn("no pixel-art assets found", err)
+        self.assertNotIn("Traceback", err)
+
+    # --------------------------------------------- library remove/rename
+
+    def test_library_remove_by_name(self):
+        self._add("Knight")
+        self._add("Slime")
+        code, out, err = self._run(["library", "remove", "Knight"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Removed Knight", out)
+        self.assertFalse(os.path.isfile(
+            os.path.join(self.lib_dir, "knight.png")))
+        code, out, _err = self._run(["library", "list"])
+        self.assertNotIn("Knight", out)
+        self.assertIn("Slime", out)
+
+    def test_library_remove_missing_fails_cleanly(self):
+        self._add("Knight")
+        code, _out, err = self._run(["library", "remove", "Nope"])
+        self.assertEqual(code, 1)
+        self.assertIn("no sprite named 'Nope'", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_library_remove_ambiguous_name_refuses(self):
+        self._add("Twin")
+        self._add("Twin")
+        code, _out, err = self._run(["library", "remove", "Twin"])
+        self.assertEqual(code, 1)
+        self.assertIn("2 sprites are named 'Twin'", err)
+        self.assertIn("use an id instead", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_library_remove_by_id(self):
+        self._add("Twin")
+        self._add("Twin")
+        code, out, err = self._run(["library", "list", "--json"])
+        self.assertEqual(code, 0, err)
+        first_id = json.loads(out)[0]["id"]
+        code, out, err = self._run(["library", "remove", first_id])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Removed Twin", out)
+        code, out, _err = self._run(["library", "list", "--json"])
+        self.assertEqual(len(json.loads(out)), 1)
+
+    def test_library_rename(self):
+        self._add("Knight")
+        code, out, err = self._run(
+            ["library", "rename", "Knight", "Sir Knight"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Renamed Knight to Sir Knight", out)
+        code, out, _err = self._run(["library", "list", "--json"])
+        self.assertEqual([entry["name"] for entry in json.loads(out)],
+                         ["Sir Knight"])
+
+    def test_library_rename_missing_fails_cleanly(self):
+        code, _out, err = self._run(
+            ["library", "rename", "Nope", "New"])
+        self.assertEqual(code, 1)
+        self.assertIn("no sprite named 'Nope'", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_library_rename_to_existing_fails_cleanly(self):
+        self._add("Knight")
+        self._add("Slime")
+        code, _out, err = self._run(
+            ["library", "rename", "Knight", "Slime"])
+        self.assertEqual(code, 1)
+        self.assertIn("a sprite named 'Slime' already exists", err)
+        self.assertNotIn("Traceback", err)
+
+    # ----------------------------------------------- presets save/delete
+
+    def test_presets_save_and_list(self):
+        code, out, err = self._run(
+            ["presets", "save", "My Look", "--size", "48",
+             "--palette", "pico8", "--colors", "8"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Saved preset My Look", out)
+        code, out, _err = self._run(["presets", "list"])
+        self.assertIn("My Look — 48 x 48, pico8, 8 colors", out)
+
+    def test_presets_save_existing_refuses_without_force(self):
+        self._run(["presets", "save", "My Look", "--size", "48"])
+        code, _out, err = self._run(
+            ["presets", "save", "My Look", "--size", "32"])
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", err)
+        self.assertIn("--force", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_presets_save_existing_force_replaces(self):
+        self._run(["presets", "save", "My Look", "--size", "48"])
+        code, _out, err = self._run(
+            ["presets", "save", "My Look", "--size", "32",
+             "--force"])
+        self.assertEqual(code, 0, err)
+        code, out, _err = self._run(["presets", "list"])
+        self.assertIn("My Look — 32 x 32", out)
+
+    def test_presets_save_builtin_name_refuses_without_force(self):
+        code, _out, err = self._run(
+            ["presets", "save", "Game Boy 32", "--size", "48"])
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", err)
+
+    def test_presets_delete(self):
+        self._run(["presets", "save", "My Look", "--size", "48"])
+        code, out, err = self._run(["presets", "delete", "My Look"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Deleted preset My Look", out)
+        code, out, _err = self._run(["presets", "list"])
+        self.assertNotIn("My Look", out)
+
+    def test_presets_delete_missing_fails_cleanly(self):
+        code, _out, err = self._run(["presets", "delete", "Nope"])
+        self.assertEqual(code, 1)
+        self.assertIn("no preset named 'Nope'", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_presets_delete_builtin_fails_cleanly(self):
+        code, _out, err = self._run(
+            ["presets", "delete", "Game Boy 32"])
+        self.assertEqual(code, 1)
+        self.assertIn("cannot be deleted", err)
+        self.assertNotIn("Traceback", err)
+
+    # ------------------------------------------------- --json / --quiet
+
+    def test_json_library_list_parses(self):
+        self._add("Knight")
+        code, out, err = self._run(["library", "list", "--json"])
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(len(data), 1)
+        entry = data[0]
+        self.assertEqual(entry["name"], "Knight")
+        self.assertEqual(entry["kind"], "sprite")
+        for field in ("id", "file", "width", "height",
+                      "source", "created"):
+            self.assertIn(field, entry)
+
+    def test_json_library_list_empty_is_empty_array(self):
+        code, out, err = self._run(["library", "list", "--json"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), [])
+
+    def test_json_flag_before_command(self):
+        self._add("Knight")
+        code, out, err = self._run(["--json", "library", "list"])
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data[0]["name"], "Knight")
+
+    def test_json_presets_list_parses(self):
+        code, out, err = self._run(["presets", "list", "--json"])
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        names = [item["name"] for item in data]
+        self.assertIn("Game Boy 32", names)
+        builtin = [item for item in data
+                   if item["name"] == "Game Boy 32"][0]
+        self.assertTrue(builtin["builtin"])
+        for field in ("width", "height", "keep_aspect",
+                      "palette", "max_colors", "dither"):
+            self.assertIn(field, builtin["settings"])
+
+    def test_json_code_list_parses(self):
+        code, out, err = self._run(
+            ["code", self.game, "--list", "--json"])
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        names = [item["name"] for item in data["assets"]]
+        self.assertIn("HERO", names)
+        self.assertIn("PALETTE", names)
+        hero = [item for item in data["assets"]
+                if item["name"] == "HERO"][0]
+        self.assertEqual(hero["kind"], "map")
+        self.assertEqual(hero["width"], 2)
+        self.assertIn("not_rendered", data)
+
+    def test_json_convert_parses(self):
+        code, out, err = self._run(
+            ["convert", self.src, "--json"])
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertTrue(data["output"].endswith("-pixel.png"))
+        self.assertEqual(data["width"], 32)
+        self.assertEqual(data["height"], 32)
+        self.assertIn("colors", data)
+
+    def test_quiet_suppresses_info_lines(self):
+        code, out, err = self._run(
+            ["convert", self.src, "--quiet"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out, "")
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "photo-pixel.png")))
+
+    def test_quiet_keeps_errors(self):
+        code, out, err = self._run(
+            ["library", "remove", "Nope", "--quiet"])
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("no sprite named 'Nope'", err)
+
+    def test_json_and_quiet_together(self):
+        self._add("Knight")
+        code, out, err = self._run(
+            ["library", "list", "--json", "--quiet"])
+        self.assertEqual(code, 0, err)
+        # The JSON is the machine output — --quiet does not
+        # suppress it.
+        self.assertEqual(json.loads(out)[0]["name"], "Knight")
+
+    # -------------------------------------------------- no raw tracebacks
+
+    def test_unexpected_error_prints_plain_line(self):
+        import pixel_forge.cli as cli
+        real = cli.pixelize_file
+        try:
+            def boom(*_args, **_kwargs):
+                raise ValueError("a test-only failure")
+            cli.pixelize_file = boom
+            code, _out, err = self._run(["convert", self.src])
+        finally:
+            cli.pixelize_file = real
+        self.assertEqual(code, 1)
+        self.assertIn("pixel-forge: a test-only failure", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_keyboard_interrupt_exits_quietly(self):
+        import pixel_forge.cli as cli
+        real = cli.pixelize_file
+        try:
+            def boom(*_args, **_kwargs):
+                raise KeyboardInterrupt()
+            cli.pixelize_file = boom
+            code, out, err = self._run(["convert", self.src])
+        finally:
+            cli.pixelize_file = real
+        self.assertEqual(code, 130)
+        self.assertEqual(out, "")
+        self.assertEqual(err, "")
+
+
 if __name__ == "__main__":
     unittest.main()

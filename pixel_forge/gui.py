@@ -66,7 +66,8 @@ from .imagegen import (DEFAULT_COUNT, DEFAULT_NEGATIVE, DEFAULT_SIZE,
                        find_model, format_bytes, generate,
                        is_pinned_model, load_batch, new_batch,
                        regenerate_candidate, require_engine,
-                       require_model, set_keeper, validate_prompt)
+                       require_model, set_keeper, slugify,
+                       validate_prompt)
 from .library import SOURCE_LABELS, Library
 from .palettes import PALETTE_LABELS
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
@@ -1396,29 +1397,30 @@ class MainWindow(QMainWindow):
         unsupported = [p for p in paths
                        if self._classify_drop(p) is None]
         # A multi-file drop used to import only the first file and
-        # silently ignore the rest (review B15). Every supported
-        # file is imported now — code files all go to the Code
-        # tab; the Image and Video tabs hold one thing at a time,
-        # so they take the first and the rest are reported, not
-        # dropped quietly. The last tab switched to stays visible.
+        # silently ignore the rest (review B15); task 28 imports
+        # every supported file. Code files all go to the Code
+        # tab's list. The Image and Video tabs hold one thing at
+        # a time, so images load in turn and videos extract in
+        # turn — each one named in the summary, the last one
+        # showing when the drop is done (a newer video run
+        # supersedes the one before it, per the v0.9 stale
+        # guard). The last tab switched to stays visible.
         imported = []
         skipped = []
         video_started = False
         if images:
             self.tabs.setCurrentIndex(0)
-            if self.load_image(images[0]):
-                imported.append("%s (image)" % Path(images[0]).name)
-            for extra in images[1:]:
-                skipped.append("%s (only the first image was loaded)"
-                               % Path(extra).name)
+            for path in images:
+                if self.load_image(path):
+                    imported.append("%s (image)"
+                                    % Path(path).name)
         if videos:
             self.tabs.setCurrentIndex(1)
-            if self.load_video(videos[0]):
-                imported.append("%s (video)" % Path(videos[0]).name)
-                video_started = True
-            for extra in videos[1:]:
-                skipped.append("%s (only the first video was loaded)"
-                               % Path(extra).name)
+            for path in videos:
+                if self.load_video(path):
+                    imported.append("%s (video)"
+                                    % Path(path).name)
+                    video_started = True
         if code:
             self.tabs.setCurrentIndex(3)
             if self.load_code(code):
@@ -4175,6 +4177,15 @@ class MainWindow(QMainWindow):
             self._on_export_code_parts)
         form.addWidget(self.code_export_parts_btn)
 
+        self.code_export_all_btn = QPushButton("Export all")
+        self.code_export_all_btn.setObjectName("export")
+        self.code_export_all_btn.setToolTip(
+            "Export every asset in the list as PNG files")
+        self.code_export_all_btn.setEnabled(False)
+        self.code_export_all_btn.clicked.connect(
+            self._on_export_code_all)
+        form.addWidget(self.code_export_all_btn)
+
         self.code_save_library_btn = QPushButton("Save to library")
         self.code_save_library_btn.setToolTip(
             "Save the selected asset to the library")
@@ -4636,6 +4647,7 @@ class MainWindow(QMainWindow):
             if self.code_assets else
             "Import code or a game asset to see its sprites here")
         self.code_export_btn.setEnabled(False)
+        self.code_export_all_btn.setEnabled(False)
         self.code_save_library_btn.setEnabled(False)
         if self.code_assets:
             self.code_list.setCurrentRow(0)
@@ -4673,6 +4685,7 @@ class MainWindow(QMainWindow):
         self.code_info_label.setText("\n".join(lines))
         self._fit_code_info_label()
         self.code_export_btn.setEnabled(True)
+        self.code_export_all_btn.setEnabled(True)
         self.code_save_library_btn.setEnabled(True)
 
     def _refresh_code_pixmap(self):
@@ -4737,6 +4750,53 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             "Exported %s to %s"
             % (plural(len(written), "skin part"), folder))
+
+    def export_code_assets(self, folder):
+        """Write every Code tab asset to folder as PNG, one file
+        per asset named after the asset (a second asset with the
+        same name gets -2, -3, ...). Returns (written, failed):
+        the count written and the list of asset names that failed
+        to write. Shows nothing — the caller reports the result."""
+        written, failed, used = 0, [], set()
+        for asset in self.code_assets:
+            name = slugify(asset["name"])
+            stem = name
+            number = 2
+            while name in used:
+                name = "%s-%d" % (stem, number)
+                number += 1
+            used.add(name)
+            path = Path(folder) / (name + ".png")
+            if asset["image"].save(str(path), "PNG"):
+                written += 1
+            else:
+                failed.append(asset["name"])
+        return written, failed
+
+    def _on_export_code_all(self):
+        if not self.code_assets:
+            return
+        # Next to the first source file, else the last-used
+        # export folder (task 22).
+        if self.code_source_first is not None:
+            start_dir = str(Path(self.code_source_first).parent)
+        else:
+            start_dir = self._last_export_dir() or ""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Export all assets to folder", start_dir)
+        if not folder:
+            return
+        written, failed = self.export_code_assets(folder)
+        self._remember_export_dir(folder)
+        if failed:
+            warn_dialog(self, "Some assets failed to export",
+                        "%s exported, %s failed (%s)"
+                        % (plural(written, "asset"),
+                           plural(len(failed), "asset"),
+                           ", ".join(failed)))
+        self.statusBar().showMessage(
+            "Exported %s to %s"
+            % (plural(written, "asset"), folder))
 
     # =========================================================== presets
 

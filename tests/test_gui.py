@@ -4930,5 +4930,118 @@ class VideoGuardrailsTests(unittest.TestCase):
         self.assertEqual(self.win.video_strip.currentRow(), -1)
 
 
+class BatchProcessingGuiTests(unittest.TestCase):
+    """Task 28: Export all in the Code tab and the multi-file
+    drop — every supported file imported, none silently skipped."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        cls.image1 = write_image(make_solid_image(64, 64, 10, 200, 30),
+                                 os.path.join(cls.tmp, "first.png"))
+        cls.image2 = write_image(make_solid_image(48, 48, 200, 30, 10),
+                                 os.path.join(cls.tmp, "second.png"))
+        cls.clip1 = os.path.join(cls.tmp, "long.mp4")
+        make_test_video(cls.clip1, duration=2)
+        cls.clip2 = os.path.join(cls.tmp, "short.mp4")
+        make_test_video(cls.clip2, duration=1)
+        cls.game = os.path.join(cls.tmp, "game.py")
+        with open(cls.game, "w") as handle:
+            handle.write('PALETTE = ["#ff0000", "#00ff00"]\n'
+                         "HERO = [[0, 1], [1, 0]]\n")
+        cls.zip = os.path.join(cls.tmp, "archive.zip")
+        with open(cls.zip, "wb") as handle:
+            handle.write(b"PK\x03\x04not a real zip")
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.win = MainWindow()
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _wait_for_video(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.video_worker is None
+                    and not self.win._video_debounce_timer.isActive()):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _drop(self, paths):
+        from PySide6.QtCore import QMimeData, QPoint, Qt, QUrl
+        from PySide6.QtGui import QDropEvent
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
+        event = QDropEvent(
+            QPoint(10, 10), Qt.DropAction.CopyAction, mime,
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+        self.win.dropEvent(event)
+
+    def test_export_all_button_disabled_with_no_assets(self):
+        self.assertFalse(self.win.code_export_all_btn.isEnabled())
+        self.assertEqual(self.win.code_export_all_btn.text(),
+                         "Export all")
+        self.assertTrue(self.win.code_export_all_btn.toolTip())
+
+    def test_export_all_writes_every_asset(self):
+        from unittest.mock import patch
+        from pixel_forge.pixelize import load_image
+        self.assertTrue(self.win.load_code(self.game))
+        self.assertTrue(self.win.code_export_all_btn.isEnabled())
+        out_dir = os.path.join(self.tmp, "exported")
+        os.mkdir(out_dir)
+        with patch.object(QFileDialog, "getExistingDirectory",
+                          return_value=out_dir):
+            self.win.code_export_all_btn.click()
+        self.app.processEvents()
+        self.assertTrue(os.path.isfile(
+            os.path.join(out_dir, "palette.png")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(out_dir, "hero.png")))
+        self.assertIn("Exported 2 assets",
+                      self.win.statusBar().currentMessage())
+        hero = load_image(os.path.join(out_dir, "hero.png"))
+        self.assertEqual((hero.width(), hero.height()), (2, 2))
+
+    def test_export_all_cancel_writes_nothing(self):
+        from unittest.mock import patch
+        self.assertTrue(self.win.load_code(self.game))
+        out_dir = os.path.join(self.tmp, "cancelled")
+        os.mkdir(out_dir)
+        with patch.object(QFileDialog, "getExistingDirectory",
+                          return_value=""):
+            self.win.code_export_all_btn.click()
+        self.app.processEvents()
+        self.assertEqual(os.listdir(out_dir), [])
+
+    def test_multi_file_drop_imports_every_image_and_video(self):
+        self._drop([self.image1, self.image2,
+                    self.clip1, self.clip2])
+        self.assertTrue(self._wait_for_video())
+        # The last image showing, the last video extracted: 1 s
+        # at 8 fps is 8 frames, where the 2 s clip is 16.
+        self.assertEqual(self.win.source_path, self.image2)
+        self.assertEqual(len(self.win.video_frames), 8)
+        message = self.win.statusBar().currentMessage()
+        for name in ("first.png", "second.png",
+                     "long.mp4", "short.mp4"):
+            self.assertIn(name, message, message)
+        self.assertNotIn("skipped", message)
+
+    def test_multi_file_drop_unsupported_still_warned(self):
+        self._drop([self.image1, self.zip])
+        message = self.win.statusBar().currentMessage()
+        self.assertIn("first.png", message)
+        self.assertIn("skipped", message)
+        self.assertIn("archive.zip", message)
+
+
 if __name__ == "__main__":
     unittest.main()

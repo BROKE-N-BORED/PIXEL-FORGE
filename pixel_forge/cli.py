@@ -1,19 +1,31 @@
 """Pixel Forge command line.
 
     pixel-forge convert INPUT --size 32 --colors 16 --palette pico8 --out OUT.png
+    pixel-forge convert FOLDER [--out DIR]
     pixel-forge frames VIDEO --fps 8 --out DIR
     pixel-forge prompt "a knight" --out DIR
     pixel-forge sheet DIR --out sheet.png --meta sheet.json
     pixel-forge library list [--tag TAG]
     pixel-forge library add FILE --name NAME [--tags a,b]
+    pixel-forge library remove NAME
+    pixel-forge library rename OLD NEW
     pixel-forge library export DIR
     pixel-forge library import DIR
     pixel-forge presets list
+    pixel-forge presets save NAME --size 32 --palette pico8 --colors 16
+    pixel-forge presets delete NAME
     pixel-forge code FILE --list
     pixel-forge code FILE --asset NAME --out OUT.png
+    pixel-forge code FILE --all [--out DIR]
     pixel-forge skin FILE --out DIR
     pixel-forge gui
     pixel-forge --version
+
+Every command accepts --json (machine-readable output for
+scripting) and --quiet (no info lines on stdout; errors still
+print on stderr). Either flag may come before or after the
+command: `pixel-forge --json library list` and
+`pixel-forge library list --json` are the same.
 
 --size takes a square size (32) or WIDTHxHEIGHT (64x48). With
 --keep-aspect, --size is the box the image is fitted into. convert's
@@ -25,6 +37,7 @@ needs the image engine and model (see pixel-forge prompt --help).
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -96,6 +109,70 @@ def _validate_pixelize_args(args):
     return width, height
 
 
+# Image extensions a folder convert looks for — the formats
+# QImageReader usually supports (the window's supported_filter
+# is built from the same list at run time). A file with one of
+# these extensions that still fails to load is reported and
+# skipped per file; anything else in the folder is ignored.
+IMAGE_EXTENSIONS = {
+    ".bmp", ".cur", ".gif", ".icns", ".ico", ".jpeg", ".jpg",
+    ".pbm", ".pgm", ".png", ".ppm", ".svg", ".svgz", ".tga",
+    ".tif", ".tiff", ".wbmp", ".webp", ".xbm", ".xpm"}
+
+
+def _add_output_args(parser):
+    """--json / --quiet on a subparser, so the flags work after
+    the command too (`pixel-forge library list --json`). The
+    defaults are SUPPRESS: a subparser default would overwrite
+    a flag given before the command (`pixel-forge --json
+    library list`), so these only set the attribute when the
+    flag is actually present. The top-level parser defines
+    them with default False, so the attributes always exist."""
+    parser.add_argument(
+        "--json", dest="json", action="store_true",
+        default=argparse.SUPPRESS,
+        help="machine-readable JSON output instead of human lines")
+    parser.add_argument(
+        "--quiet", dest="quiet", action="store_true",
+        default=argparse.SUPPRESS,
+        help="no info lines on stdout (errors still print)")
+
+
+def _is_json(args):
+    return bool(getattr(args, "json", False))
+
+
+def _is_quiet(args):
+    return bool(getattr(args, "quiet", False))
+
+
+def _info(args, message):
+    """An info line on stdout — suppressed by --quiet and by
+    --json, which replaces the human output entirely."""
+    if not _is_quiet(args) and not _is_json(args):
+        print(message)
+
+
+def _emit_json(args, payload):
+    """The machine output for --json. Never suppressed by
+    --quiet: when both flags are given, the JSON is the point."""
+    if _is_json(args):
+        print(json.dumps(payload, indent=2))
+
+
+def _unique_stem(stem, used):
+    """A stem not yet in `used` — the plain stem, or stem-2,
+    stem-3, ... when two assets share a name. Adds the chosen
+    stem to `used`."""
+    name = stem
+    number = 2
+    while name in used:
+        name = "%s-%d" % (stem, number)
+        number += 1
+    used.add(name)
+    return name
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="pixel-forge",
@@ -103,17 +180,29 @@ def build_parser():
         "pixel art and sprites.")
     parser.add_argument("--version", action="version",
                         version="pixel-forge %s" % __version__)
+    parser.add_argument(
+        "--json", dest="json", action="store_true", default=False,
+        help="machine-readable JSON output instead of human lines")
+    parser.add_argument(
+        "--quiet", dest="quiet", action="store_true", default=False,
+        help="no info lines on stdout (errors still print)")
     sub = parser.add_subparsers(dest="command", metavar="command")
     sub.required = True
 
     convert = sub.add_parser(
-        "convert", help="convert one image into a pixel sprite")
+        "convert", help="convert one image, or every image in a "
+        "folder, into pixel sprites")
     convert.add_argument("input", help="image to convert (PNG, JPG, "
-                         "BMP, WebP, GIF, and more)")
+                         "BMP, WebP, GIF, and more), or a folder of "
+                         "images to convert in turn")
     _add_pixelize_args(convert)
+    _add_output_args(convert)
     convert.add_argument("--out", default=None,
                          help="output PNG path (default: "
-                         "<input-stem>-pixel.png next to the input)")
+                         "<input-stem>-pixel.png next to the input); "
+                         "for a folder input, the folder to write "
+                         "the sprites into (default: next to each "
+                         "input)")
 
     frames = sub.add_parser(
         "frames", help="extract a video's frames as pixel sprites "
@@ -130,6 +219,7 @@ def build_parser():
     frames.add_argument("--end", default=None,
                         help="end time: seconds (12.5) or MM:SS (1:30)")
     _add_pixelize_args(frames)
+    _add_output_args(frames)
     frames.add_argument("--out", default=None,
                         help="output folder for frame_001.png, ... "
                         "(default: <video-stem>-frames next to the "
@@ -160,6 +250,7 @@ def build_parser():
                         help="generated image size in pixels, square "
                         "(default: %d)" % DEFAULT_SIZE)
     _add_pixelize_args(prompt)
+    _add_output_args(prompt)
     prompt.add_argument("--out", default=None,
                         help="output folder for the candidates, their "
                         "pixelized versions, and batch.json (default: "
@@ -185,10 +276,12 @@ def build_parser():
     sheet.add_argument("--fps", type=float, default=DEFAULT_FPS,
                        help="playback fps recorded in the metadata "
                        "(default: %s)" % DEFAULT_FPS)
+    _add_output_args(sheet)
 
     library = sub.add_parser(
         "library", help="manage the saved sprite library "
         "(~/pixel-forge-library/, or PIXELFORGE_LIBRARY)")
+    _add_output_args(library)
     lib_sub = library.add_subparsers(dest="library_command",
                                      metavar="command")
     lib_sub.required = True
@@ -196,6 +289,7 @@ def build_parser():
         "list", help="list saved sprites")
     lib_list.add_argument("--tag", default=None,
                           help="only show sprites with this tag")
+    _add_output_args(lib_list)
     lib_add = lib_sub.add_parser(
         "add", help="add an image file to the library")
     lib_add.add_argument("file", help="image file to add")
@@ -203,23 +297,57 @@ def build_parser():
                          help="name for the sprite in the library")
     lib_add.add_argument("--tags", default="",
                          help="comma-separated tags")
+    _add_output_args(lib_add)
+    lib_remove = lib_sub.add_parser(
+        "remove", help="delete a sprite from the library, file "
+        "and all (by name, or by id when several sprites share "
+        "a name — see library list --json for ids)")
+    lib_remove.add_argument("name", help="sprite name (or id) "
+                            "to remove")
+    _add_output_args(lib_remove)
+    lib_rename = lib_sub.add_parser(
+        "rename", help="rename a sprite in the library (the "
+        "file stays put)")
+    lib_rename.add_argument("old", help="current sprite name "
+                            "(or id)")
+    lib_rename.add_argument("new", help="new name — refused "
+                            "when another sprite already has it")
+    _add_output_args(lib_rename)
     lib_export = lib_sub.add_parser(
         "export", help="copy the whole library (sprites + "
         "index) to a folder as a backup")
     lib_export.add_argument("dir", help="folder to write the "
                             "backup into")
+    _add_output_args(lib_export)
     lib_import = lib_sub.add_parser(
         "import", help="add sprites from a library backup "
         "folder (entries already in the library are skipped)")
     lib_import.add_argument("dir", help="backup folder to read")
+    _add_output_args(lib_import)
 
     presets = sub.add_parser(
         "presets", help="manage pixelize presets (built-in and "
-        "saved): list, export, import")
+        "saved): list, save, delete, export, import")
+    _add_output_args(presets)
     pre_sub = presets.add_subparsers(dest="presets_command",
                                      metavar="command")
     pre_sub.required = True
-    pre_sub.add_parser("list", help="list all presets")
+    pre_list = pre_sub.add_parser("list", help="list all presets")
+    _add_output_args(pre_list)
+    pre_save = pre_sub.add_parser(
+        "save", help="save a preset from the pixelize flags")
+    pre_save.add_argument("name", help="name for the preset")
+    _add_pixelize_args(pre_save)
+    _add_output_args(pre_save)
+    pre_save.add_argument("--force", action="store_true",
+                          help="replace a preset that already has "
+                          "this name (otherwise saving over a name "
+                          "is refused)")
+    pre_delete = pre_sub.add_parser(
+        "delete", help="delete a saved preset (built-ins cannot "
+        "be deleted)")
+    pre_delete.add_argument("name", help="preset name to delete")
+    _add_output_args(pre_delete)
     pre_export = pre_sub.add_parser(
         "export", help="export a preset to a JSON file to share")
     pre_export.add_argument("name", help="preset name (built-in "
@@ -227,10 +355,12 @@ def build_parser():
                             "both exist)")
     pre_export.add_argument("--out", required=True,
                             help="JSON file to write")
+    _add_output_args(pre_export)
     pre_import = pre_sub.add_parser(
         "import", help="import a preset from a shared JSON file")
     pre_import.add_argument("file", help="preset JSON file to "
                             "import")
+    _add_output_args(pre_import)
 
     code = sub.add_parser(
         "code", help="reproduce pixel-art assets from source code "
@@ -240,12 +370,20 @@ def build_parser():
     code.add_argument("--list", action="store_true",
                       help="list the assets found, instead of "
                       "rendering one")
-    code.add_argument("--asset", default=None,
-                      help="name of the asset to render (see "
-                      "--list)")
+    which = code.add_mutually_exclusive_group()
+    which.add_argument("--asset", default=None,
+                       help="name of the asset to render (see "
+                       "--list)")
+    which.add_argument("--all", action="store_true",
+                       help="render every asset in the file, one "
+                       "PNG per asset (conflicts with --asset)")
+    _add_output_args(code)
     code.add_argument("--out", default=None,
-                      help="output PNG path (default: "
-                      "<asset>-sprite.png in the current folder)")
+                      help="output PNG path for --asset (default: "
+                      "<asset>-sprite.png in the current folder); "
+                      "for --all, the folder to write the sprites "
+                      "into (default: <file-stem>-sprites in the "
+                      "current folder)")
 
     skin = sub.add_parser(
         "skin", help="extract a Minecraft skin's parts (64x64 or "
@@ -254,22 +392,72 @@ def build_parser():
     skin.add_argument("--out", default=None,
                       help="output folder (default: "
                       "<skin-stem>-skin-parts next to the file)")
+    _add_output_args(skin)
 
-    sub.add_parser("gui", help="open the Pixel Forge window")
+    gui = sub.add_parser("gui", help="open the Pixel Forge window")
+    _add_output_args(gui)
     return parser
 
 
 def cmd_convert(args):
     width, height = _validate_pixelize_args(args)
+    src = Path(args.input)
+    if src.is_dir():
+        return _cmd_convert_folder(args, src, width, height)
     out = args.out
     if out is None:
-        src = Path(args.input)
         out = str(src.with_name(src.stem + "-pixel.png"))
     width_out, height_out, colors = pixelize_file(
         args.input, out, width=width, height=height,
         keep_aspect=args.keep_aspect, palette=args.palette,
         max_colors=args.colors, dither=args.dither)
-    print("%s: %d x %d, %d colors" % (out, width_out, height_out, colors))
+    _emit_json(args, {"output": str(out), "width": width_out,
+                      "height": height_out, "colors": colors})
+    _info(args, "%s: %d x %d, %d colors"
+          % (out, width_out, height_out, colors))
+    return 0
+
+
+def _cmd_convert_folder(args, folder, width, height):
+    """Convert every image in a folder (task 28): one bad file
+    is reported on stderr and skipped, the rest still convert.
+    Exit 1 only when nothing converted at all."""
+    images = sorted(path for path in folder.iterdir()
+                    if path.is_file()
+                    and path.suffix.lower() in IMAGE_EXTENSIONS)
+    if not images:
+        raise PixelForgeError("no images in %s" % folder)
+    out_dir = None
+    if args.out is not None:
+        out_dir = Path(args.out)
+        if out_dir.exists() and not out_dir.is_dir():
+            raise PixelForgeError(
+                "--out must be a folder when converting a folder: "
+                "%s" % args.out)
+        out_dir.mkdir(parents=True, exist_ok=True)
+    converted, failed = [], []
+    for src in images:
+        if out_dir is not None:
+            out = out_dir / (src.stem + "-pixel.png")
+        else:
+            out = src.with_name(src.stem + "-pixel.png")
+        try:
+            width_out, height_out, colors = pixelize_file(
+                str(src), str(out), width=width, height=height,
+                keep_aspect=args.keep_aspect, palette=args.palette,
+                max_colors=args.colors, dither=args.dither)
+        except PixelForgeError as exc:
+            failed.append({"file": src.name, "reason": str(exc)})
+            print("pixel-forge: skipped %s: %s" % (src.name, exc),
+                  file=sys.stderr)
+            continue
+        converted.append(str(out))
+        _info(args, "%s: %d x %d, %d colors"
+              % (out, width_out, height_out, colors))
+    if not converted:
+        raise PixelForgeError(
+            "could not convert anything in %s" % folder)
+    _emit_json(args, {"converted": converted, "failed": failed})
     return 0
 
 
@@ -289,7 +477,10 @@ def cmd_frames(args):
         keep_aspect=args.keep_aspect, palette=args.palette,
         max_colors=args.colors, dither=args.dither)
     first = load_image(written[0])
-    print("%d frames, %d x %d, in %s"
+    _emit_json(args, {"frames": len(written),
+                      "width": first.width(),
+                      "height": first.height(), "out": str(out)})
+    _info(args, "%d frames, %d x %d, in %s"
           % (len(written), first.width(), first.height(), out))
     return 0
 
@@ -309,6 +500,8 @@ def cmd_prompt(args):
         out = slugify(args.prompt) + "-prompt"
 
     def _progress(done, total, record):
+        if _is_quiet(args) or _is_json(args):
+            return
         status = record["status"]
         line = "candidate %d of %d: %s (%s)" % (
             done, total, record["file"], status)
@@ -351,10 +544,13 @@ def cmd_prompt(args):
     landed = [c for c in batch["candidates"]
               if c["status"] == "pending"]
     failed = len(batch["candidates"]) - len(landed)
-    print("%s + pixelized versions in %s"
+    _emit_json(args, {"batch": str(bdir),
+                      "candidates": len(landed),
+                      "failed": failed})
+    _info(args, "%s + pixelized versions in %s"
           % (plural(len(landed), "candidate"), bdir))
     if failed:
-        print("%s failed — see batch.json in %s"
+        _info(args, "%s failed — see batch.json in %s"
               % (plural(failed, "candidate"), bdir))
     # Pixelize failures (task 27): pixelize_candidates skips a
     # bad candidate and records the reason in the batch — one
@@ -387,7 +583,14 @@ def cmd_sheet(args):
     metadata = write_sheet(images, names, out, meta,
                            cols=args.cols or None,
                            padding=args.padding, fps=args.fps)
-    print("%d frames, %d x %d grid, %d x %d sheet, %s fps — "
+    _emit_json(args, {"sheet": str(out), "meta": str(meta),
+                      "frames": len(frames),
+                      "columns": metadata["columns"],
+                      "rows": metadata["rows"],
+                      "sheet_width": metadata["sheet_width"],
+                      "sheet_height": metadata["sheet_height"],
+                      "fps": args.fps})
+    _info(args, "%d frames, %d x %d grid, %d x %d sheet, %s fps — "
           "wrote %s and %s"
           % (len(frames), metadata["columns"], metadata["rows"],
              metadata["sheet_width"], metadata["sheet_height"],
@@ -412,15 +615,21 @@ def cmd_library_list(args):
     lib = Library()
     entries = lib.search(tag=args.tag)
     _warn_skipped(lib)
+    if _is_json(args):
+        # The stored entry dicts are already plain JSON — id,
+        # name, file, kind, size, source, tags, and the rest.
+        print(json.dumps([dict(entry) for entry in entries],
+                         indent=2))
+        return 0
     if not entries:
         if args.tag:
-            print("No sprites with tag %r in the library (%s)"
+            _info(args, "No sprites with tag %r in the library (%s)"
                   % (args.tag, lib.directory))
         elif lib.skipped_entries():
-            print("Library has no usable sprites — %s"
+            _info(args, "Library has no usable sprites — %s"
                   % lib.directory)
         else:
-            print("Library is empty — %s" % lib.directory)
+            _info(args, "Library is empty — %s" % lib.directory)
         return 0
     for entry in entries:
         if entry["kind"] == "sheet":
@@ -431,7 +640,7 @@ def cmd_library_list(args):
             what = "%d x %d sprite" % (entry["width"],
                                        entry["height"])
         tags = entry.get("tags", [])
-        print("%s — %s%s%s" % (
+        _info(args, "%s — %s%s%s" % (
             entry["name"], what,
             (" — tags: %s" % ", ".join(tags)) if tags else "",
             " — %s" % entry["file"]))
@@ -443,8 +652,56 @@ def cmd_library_add(args):
     entry = lib.add_file(args.file, args.name,
                          tags=normalize_tags(args.tags),
                          source="file")
-    print("Saved %s to the library (%s)"
+    _emit_json(args, dict(entry))
+    _info(args, "Saved %s to the library (%s)"
           % (entry["name"], lib.path_for(entry)))
+    _warn_skipped(lib)
+    return 0
+
+
+def _resolve_library_entry(lib, ref):
+    """Find a library entry by id, else by name. Names are not
+    unique, so a name shared by several entries is refused
+    with the ids as the way out — the caller names them."""
+    entries = lib.entries()
+    for entry in entries:
+        if entry["id"] == ref:
+            return entry
+    named = [entry for entry in entries
+             if entry["name"] == ref]
+    if len(named) == 1:
+        return named[0]
+    if not named:
+        raise PixelForgeError(
+            "no sprite named %r in the library" % ref)
+    raise PixelForgeError(
+        "%d sprites are named %r — use an id instead "
+        "(see library list --json for ids)"
+        % (len(named), ref))
+
+
+def cmd_library_remove(args):
+    lib = Library()
+    entry = _resolve_library_entry(lib, args.name)
+    lib.remove(entry["id"])
+    _emit_json(args, {"removed": {"id": entry["id"],
+                                  "name": entry["name"]}})
+    _info(args, "Removed %s from the library" % entry["name"])
+    _warn_skipped(lib)
+    return 0
+
+
+def cmd_library_rename(args):
+    lib = Library()
+    entry = _resolve_library_entry(lib, args.old)
+    for other in lib.entries():
+        if other["id"] != entry["id"] \
+                and other["name"] == args.new:
+            raise PixelForgeError(
+                "a sprite named %r already exists" % args.new)
+    updated = lib.rename(entry["id"], args.new)
+    _emit_json(args, dict(updated))
+    _info(args, "Renamed %s to %s" % (entry["name"], args.new))
     _warn_skipped(lib)
     return 0
 
@@ -452,8 +709,9 @@ def cmd_library_add(args):
 def cmd_library_export(args):
     lib = Library()
     count = lib.export_to(args.dir)
-    print("Exported %s to %s" % (plural(count, "sprite"),
-                                 args.dir))
+    _emit_json(args, {"exported": count, "dir": str(args.dir)})
+    _info(args, "Exported %s to %s" % (plural(count, "sprite"),
+                                       args.dir))
     _warn_skipped(lib)
     return 0
 
@@ -461,6 +719,7 @@ def cmd_library_export(args):
 def cmd_library_import(args):
     lib = Library()
     report = lib.import_from(args.dir)
+    _emit_json(args, report)
     parts = ["added %s" % plural(len(report["added"]), "sprite")]
     if report["skipped"]:
         parts.append("skipped %s already here"
@@ -468,14 +727,25 @@ def cmd_library_import(args):
     if report["missing"]:
         parts.append("%s had no file"
                      % plural(len(report["missing"]), "sprite"))
-    print("Imported from %s — %s" % (args.dir, ", ".join(parts)))
+    _info(args, "Imported from %s — %s"
+          % (args.dir, ", ".join(parts)))
     _warn_skipped(lib)
     return 0
 
 
-def cmd_presets_list(_args):
+def cmd_presets_list(args):
     store = PresetStore()
-    for name, settings, builtin in store.all_presets():
+    presets = store.all_presets()
+    if _is_json(args):
+        print(json.dumps(
+            [{"name": name, "builtin": builtin,
+              "settings": settings}
+             for name, settings, builtin in presets], indent=2))
+        for name, reason in store.skipped_presets():
+            print("pixel-forge: skipped preset %r: %s"
+                  % (name, reason), file=sys.stderr)
+        return 0
+    for name, settings, builtin in presets:
         line = ("%s%s — %d x %d, %s, %d colors, dither %s, "
                 "keep aspect %s" % (
                     name, " (built-in)" if builtin else "",
@@ -499,13 +769,46 @@ def cmd_presets_list(_args):
                          % settings["sheet_padding"])
         if video:
             line += ", video: " + ", ".join(video)
-        print(line)
+        _info(args, line)
     # Files that failed to parse are reported, never swallowed:
     # one line each, name + reason, on stderr — the good presets
     # still listed above.
     for name, reason in store.skipped_presets():
         print("pixel-forge: skipped preset %r: %s"
               % (name, reason), file=sys.stderr)
+    return 0
+
+
+def cmd_presets_save(args):
+    store = PresetStore()
+    if store.get(args.name) is not None \
+            or store.get(args.name, builtin=True) is not None:
+        if not args.force:
+            raise PixelForgeError(
+                "a preset named %r already exists "
+                "(use --force to replace it)" % args.name)
+    width, height = _validate_pixelize_args(args)
+    settings = {"width": width, "height": height,
+                "keep_aspect": args.keep_aspect,
+                "palette": args.palette,
+                "max_colors": args.colors,
+                "dither": args.dither}
+    store.save(args.name, settings)
+    _emit_json(args, {"name": args.name, "settings": settings})
+    _info(args, "Saved preset %s — %d x %d, %s, %d colors, "
+          "dither %s, keep aspect %s"
+          % (args.name, width, height, args.palette,
+             args.colors,
+             "on" if args.dither else "off",
+             "on" if args.keep_aspect else "off"))
+    return 0
+
+
+def cmd_presets_delete(args):
+    store = PresetStore()
+    store.delete(args.name)
+    _emit_json(args, {"deleted": args.name})
+    _info(args, "Deleted preset %s" % args.name)
     return 0
 
 
@@ -520,7 +823,8 @@ def cmd_presets_export(args):
     else:
         raise PixelForgeError("no preset named %r" % args.name)
     store.export_preset(args.name, args.out, builtin=builtin)
-    print("Exported preset %s to %s" % (args.name, args.out))
+    _emit_json(args, {"exported": args.name, "out": str(args.out)})
+    _info(args, "Exported preset %s to %s" % (args.name, args.out))
     return 0
 
 
@@ -529,7 +833,8 @@ def cmd_presets_import(args):
     # A name clash refuses plainly — no --force; delete the old
     # preset first. (The window asks Yes/No instead.)
     name = store.import_preset(args.file)
-    print("Imported preset %s" % name)
+    _emit_json(args, {"imported": name})
+    _info(args, "Imported preset %s" % name)
     return 0
 
 
@@ -552,21 +857,40 @@ def cmd_code(args):
         print("pixel-forge: skipped %s: %s"
               % (skip["file"], skip["reason"]), file=sys.stderr)
     if args.list:
+        if _is_json(args):
+            # The asset's "image" is a buffer Image, not JSON —
+            # the scalar fields are the same ones the human
+            # output shows.
+            print(json.dumps({
+                "assets": [{
+                    "name": asset["name"],
+                    "kind": asset["kind"],
+                    "width": asset["width"],
+                    "height": asset["height"],
+                    "colors": asset["colors"],
+                    "detail": asset["detail"],
+                    "source_file": asset["source_file"]}
+                    for asset in assets],
+                "not_rendered": result["not_rendered"]},
+                indent=2))
+            return 0
         if not assets:
-            print("No pixel-art assets found in %s "
+            _info(args, "No pixel-art assets found in %s "
                   "(parsed %s)"
                   % (args.file,
                      plural(len(result["files"]), "file")))
         for asset in assets:
-            print(_describe_asset(asset))
+            _info(args, _describe_asset(asset))
         for note in result["not_rendered"]:
-            print("%s — found but not rendered: %s"
+            _info(args, "%s — found but not rendered: %s"
                   % (note["name"], note["reason"]))
         return 0
+    if args.all:
+        return _cmd_code_all(args, result)
     if args.asset is None:
         raise PixelForgeError(
-            "pick an asset with --asset NAME, or list them with "
-            "--list")
+            "pick an asset with --asset NAME, render them all "
+            "with --all, or list them with --list")
     for asset in assets:
         if asset["name"] == args.asset:
             out = args.out
@@ -576,7 +900,12 @@ def cmd_code(args):
                 out = "%s.png" % out
             if not asset["image"].save(str(out), "PNG"):
                 raise PixelForgeError("could not write: %s" % out)
-            print("%s: %d x %d, %d colors — wrote %s"
+            _emit_json(args, {"asset": asset["name"],
+                              "width": asset["width"],
+                              "height": asset["height"],
+                              "colors": asset["colors"],
+                              "out": str(out)})
+            _info(args, "%s: %d x %d, %d colors — wrote %s"
                   % (asset["name"], asset["width"],
                      asset["height"], asset["colors"], out))
             return 0
@@ -592,6 +921,48 @@ def cmd_code(args):
            ", ".join(a["name"] for a in assets)))
 
 
+def _cmd_code_all(args, result):
+    """Render every asset in the file, one PNG per asset
+    (task 28). One bad asset is reported on stderr and
+    skipped, the rest still render; exit 1 only when nothing
+    rendered at all."""
+    assets = result["assets"]
+    if not assets:
+        raise PixelForgeError(
+            "no pixel-art assets found in %s (parsed %s) — "
+            "nothing to render" % (args.file,
+                                   plural(len(result["files"]),
+                                          "file")))
+    if args.out is not None:
+        out_dir = Path(args.out)
+    else:
+        out_dir = Path("%s-sprites" % Path(args.file).stem)
+    if out_dir.exists() and not out_dir.is_dir():
+        raise PixelForgeError(
+            "--out must be a folder with --all: %s" % args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rendered, failed, used = [], [], set()
+    for asset in assets:
+        name = _unique_stem(slugify(asset["name"]), used)
+        out = out_dir / (name + ".png")
+        if not asset["image"].save(str(out), "PNG"):
+            reason = "could not write: %s" % out
+            failed.append({"asset": asset["name"],
+                           "reason": reason})
+            print("pixel-forge: skipped %s: %s"
+                  % (asset["name"], reason), file=sys.stderr)
+            continue
+        rendered.append(str(out))
+        _info(args, "%s: %d x %d, %d colors — wrote %s"
+              % (asset["name"], asset["width"],
+                 asset["height"], asset["colors"], out))
+    if not rendered:
+        raise PixelForgeError(
+            "could not render anything in %s" % args.file)
+    _emit_json(args, {"rendered": rendered, "failed": failed})
+    return 0
+
+
 def cmd_skin(args):
     out = args.out
     if out is None:
@@ -599,7 +970,9 @@ def cmd_skin(args):
         out = str(src.with_name(src.stem + "-skin-parts"))
     written = extract_skin(args.file, out)
     parts = [p for p in written if p.name != "figure.png"]
-    print("%s + figure in %s"
+    _emit_json(args, {"parts": [str(p) for p in written],
+                      "out": str(out)})
+    _info(args, "%s + figure in %s"
           % (plural(len(parts), "part"), out))
     return 0
 
@@ -629,6 +1002,10 @@ def main(argv=None):
                 return cmd_library_list(args)
             if args.library_command == "add":
                 return cmd_library_add(args)
+            if args.library_command == "remove":
+                return cmd_library_remove(args)
+            if args.library_command == "rename":
+                return cmd_library_rename(args)
             if args.library_command == "export":
                 return cmd_library_export(args)
             if args.library_command == "import":
@@ -636,6 +1013,10 @@ def main(argv=None):
         if args.command == "presets":
             if args.presets_command == "list":
                 return cmd_presets_list(args)
+            if args.presets_command == "save":
+                return cmd_presets_save(args)
+            if args.presets_command == "delete":
+                return cmd_presets_delete(args)
             if args.presets_command == "export":
                 return cmd_presets_export(args)
             if args.presets_command == "import":
@@ -648,6 +1029,17 @@ def main(argv=None):
             return cmd_gui(args)
     except PixelForgeError as exc:
         print("pixel-forge: %s" % exc, file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        # Ctrl+C exits quietly — no message, no traceback.
+        return 130
+    except Exception as exc:
+        # Any other failure prints one plain line, never a
+        # traceback: a script caller gets the message on stderr
+        # and exit 1. (Some exceptions carry no message — the
+        # class name is better than an empty line.)
+        message = str(exc) or exc.__class__.__name__
+        print("pixel-forge: %s" % message, file=sys.stderr)
         return 1
     parser.print_help()
     return 2

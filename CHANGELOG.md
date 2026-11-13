@@ -1,5 +1,52 @@
 # Pixel Forge changelog
 
+## 0.39 — 2026-11-13
+
+Batch processing — task-list item #28, eight sub-items in one
+release:
+
+- `convert` takes a folder now: `pixel-forge convert DIR`
+  converts every image in it (same formats as a single file),
+  writing `<stem>-pixel.png` next to each input, or under
+  `--out DIR` when given a directory. One bad file is reported
+  on stderr and skipped; the rest still convert. Exit 1 only
+  when nothing converted — a folder with no images names the
+  folder.
+- `code --all` renders every asset in a file, one PNG per
+  asset named after the asset, into `<file-stem>-sprites` (or
+  `--out DIR`). A second asset with the same name gets -2, -3.
+  One bad asset is reported and skipped; `--all` with `--asset`
+  is a parser error.
+- The Code tab has an "Export all" button: every asset in the
+  list to a chosen folder, one PNG per asset, with a status-bar
+  summary naming how many exported and how many failed. It is
+  disabled with no assets.
+- A multi-file drop imports every supported file — code files
+  all parse into the Code tab, images load into the Image tab
+  in turn, videos extract in turn, each named in the status
+  summary, the last one showing. Unsupported files still get
+  the one plain warning.
+- The `library` CLI gains `remove` (by name, or by id when
+  several sprites share a name — `library list --json` shows
+  the ids) and `rename` (refuses when the new name already
+  exists). `export`/`import` already existed (v0.35) and are
+  unchanged.
+- The `presets` CLI gains `save` (name + the pixelize flags,
+  refuses when the name already exists unless `--force`) and
+  `delete` (by name; built-ins cannot be deleted).
+  `export`/`import` already existed (v0.34) and are unchanged.
+- `--json` and `--quiet` work on every command, before or
+  after the command. `--json` makes the list commands emit
+  machine-readable JSON (library list, presets list, code
+  --list — the same fields the human output shows) and the
+  other commands emit small result objects. `--quiet`
+  suppresses info lines on stdout; errors still print on
+  stderr, exit codes unchanged. `--json` output is never
+  suppressed by `--quiet`.
+- The CLI never prints a raw traceback: any unexpected error
+  prints `pixel-forge: <message>` on stderr with exit 1, and
+  Ctrl+C exits quietly with exit 130.
+
 ## 0.38 — 2026-11-13
 
 Error-handling holes — task-list item #27, four sub-items in one

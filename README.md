@@ -108,7 +108,8 @@ bash uninstall.sh
   real sprites — pixel maps and palettes, parsed statically and
   never executed, so a file cannot run anything when you import
   it. Click an asset to preview it, Export PNG, or Save to
-  library. Anything the code defines that cannot be rendered
+  library; Export all writes every asset in the list to a
+  folder, one PNG per asset. Anything the code defines that cannot be rendered
   (art built by loops or function calls, draw-call specs) is
   listed under "Found but not rendered" with the reason. Import
   game asset loads a Minecraft skin (64x64 or 64x32) and splits
@@ -173,6 +174,7 @@ bash uninstall.sh
 ```sh
 pixel-forge convert photo.png --size 32 --colors 16 --palette pico8 --out sprite.png
 pixel-forge convert photo.png --size 64x48 --keep-aspect --no-dither
+pixel-forge convert photos/ --size 32 --out sprites/
 pixel-forge frames clip.mp4 --fps 8 --out frames/
 pixel-forge frames clip.mp4 --fps 12 --every 2 --start 1.5 --end 10 --size 48
 pixel-forge prompt "a knight with a red shield" --out knight/
@@ -182,17 +184,47 @@ pixel-forge sheet walk-frames/ --cols 4 --padding 2 --fps 12
 pixel-forge library list
 pixel-forge library list --tag hero
 pixel-forge library add sprite.png --name "Red Knight" --tags hero,red
+pixel-forge library remove "Red Knight"
+pixel-forge library rename "Red Knight" "Sir Knight"
 pixel-forge library export ~/pixel-forge-backup/
 pixel-forge library import ~/pixel-forge-backup/
 pixel-forge presets list
+pixel-forge presets save "My Knight Look" --size 32 --palette pico8 --colors 16
+pixel-forge presets delete "My Knight Look"
 pixel-forge presets export "My Knight Look" --out knight-look.json
 pixel-forge presets import knight-look.json
 pixel-forge code game.py --list
 pixel-forge code game.py --asset HERO --out hero.png
+pixel-forge code game.py --all --out game-sprites/
 pixel-forge code src/ --list
 pixel-forge skin steve.png --out steve-parts/
 pixel-forge --help
 ```
+
+Two flags work on every command, before or after it, for
+scripting:
+
+- `--json` — machine-readable JSON instead of human lines.
+  The list commands emit arrays of objects with the same
+  fields the human output shows (`library list` gives the
+  stored entries, including each sprite's `id`; `presets
+  list` gives name, whether it is built-in, and settings;
+  `code --list` gives the assets and the found-but-not-
+  rendered notes). The other commands emit small result
+  objects, e.g. `{"converted": [...], "failed": [...]}` for
+  a folder convert.
+- `--quiet` — no info lines on stdout. Errors still print on
+  stderr and exit codes are unchanged. `--json` output is
+  never suppressed by `--quiet`.
+
+Batch rules: a folder convert and `code --all` report a bad
+file or asset on stderr and keep going; they exit 1 only
+when nothing converted or rendered at all. `library remove`
+takes a name, or an id when several sprites share a name
+(`library list --json` shows the ids). `presets save`
+refuses when the name already exists unless `--force` is
+given. The CLI never prints a raw traceback — an unexpected
+error prints one plain line on stderr with exit 1.
 
 Options for `prompt` only:
 
