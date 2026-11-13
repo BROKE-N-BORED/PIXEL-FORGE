@@ -101,7 +101,25 @@ it keeps them and prints the way to remove them by hand.
   a new image load re-pixelizes from the source, so each one asks
   first before throwing the edits away (default No). A sprite with
   no opaque pixels has no colors to draw with — the strip stays
-  empty until a result with colors loads.
+  empty until a result with colors loads. The result is a stack of
+  layers: a fresh pixelize makes one base layer named "Background",
+  and the Layers panel adds transparent layers on top ("Layer 2",
+  "Layer 3", …), deletes them, moves them up and down, and toggles
+  each one's visibility with a checkbox; double-click a name to
+  rename it. The preview shows the layers composited bottom to top,
+  a hidden layer contributing nothing, and Export PNG and Save to
+  library write that composite — there is no layered file format,
+  the library stores flat PNGs. The editor paints on the ACTIVE
+  layer (click a layer to make it active); the eyedropper picks
+  from the composite, and the color strip shows the composite's
+  colors. The base layer is the active layer on load — it is the
+  only layer, so this is the working layer, not a selection.
+  Add, delete, and reorder are each one undo step; visibility
+  toggles and renames are not undoable (view settings, like
+  zoom). Deleting a layer asks first only when it has any
+  non-transparent pixel, and the re-pixelize guard asks whenever
+  the stack carries any edit — drawn pixels, an added layer, a
+  reordered stack, or a deleted layer.
 - **Video tab:** import a video or a GIF (or drop one on the window),
   pick how many frames per second to keep, then keep or drop frames
   in the strip, watch the animation play, and press Export frames to

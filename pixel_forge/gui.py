@@ -61,6 +61,7 @@ from .editor import (distinct_colors, draw_line, draw_rect_outline,
                      flood_fill, line_points, pick_color, rect_points)
 from .history import (batches_dir, load_history, record_batch,
                       record_prompt, save_history)
+from .image import Image
 from .imagegen import (DEFAULT_COUNT, DEFAULT_NEGATIVE, DEFAULT_SIZE,
                        LCM_CFG, LCM_STEPS, MAX_PROMPT_LEN,
                        NEGATIVE_PRESETS, GenerationCancelled,
@@ -71,6 +72,7 @@ from .imagegen import (DEFAULT_COUNT, DEFAULT_NEGATIVE, DEFAULT_SIZE,
                        regenerate_candidate, require_engine,
                        require_model, set_keeper, slugify,
                        validate_prompt)
+from .layers import Layer, composite_layers, has_content
 from .library import SOURCE_LABELS, Library
 from .palettes import PALETTE_LABELS
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
@@ -1066,24 +1068,59 @@ class _ControlChangeCommand(UndoCommand):
 
 
 class _PixelEditCommand(UndoCommand):
-    """One pixel edit on the Image tab's result (task 33): the
-    whole image before and after. Results are small (at most
+    """One pixel edit on one layer of the Image tab's result
+    (task 33, extended for layers in task 35): the whole layer
+    image before and after. Results are small (at most
     512 x 512), so a full snapshot per step is cheap — and it
-    keeps undo exact for every tool, including fill. The window
-    installs a COPY of the snapshot, so a later edit never
-    mutates what this entry holds."""
+    keeps undo exact for every tool, including fill. The
+    command holds the LAYER object, not an index — a reorder
+    moves the object in the list, so the entry still points at
+    the right layer. The window installs a COPY of the
+    snapshot, so a later edit never mutates what this entry
+    holds. When the layer is gone from the stack — its delete
+    entry was discarded at the cap while this entry survived —
+    undo and redo do nothing: the edit died with the layer."""
 
-    def __init__(self, win, before, after, text):
+    def __init__(self, win, layer, before, after, text):
         super().__init__(text)
         self.win = win
+        self.layer = layer
         self.before = before
         self.after = after
 
     def undo(self):
-        self.win._set_edited_result(self.before)
+        self.win._set_layer_image(self.layer, self.before)
 
     def redo(self):
-        self.win._set_edited_result(self.after)
+        self.win._set_layer_image(self.layer, self.after)
+
+
+class _LayerStackCommand(UndoCommand):
+    """One layer-stack change (task 35): add, delete, or move
+    a layer. The snapshots are the layer LISTS before and
+    after, with the active layer each time — shallow copies
+    holding the same Layer objects, so no image is copied.
+    That is safe because the stack is last-in-first-out: any
+    pixel edit made after the stack change must be undone
+    before this entry is reached, so the layers' images are
+    exactly as they were when the stack change landed."""
+
+    def __init__(self, win, before, after, before_active,
+                 after_active, text):
+        super().__init__(text)
+        self.win = win
+        self.before = list(before)
+        self.after = list(after)
+        self.before_active = before_active
+        self.after_active = after_active
+
+    def undo(self):
+        self.win._install_layer_stack(self.before,
+                                      self.before_active)
+
+    def redo(self):
+        self.win._install_layer_stack(self.after,
+                                      self.after_active)
 
 
 class MainWindow(QMainWindow):
@@ -1154,6 +1191,15 @@ class MainWindow(QMainWindow):
         self._editor_color = None
         self._editor_drag = None
         self._editor_swatch_by_color = {}
+        # Layer stack (task 35): bottom first, index 0 is the
+        # base. result_image is the cached composite — every
+        # consumer (preview, export, library save, canvas,
+        # color strip) reads the composite and never the stack
+        # directly. _active_layer is the layer the editor
+        # paints on; on load it is the base, the only layer,
+        # which is the working layer, not a selection.
+        self._layers = []
+        self._active_layer = None
 
         # Video tab state. Raw frames live on disk in a temp dir;
         # only the small pixelized frames are held in memory.
@@ -1874,6 +1920,56 @@ class MainWindow(QMainWindow):
         zoom_row.addWidget(self.zoom_fit_btn)
         form.addLayout(zoom_row)
 
+        # Layer stack (task 35): the list shows the stack top
+        # first — row 0 is the top layer. The check on each row
+        # is the visibility toggle; double-click a name to
+        # rename it. The active layer is the one the editor
+        # paints on; on load it is the base, the only layer.
+        form.addWidget(self._section("Layers"))
+        self.layer_list = QListWidget()
+        self.layer_list.setToolTip(
+            "Layers, top first — click to make one active, "
+            "double-click a name to rename it")
+        self.layer_list.setMaximumHeight(96)
+        self.layer_list.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked)
+        self.layer_list.currentRowChanged.connect(
+            self._on_layer_selected)
+        self.layer_list.itemClicked.connect(
+            self._on_layer_item_clicked)
+        self.layer_list.itemChanged.connect(
+            self._on_layer_item_changed)
+        form.addWidget(self.layer_list)
+        # Two rows of two: four buttons in one row overflow
+        # the 268 px column and push Move down off the edge.
+        layer_row = QHBoxLayout()
+        self.layer_add_btn = QPushButton("Add layer")
+        self.layer_add_btn.setToolTip(
+            "Add a transparent layer on top")
+        self.layer_add_btn.clicked.connect(self._on_layer_add)
+        layer_row.addWidget(self.layer_add_btn)
+        self.layer_delete_btn = QPushButton("Delete layer")
+        self.layer_delete_btn.setToolTip(
+            "Delete the active layer")
+        self.layer_delete_btn.clicked.connect(
+            self._on_layer_delete)
+        layer_row.addWidget(self.layer_delete_btn)
+        form.addLayout(layer_row)
+        layer_move_row = QHBoxLayout()
+        self.layer_up_btn = QPushButton("Move up")
+        self.layer_up_btn.setToolTip(
+            "Move the active layer one step up the stack")
+        self.layer_up_btn.clicked.connect(
+            lambda: self._on_layer_move(1))
+        layer_move_row.addWidget(self.layer_up_btn)
+        self.layer_down_btn = QPushButton("Move down")
+        self.layer_down_btn.setToolTip(
+            "Move the active layer one step down the stack")
+        self.layer_down_btn.clicked.connect(
+            lambda: self._on_layer_move(-1))
+        layer_move_row.addWidget(self.layer_down_btn)
+        form.addLayout(layer_move_row)
+
         form.addStretch(1)
         self.info_label = QLabel("No image loaded")
         self.info_label.setWordWrap(True)
@@ -2278,23 +2374,26 @@ class MainWindow(QMainWindow):
         except PixelForgeError as exc:
             self.statusBar().showMessage(str(exc))
             return
-        self.result_image = result
-        # A fresh pixelize starts the edit state over: this
-        # result is the new original, no edits on it, no drag
-        # in progress, and the color strip shows its colors.
+        # A fresh pixelize replaces the whole stack (task 35)
+        # with one base layer: this result is the new original,
+        # no edits on it, no drag in progress, and the color
+        # strip shows its colors. The guard at every entry
+        # point asks before this runs when the stack carries
+        # edits.
+        self._layers = [Layer("Background", result, True)]
+        self._active_layer = self._layers[0]
         self._result_original = result.copy()
         self._result_edited = False
         self._editor_drag = None
-        self._refresh_pixmaps()
-        self._refresh_info_label()
-        self._refresh_editor_colors()
+        self._refresh_result()
+        self._refresh_layer_list()
         self._update_editor_enabled()
         self.export_btn.setEnabled(True)
         self.save_library_btn.setEnabled(True)
 
     def _refresh_info_label(self):
         """The Image tab's info line: size and color count, plus
-        "(edited)" while the result carries pixel edits."""
+        "(edited)" while the result carries edits."""
         result = self.result_image
         if result is None:
             self.info_label.setText("No image loaded")
@@ -2417,11 +2516,13 @@ class MainWindow(QMainWindow):
     # to library read result_image, so they carry the edits.
 
     def _update_editor_enabled(self):
-        """The editor tools work only on a loaded result."""
+        """The editor tools work only on a loaded result — and
+        so do the layer controls."""
         enabled = self.result_image is not None
         for button in self.editor_tool_buttons.values():
             button.setEnabled(enabled)
         self.editor_color_scroll.setEnabled(enabled)
+        self._update_layer_buttons()
 
     def _refresh_editor_colors(self):
         """Rebuild the color strip from the current result's
@@ -2478,41 +2579,63 @@ class MainWindow(QMainWindow):
         """A swatch was clicked — it is the drawing color now."""
         self._editor_color = color
 
-    def _set_edited_result(self, image):
-        """Install a snapshot as the live result (undo/redo of
-        a pixel edit). A copy — the entry's snapshot must never
-        be the live image, or the next edit would rewrite
-        history. The edited flag is recomputed against the
-        freshly pixelized result, so undoing every edit clears
-        it again."""
-        self.result_image = image.copy()
-        original = self._result_original
-        self._result_edited = (
-            original is not None and self.result_image != original)
+    def _refresh_result(self):
+        """Recomposite the layer stack into result_image and
+        bring the preview, info line, and color strip up to
+        date. Every layer change goes through here."""
+        self.result_image = composite_layers(self._layers)
+        self._recompute_edited()
         self._refresh_pixmaps()
         self._refresh_info_label()
         self._refresh_editor_colors()
 
-    def _commit_edit(self, before, text):
-        """An edit landed: one undo step, the edited flag, and
-        the preview, info line, and color strip brought up to
-        date. Called only when the image actually changed."""
+    def _recompute_edited(self):
+        """The edited flag, derived from the stack: True when
+        the stack is not one base layer holding the freshly
+        pixelized result — an added, deleted, or reordered
+        layer, or drawn pixels on any layer. A bare rename
+        does not count, and hiding the only layer does not
+        count either: the pixels are untouched. Undoing every
+        edit clears the flag again, like v0.43."""
+        if self._result_original is None or not self._layers:
+            self._result_edited = False
+            return
+        self._result_edited = (
+            len(self._layers) != 1
+            or self._layers[0].image != self._result_original)
+
+    def _set_layer_image(self, layer, image):
+        """Install a snapshot as one layer's image (undo/redo
+        of a pixel edit). A copy — the entry's snapshot must
+        never be the live image, or the next edit would rewrite
+        history. When the layer is no longer in the stack, the
+        edit died with it and this does nothing."""
+        if not any(entry is layer for entry in self._layers):
+            return
+        layer.image = image.copy()
+        self._refresh_result()
+
+    def _commit_edit(self, layer, before, text):
+        """An edit landed on one layer: one undo step, and the
+        preview, info line, and color strip brought up to date.
+        Called only when the layer image actually changed."""
         self._push_undo(_PixelEditCommand(
-            self, before, self.result_image.copy(), text))
-        self._result_edited = True
-        self._refresh_pixmaps()
-        self._refresh_info_label()
-        self._refresh_editor_colors()
+            self, layer, before, layer.image.copy(), text))
+        self._refresh_result()
 
     def _paint_pixel(self, pixel, color):
-        """Set one pixel of the live result (a pencil/eraser
+        """Set one pixel of the active layer (a pencil/eraser
         stroke point)."""
-        self.result_image.setPixel(pixel[0], pixel[1], color)
+        if self._active_layer is not None:
+            self._active_layer.image.setPixel(
+                pixel[0], pixel[1], color)
 
     def _editor_pick(self, pixel):
         """The eyedropper: the color under the cursor becomes
-        the drawing color. A transparent pixel has no color to
-        pick — the eraser paints transparency."""
+        the drawing color. It reads the COMPOSITED result —
+        what you see is what you pick — and the picked color
+        paints on the active layer. A transparent pixel has no
+        color to pick — the eraser paints transparency."""
         color = pick_color(self.result_image, pixel[0], pixel[1])
         if color is None or (color >> 24) == 0:
             self.statusBar().showMessage(
@@ -2527,24 +2650,29 @@ class MainWindow(QMainWindow):
             "Picked #%06x" % (color & 0xFFFFFF))
 
     def _editor_fill(self, pixel):
-        """The fill tool: flood fill from the clicked pixel.
-        A click on a pixel already the picked color fills
-        nothing and records no undo step."""
+        """The fill tool: flood fill from the clicked pixel,
+        on the ACTIVE layer's connected region. A click on a
+        pixel already the picked color fills nothing and
+        records no undo step."""
         if self._editor_color is None:
             self.statusBar().showMessage(
                 "Pick a color from the strip first")
             return
-        before = self.result_image.copy()
-        if flood_fill(self.result_image, pixel[0], pixel[1],
+        layer = self._active_layer
+        if layer is None:
+            return
+        before = layer.image.copy()
+        if flood_fill(layer.image, pixel[0], pixel[1],
                       self._editor_color) == 0:
             return
-        self._commit_edit(before, "Fill")
+        self._commit_edit(layer, before, "Fill")
 
     def _canvas_press(self, pixel):
         """A click on the pixel canvas, as an image pixel (or
         None when the click missed the image). No tool, no
-        color, or no result — nothing happens."""
-        if pixel is None or self.result_image is None:
+        color, no active layer, or no result — nothing happens."""
+        if (pixel is None or self.result_image is None
+                or self._active_layer is None):
             return
         tool = self._editor_tool
         if tool is None:
@@ -2561,19 +2689,25 @@ class MainWindow(QMainWindow):
                     "Pick a color from the strip first")
                 return
         # Pencil, eraser, line, and rectangle all start a drag:
-        # the before-image is snapshotted now, and the drag
-        # commits one undo step on release. Pencil and eraser
+        # the active layer and its before-image are snapshotted
+        # now, and the drag commits one undo step on release.
+        # The layer is pinned in the drag — switching layers
+        # mid-drag cannot redirect a stroke. Pencil and eraser
         # paint the start pixel at once, so a click without a
         # drag still paints one pixel; line and rectangle only
-        # preview until release.
+        # preview until release. The preview re-composites
+        # after every stroke point.
         self._editor_drag = {
             "tool": tool, "start": pixel, "last": pixel,
-            "before": self.result_image.copy()}
+            "layer": self._active_layer,
+            "before": self._active_layer.image.copy()}
         if tool == "pencil":
             self._paint_pixel(pixel, self._editor_color)
+            self.result_image = composite_layers(self._layers)
             self._refresh_pixmaps()
         elif tool == "eraser":
             self._paint_pixel(pixel, 0)
+            self.result_image = composite_layers(self._layers)
             self._refresh_pixmaps()
 
     def _canvas_move(self, pixel):
@@ -2588,10 +2722,11 @@ class MainWindow(QMainWindow):
             if pixel == drag["last"]:
                 return
             color = self._editor_color if tool == "pencil" else 0
-            draw_line(self.result_image,
+            draw_line(drag["layer"].image,
                       drag["last"][0], drag["last"][1],
                       pixel[0], pixel[1], color)
             drag["last"] = pixel
+            self.result_image = composite_layers(self._layers)
             self._refresh_pixmaps()
         elif tool in ("line", "rectangle"):
             if pixel == drag.get("current"):
@@ -2645,23 +2780,208 @@ class MainWindow(QMainWindow):
         if drag is None:
             return
         tool = drag["tool"]
+        layer = drag["layer"]
         if tool in ("line", "rectangle"):
             end = drag.get("current", drag["start"])
             if tool == "line":
-                draw_line(self.result_image,
+                draw_line(layer.image,
                           drag["start"][0], drag["start"][1],
                           end[0], end[1], self._editor_color)
             else:
-                draw_rect_outline(self.result_image,
+                draw_rect_outline(layer.image,
                                   drag["start"][0], drag["start"][1],
                                   end[0], end[1], self._editor_color)
-        if self.result_image == drag["before"]:
+        if layer.image == drag["before"]:
+            self.result_image = composite_layers(self._layers)
             self._refresh_pixmaps()
             return
-        self._commit_edit(drag["before"],
+        self._commit_edit(layer, drag["before"],
                           {"pencil": "Draw", "eraser": "Erase",
                            "line": "Line",
                            "rectangle": "Rectangle"}[tool])
+
+    # -------------------------------------------------------- layers
+
+    def _layer_at_row(self, row):
+        """The layer a list row shows: row 0 is the top layer,
+        the last row is the base."""
+        if 0 <= row < len(self._layers):
+            return self._layers[len(self._layers) - 1 - row]
+        return None
+
+    def _refresh_layer_list(self):
+        """Rebuild the layer list from the stack, top first,
+        keeping the active layer current. Signals stay blocked
+        while rebuilding — the check states and names are set
+        here, not by the user."""
+        self.layer_list.blockSignals(True)
+        try:
+            self.layer_list.clear()
+            for layer in reversed(self._layers):
+                item = QListWidgetItem(layer.name)
+                item.setFlags(item.flags()
+                              | Qt.ItemFlag.ItemIsUserCheckable
+                              | Qt.ItemFlag.ItemIsEditable)
+                item.setCheckState(
+                    Qt.CheckState.Checked if layer.visible
+                    else Qt.CheckState.Unchecked)
+                self.layer_list.addItem(item)
+            if self._active_layer is not None:
+                index = self._layers.index(self._active_layer)
+                self.layer_list.setCurrentRow(
+                    len(self._layers) - 1 - index)
+        finally:
+            self.layer_list.blockSignals(False)
+
+    def _update_layer_buttons(self):
+        """Layer buttons follow the stack: Add works on any
+        loaded result; Delete needs more than one layer, so
+        the list never goes empty; Up and Down stop at the
+        ends of the stack."""
+        has_result = self.result_image is not None
+        self.layer_list.setEnabled(has_result)
+        self.layer_add_btn.setEnabled(has_result)
+        self.layer_delete_btn.setEnabled(
+            has_result and len(self._layers) > 1)
+        if self._active_layer is None or not self._layers:
+            self.layer_up_btn.setEnabled(False)
+            self.layer_down_btn.setEnabled(False)
+            return
+        index = self._layers.index(self._active_layer)
+        self.layer_up_btn.setEnabled(
+            index < len(self._layers) - 1)
+        self.layer_down_btn.setEnabled(index > 0)
+
+    def _on_layer_selected(self, row):
+        """A layer was selected in the list — it is the active
+        layer now, the one the editor paints on."""
+        layer = self._layer_at_row(row)
+        if layer is not None:
+            self._active_layer = layer
+            self._update_layer_buttons()
+
+    def _on_layer_item_clicked(self, item):
+        """A click on a layer row. A click on the already
+        current row fires no row change, so the click handler
+        lands the selection itself — both paths end with the
+        clicked layer active."""
+        self._on_layer_selected(self.layer_list.row(item))
+
+    def _on_layer_item_changed(self, item):
+        """A layer row changed: a rename, or a visibility
+        toggle. A rename is not undoable; a blank name puts
+        the old name back. Visibility is a view setting, like
+        zoom — not undoable either — and re-composites the
+        preview at once."""
+        layer = self._layer_at_row(self.layer_list.row(item))
+        if layer is None:
+            return
+        if item.text() != layer.name:
+            if not item.text().strip():
+                self.layer_list.blockSignals(True)
+                item.setText(layer.name)
+                self.layer_list.blockSignals(False)
+                return
+            layer.name = item.text()
+            return
+        visible = (item.checkState() == Qt.CheckState.Checked)
+        if visible != layer.visible:
+            layer.visible = visible
+            self._refresh_result()
+
+    def _next_layer_name(self):
+        """The next free default layer name: "Layer 2" is the
+        first new layer, then "Layer 3", reusing a freed
+        number when its layer was deleted."""
+        used = {layer.name for layer in self._layers}
+        number = 2
+        while "Layer %d" % number in used:
+            number += 1
+        return "Layer %d" % number
+
+    def _on_layer_add(self):
+        """Add a transparent layer on top and make it active:
+        one undo step."""
+        if self.result_image is None:
+            return
+        before = list(self._layers)
+        before_active = self._active_layer
+        layer = Layer(self._next_layer_name(),
+                      Image(self.result_image.width(),
+                            self.result_image.height()),
+                      True)
+        self._layers.append(layer)
+        self._active_layer = layer
+        self._push_undo(_LayerStackCommand(
+            self, before, self._layers, before_active, layer,
+            "Add layer"))
+        self._refresh_result()
+        self._refresh_layer_list()
+        self._update_layer_buttons()
+
+    def _on_layer_delete(self):
+        """Delete the active layer: one undo step. A layer
+        with any non-transparent pixel asks first (default
+        No); an empty layer deletes silently. The layer below
+        becomes active, or the one above when the bottom layer
+        goes. The Delete button disables on the last layer, so
+        this never empties the list."""
+        layer = self._active_layer
+        if layer is None or len(self._layers) <= 1:
+            return
+        if has_content(layer.image):
+            answer = QMessageBox.question(
+                self, "Delete layer?",
+                "Delete the layer \"%s\"? Its pixels will be "
+                "lost." % layer.name,
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        before = list(self._layers)
+        index = self._layers.index(layer)
+        self._layers.remove(layer)
+        if index > 0:
+            self._active_layer = self._layers[index - 1]
+        else:
+            self._active_layer = self._layers[0]
+        self._push_undo(_LayerStackCommand(
+            self, before, self._layers, layer,
+            self._active_layer, "Delete layer"))
+        self._refresh_result()
+        self._refresh_layer_list()
+        self._update_layer_buttons()
+
+    def _on_layer_move(self, direction):
+        """Move the active layer one step up (+1, toward the
+        top) or down (-1, toward the base): one undo step."""
+        layer = self._active_layer
+        if layer is None:
+            return
+        index = self._layers.index(layer)
+        target = index + direction
+        if target < 0 or target >= len(self._layers):
+            return
+        before = list(self._layers)
+        self._layers[index], self._layers[target] = (
+            self._layers[target], self._layers[index])
+        self._push_undo(_LayerStackCommand(
+            self, before, self._layers, layer, layer,
+            "Move layer"))
+        self._refresh_result()
+        self._refresh_layer_list()
+        self._update_layer_buttons()
+
+    def _install_layer_stack(self, layers, active):
+        """Install a layer list and active layer (undo/redo of
+        a stack change), then bring the preview, the list, and
+        the buttons up to date."""
+        self._layers = list(layers)
+        self._active_layer = active
+        self._refresh_result()
+        self._refresh_layer_list()
+        self._update_layer_buttons()
 
     # ============================================================ video tab
 
@@ -7378,6 +7698,16 @@ class MainWindow(QMainWindow):
         except PixelForgeError as exc:
             warn_dialog(self, "Could not load the frame",
                         str(exc))
+            return
+        # A frame load replaces the result like any new load —
+        # ask first when the stack carries edits (task 35).
+        # This path set source_image directly, bypassing the
+        # load_image guard; the ask happens after the frame
+        # loads, so a failed load never asks about a load that
+        # is not happening.
+        if self._result_edited and not self._confirm_discard_edits(
+                "Load a new image?",
+                "Load a new image and lose your edits?"):
             return
         self.source_image = frame
         self.source_path = str(path)

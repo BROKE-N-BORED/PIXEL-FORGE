@@ -6333,5 +6333,423 @@ class AnimationTimelineTests(unittest.TestCase):
             dialog.close()
 
 
+class LayerGuiTests(unittest.TestCase):
+    """Task 35: the layer stack on the Image tab — add, delete,
+    reorder, rename, visibility, and the editor painting on the
+    active layer. The test image is the same 32 x 32 red/blue
+    split as the editor tests, so the base layer has exactly
+    two colors."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        from pixel_forge.image import Image, argb
+        source = Image(32, 32)
+        for y in range(32):
+            for x in range(32):
+                source.setPixel(x, y, argb(255, 0, 0) if x < 16
+                                else argb(0, 0, 255))
+        cls.two_color = write_image(
+            source, os.path.join(cls.tmp, "two.png"))
+        cls.solid = write_image(
+            make_solid_image(32, 32, 0, 255, 0),
+            os.path.join(cls.tmp, "solid.png"))
+        from pixel_forge.image import argb as _argb
+        cls.red = _argb(255, 0, 0)
+        cls.blue = _argb(0, 0, 255)
+        cls.green = _argb(0, 255, 0)
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self.win = MainWindow(library_dir=self.lib_dir,
+                              restore=False)
+        self.win.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _load_two_color(self):
+        self.assertTrue(self.win.load_image(self.two_color))
+        self.app.processEvents()
+        self.assertEqual(self.win.result_image.width(), 32)
+        self.assertEqual(self.win.result_image.height(), 32)
+
+    def _confirm(self, answer):
+        """Patch the Yes/No confirm to answer Yes or No."""
+        from unittest import mock
+        return mock.patch.object(
+            QMessageBox, "question", return_value=answer)
+
+    def _pick_tool(self, tool):
+        self.win.editor_tool_buttons[tool].click()
+        self.app.processEvents()
+
+    def _pick_color(self, index=0):
+        swatches = list(self.win._editor_swatch_by_color.values())
+        self.assertGreater(len(swatches), index)
+        swatches[index].click()
+        self.app.processEvents()
+
+    def _pos(self, x, y):
+        return self.win.after_label.pos_for_pixel(x, y)
+
+    def _click(self, x, y):
+        from PySide6.QtTest import QTest
+        QTest.mouseClick(self.win.after_label,
+                         Qt.MouseButton.LeftButton,
+                         pos=self._pos(x, y))
+        self.app.processEvents()
+
+    def _pixel(self, x, y):
+        return self.win.result_image.pixel(x, y)
+
+    def _layer_names(self):
+        return [self.win.layer_list.item(row).text()
+                for row in range(self.win.layer_list.count())]
+
+    def _select_layer(self, row):
+        # A real click moves the row AND fires itemClicked;
+        # setCurrentRow alone does only the first. This build's
+        # itemClicked takes the item only.
+        item = self.win.layer_list.item(row)
+        self.win.layer_list.setCurrentRow(row)
+        self.win.layer_list.itemClicked.emit(item)
+        self.app.processEvents()
+
+    def _add_layer(self):
+        self.win.layer_add_btn.click()
+        self.app.processEvents()
+
+    def test_layer_controls_disabled_before_load(self):
+        self.assertFalse(self.win.layer_list.isEnabled())
+        self.assertFalse(self.win.layer_add_btn.isEnabled())
+        self.assertFalse(self.win.layer_delete_btn.isEnabled())
+        self.assertFalse(self.win.layer_up_btn.isEnabled())
+        self.assertFalse(self.win.layer_down_btn.isEnabled())
+        self._load_two_color()
+        self.assertTrue(self.win.layer_list.isEnabled())
+        self.assertTrue(self.win.layer_add_btn.isEnabled())
+
+    def test_load_builds_one_base_layer(self):
+        self._load_two_color()
+        self.assertEqual(len(self.win._layers), 1)
+        base = self.win._layers[0]
+        self.assertEqual(base.name, "Background")
+        self.assertTrue(base.visible)
+        self.assertIs(self.win._active_layer, base)
+        self.assertEqual(self._layer_names(), ["Background"])
+        # One layer: nothing to delete or move.
+        self.assertFalse(self.win.layer_delete_btn.isEnabled())
+        self.assertFalse(self.win.layer_up_btn.isEnabled())
+        self.assertFalse(self.win.layer_down_btn.isEnabled())
+        self.assertFalse(self.win._result_edited)
+
+    def test_add_layer(self):
+        self._load_two_color()
+        self._add_layer()
+        self.assertEqual(len(self.win._layers), 2)
+        top = self.win._layers[1]
+        self.assertEqual(top.name, "Layer 2")
+        self.assertTrue(top.visible)
+        self.assertIs(self.win._active_layer, top)
+        self.assertEqual(self._layer_names(),
+                         ["Layer 2", "Background"])
+        # A transparent layer changes nothing visually.
+        self.assertEqual(self._pixel(3, 3), self.red)
+        self.assertEqual(self._pixel(20, 20), self.blue)
+        # But the stack carries an edit now.
+        self.assertTrue(self.win._result_edited)
+        self.assertIn("(edited)", self.win.info_label.text())
+        self.assertTrue(self.win.layer_delete_btn.isEnabled())
+        self.assertFalse(self.win.layer_up_btn.isEnabled())
+        self.assertTrue(self.win.layer_down_btn.isEnabled())
+        self.assertEqual(len(self.win._undo_stack), 1)
+        self.assertEqual(self.win._undo_action.text(),
+                         "Undo Add layer")
+
+    def test_draw_on_top_layer_composites_over_base(self):
+        self._load_two_color()
+        self._add_layer()
+        self._pick_tool("pencil")
+        self._pick_color(1)  # blue
+        self._click(3, 3)
+        # The composite shows the top layer's blue over the
+        # base's red; the base layer itself is untouched.
+        self.assertEqual(self._pixel(3, 3), self.blue)
+        self.assertEqual(self._pixel(3, 4), self.red)
+        self.assertEqual(
+            self.win._layers[0].image.pixel(3, 3), self.red)
+        self.assertEqual(
+            self.win._layers[1].image.pixel(3, 3), self.blue)
+        self.assertEqual(self.win._undo_action.text(), "Undo Draw")
+
+    def test_hide_top_layer_shows_base_alone(self):
+        self._load_two_color()
+        self._add_layer()
+        self._pick_tool("pencil")
+        self._pick_color(1)  # blue
+        self._click(3, 3)
+        self.assertEqual(self._pixel(3, 3), self.blue)
+        item = self.win.layer_list.item(0)  # top layer
+        item.setCheckState(Qt.CheckState.Unchecked)
+        self.app.processEvents()
+        self.assertFalse(self.win._layers[1].visible)
+        self.assertEqual(self._pixel(3, 3), self.red)
+        item.setCheckState(Qt.CheckState.Checked)
+        self.app.processEvents()
+        self.assertTrue(self.win._layers[1].visible)
+        self.assertEqual(self._pixel(3, 3), self.blue)
+
+    def test_rename_layer(self):
+        self._load_two_color()
+        item = self.win.layer_list.item(0)
+        item.setText("Sky")
+        self.app.processEvents()
+        self.assertEqual(self.win._layers[0].name, "Sky")
+        # A blank name puts the old name back.
+        item.setText("   ")
+        self.app.processEvents()
+        self.assertEqual(item.text(), "Sky")
+        self.assertEqual(self.win._layers[0].name, "Sky")
+
+    def test_delete_empty_layer_asks_nothing(self):
+        from unittest import mock
+        self._load_two_color()
+        self._add_layer()
+        with mock.patch.object(
+                QMessageBox, "question",
+                side_effect=AssertionError("asked")):
+            self.win.layer_delete_btn.click()
+            self.app.processEvents()
+        self.assertEqual(len(self.win._layers), 1)
+        self.assertIs(self.win._active_layer,
+                      self.win._layers[0])
+        self.assertFalse(self.win._result_edited)
+        self.assertEqual(self.win._undo_action.text(),
+                         "Undo Delete layer")
+
+    def test_delete_with_content_asks_and_no_keeps_layer(self):
+        self._load_two_color()
+        self._add_layer()
+        self._pick_tool("pencil")
+        self._pick_color(1)  # blue
+        self._click(3, 3)
+        with self._confirm(QMessageBox.StandardButton.No) as ask:
+            self.win.layer_delete_btn.click()
+            self.app.processEvents()
+        self.assertEqual(ask.call_count, 1)
+        self.assertEqual(len(self.win._layers), 2)
+        self.assertEqual(self._pixel(3, 3), self.blue)
+        with self._confirm(QMessageBox.StandardButton.Yes):
+            self.win.layer_delete_btn.click()
+            self.app.processEvents()
+        self.assertEqual(len(self.win._layers), 1)
+        self.assertEqual(self._pixel(3, 3), self.red)
+        self.assertEqual(self.win._undo_action.text(),
+                         "Undo Delete layer")
+
+    def test_delete_bottom_layer_activates_layer_above(self):
+        self._load_two_color()
+        self._add_layer()
+        self._add_layer()
+        self.assertEqual(self._layer_names(),
+                         ["Layer 3", "Layer 2", "Background"])
+        self._select_layer(2)  # the base
+        self.assertIs(self.win._active_layer,
+                      self.win._layers[0])
+        with self._confirm(QMessageBox.StandardButton.Yes):
+            self.win.layer_delete_btn.click()
+            self.app.processEvents()
+        self.assertEqual(len(self.win._layers), 2)
+        self.assertEqual(self.win._active_layer.name, "Layer 2")
+        self.assertEqual(self._layer_names(),
+                         ["Layer 3", "Layer 2"])
+
+    def test_move_layer_up_and_down(self):
+        self._load_two_color()
+        self._add_layer()
+        self._add_layer()
+        self._select_layer(1)  # Layer 2, the middle layer
+        self.assertTrue(self.win.layer_up_btn.isEnabled())
+        self.assertTrue(self.win.layer_down_btn.isEnabled())
+        self.win.layer_up_btn.click()
+        self.app.processEvents()
+        self.assertEqual(self._layer_names(),
+                         ["Layer 2", "Layer 3", "Background"])
+        self.assertEqual(self.win._undo_action.text(),
+                         "Undo Move layer")
+        self.assertFalse(self.win.layer_up_btn.isEnabled())
+        self.assertTrue(self.win.layer_down_btn.isEnabled())
+        self.win.layer_down_btn.click()
+        self.app.processEvents()
+        self.assertEqual(self._layer_names(),
+                         ["Layer 3", "Layer 2", "Background"])
+        self.win.layer_down_btn.click()
+        self.app.processEvents()
+        self.assertEqual(self._layer_names(),
+                         ["Layer 3", "Background", "Layer 2"])
+        self.assertFalse(self.win.layer_down_btn.isEnabled())
+        self.assertTrue(self.win.layer_up_btn.isEnabled())
+
+    def test_stack_undo_and_redo(self):
+        self._load_two_color()
+        self._add_layer()
+        self.win._on_undo()
+        self.app.processEvents()
+        self.assertEqual(len(self.win._layers), 1)
+        self.assertFalse(self.win._result_edited)
+        self.assertEqual(self.win._redo_action.text(),
+                         "Redo Add layer")
+        self.win._on_redo()
+        self.app.processEvents()
+        self.assertEqual(len(self.win._layers), 2)
+        self.assertTrue(self.win._result_edited)
+        # Delete (empty, no ask), then undo brings it back.
+        self.win.layer_delete_btn.click()
+        self.app.processEvents()
+        self.assertEqual(len(self.win._layers), 1)
+        self.win._on_undo()
+        self.app.processEvents()
+        self.assertEqual(len(self.win._layers), 2)
+        self.assertEqual(self.win._active_layer.name, "Layer 2")
+        # Move down, then undo restores the order.
+        self.win.layer_down_btn.click()
+        self.app.processEvents()
+        self.assertEqual(self._layer_names(),
+                         ["Background", "Layer 2"])
+        self.win._on_undo()
+        self.app.processEvents()
+        self.assertEqual(self._layer_names(),
+                         ["Layer 2", "Background"])
+        self.assertEqual(self.win._redo_action.text(),
+                         "Redo Move layer")
+
+    def test_visibility_and_rename_are_not_undoable(self):
+        self._load_two_color()
+        self._add_layer()
+        self.assertEqual(len(self.win._undo_stack), 1)
+        item = self.win.layer_list.item(0)
+        item.setCheckState(Qt.CheckState.Unchecked)
+        self.app.processEvents()
+        self.assertEqual(len(self.win._undo_stack), 1)
+        item.setText("Sky")
+        self.app.processEvents()
+        self.assertEqual(len(self.win._undo_stack), 1)
+
+    def test_repixelize_guard_asks_with_two_layers(self):
+        self._load_two_color()
+        self._add_layer()
+        with self._confirm(QMessageBox.StandardButton.No) as ask:
+            self.win.colors_spin.setValue(8)
+            self.app.processEvents()
+        self.assertEqual(ask.call_count, 1)
+        self.assertEqual(self.win.colors_spin.value(), 16)
+        self.assertEqual(len(self.win._layers), 2)
+        self.assertTrue(self.win._result_edited)
+        self.assertEqual(len(self.win._undo_stack), 1)
+        with self._confirm(QMessageBox.StandardButton.Yes):
+            self.win.colors_spin.setValue(8)
+            self.app.processEvents()
+        self.assertEqual(self.win.colors_spin.value(), 8)
+        self.assertEqual(len(self.win._layers), 1)
+        self.assertEqual(self.win._layers[0].name, "Background")
+        self.assertFalse(self.win._result_edited)
+        self.assertNotIn("(edited)", self.win.info_label.text())
+
+    def test_load_guard_keeps_stack_on_no(self):
+        self._load_two_color()
+        self._add_layer()
+        with self._confirm(QMessageBox.StandardButton.No):
+            self.assertFalse(self.win.load_image(self.solid))
+        self.assertEqual(self.win.source_path, self.two_color)
+        self.assertEqual(len(self.win._layers), 2)
+        with self._confirm(QMessageBox.StandardButton.Yes):
+            self.assertTrue(self.win.load_image(self.solid))
+        self.assertEqual(self.win.source_path, self.solid)
+        self.assertEqual(len(self.win._layers), 1)
+        self.assertEqual(self._pixel(3, 3), self.green)
+        self.assertFalse(self.win._result_edited)
+
+    def test_export_writes_composited_pixels(self):
+        self._load_two_color()
+        self._add_layer()
+        self._pick_tool("pencil")
+        self._pick_color(1)  # blue
+        self._click(3, 3)
+        from pixel_forge.pixelize import load_image as core_load
+        out = os.path.join(self.tmp, "layered.png")
+        self.assertTrue(self.win.export_image(out))
+        back = core_load(out)
+        self.assertEqual(back.pixel(3, 3), self.blue)
+        self.assertEqual(back.pixel(3, 4), self.red)
+        self.assertEqual(back.pixel(20, 20), self.blue)
+
+    def test_fill_fills_active_layer_only(self):
+        self._load_two_color()
+        self._add_layer()
+        self._pick_tool("fill")
+        self._pick_color(1)  # blue
+        self._click(3, 3)
+        # The top layer was fully transparent, so the fill
+        # covers it whole; the composite is all blue, but the
+        # base layer still holds its red and blue.
+        self.assertEqual(self._pixel(3, 3), self.blue)
+        self.assertEqual(self._pixel(20, 20), self.blue)
+        self.assertEqual(
+            self.win._layers[0].image.pixel(3, 3), self.red)
+        self.assertEqual(
+            self.win._layers[0].image.pixel(20, 20), self.blue)
+        self.win._on_undo()
+        self.app.processEvents()
+        self.assertEqual(self._pixel(3, 3), self.red)
+        self.assertEqual(self._pixel(20, 20), self.blue)
+
+    def test_eyedropper_picks_from_composite(self):
+        self._load_two_color()
+        self._add_layer()
+        self._pick_tool("pencil")
+        self._pick_color(1)  # blue
+        self._click(3, 3)
+        self._pick_tool("eyedropper")
+        self._click(3, 3)
+        self.assertEqual(self.win._editor_color, self.blue)
+        item = self.win.layer_list.item(0)
+        item.setCheckState(Qt.CheckState.Unchecked)
+        self.app.processEvents()
+        self._click(3, 3)
+        self.assertEqual(self.win._editor_color, self.red)
+
+    def test_edits_on_two_layers_undo_in_order(self):
+        self._load_two_color()
+        self._pick_tool("pencil")
+        self._pick_color(1)  # blue
+        self._click(3, 3)
+        self.assertEqual(self._pixel(3, 3), self.blue)
+        self._add_layer()
+        self._pick_color(0)  # red
+        self._click(20, 20)
+        self.assertEqual(self._pixel(20, 20), self.red)
+        # Undo the top-layer edit: the base edit survives.
+        self.win._on_undo()
+        self.app.processEvents()
+        self.assertEqual(self._pixel(20, 20), self.blue)
+        self.assertEqual(self._pixel(3, 3), self.blue)
+        # Undo the add, then the base edit.
+        self.win._on_undo()
+        self.app.processEvents()
+        self.assertEqual(len(self.win._layers), 1)
+        self.assertEqual(self._pixel(3, 3), self.blue)
+        self.win._on_undo()
+        self.app.processEvents()
+        self.assertEqual(self._pixel(3, 3), self.red)
+        self.assertFalse(self.win._result_edited)
+
+
 if __name__ == "__main__":
     unittest.main()

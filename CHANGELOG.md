@@ -1,5 +1,60 @@
 # Pixel Forge changelog
 
+## 0.45 — 2026-11-13
+
+Layers — task-list item #35:
+
+- Layer stack: the Image tab's result is now a stack of layers,
+  each one an image the same size as the result plus a name and
+  a visible flag. A fresh pixelize produces one base layer
+  named "Background". The Layers panel lists the stack top
+  first, with Add layer (transparent, same size, named
+  "Layer 2", "Layer 3", …), Delete layer, Move up, and Move
+  down, plus a checkbox on each row for visibility.
+  Double-click a layer's name to rename it. The Delete button
+  disables when one layer remains, so the list never goes
+  empty. The base layer is the ACTIVE layer on load — it is
+  the only layer, so this is the working layer, not a
+  selection in the nothing-selected-by-default sense.
+- Compositing: standard Porter-Duff "over", bottom to top,
+  honoring visibility — a hidden layer contributes nothing.
+  The pure compositing lives in a stdlib-only module
+  (pixel_forge/layers.py), bare-python testable. The preview
+  shows the composited result; Export PNG and Save to library
+  write the composited result. There is no layered file
+  format in this version: the library stores flat PNGs, and
+  export is flat.
+- The editor draws on the ACTIVE layer: click a layer to make
+  it active. Pencil, eraser, fill, line, and rectangle all
+  paint the active layer, and the preview re-composites after
+  every stroke. Fill fills the active layer's connected
+  region. The eyedropper picks from the composited result —
+  what you see is what you pick — and paints on the active
+  layer. The color strip shows the distinct colors of the
+  composited result.
+- Undo: a pixel edit snapshots the active layer's before and
+  after, and records which layer it edited, so a later edit
+  on another layer never rewrites history. Add, delete, and
+  reorder are each one undo step on the same stack ("Undo Add
+  layer", "Undo Delete layer", "Undo Move layer"). Visibility
+  toggles and renames are NOT undoable — view settings, like
+  zoom. Deleting a layer asks first only when the layer has
+  any non-transparent pixel (Yes/No, default No); deleting an
+  empty layer asks nothing. Deleting the active layer makes
+  the layer below it active, or the one above if it was the
+  bottom layer.
+- The re-pixelize guard generalizes: re-pixelizing (control
+  change, preset, new load) replaces the whole stack with one
+  fresh base layer, and asks first (same dialogs, default No)
+  whenever the stack carries any edit — drawn pixels on any
+  layer, an added layer, a reordered stack, or a deleted
+  layer. Declining keeps the whole stack untouched. Undoing
+  every edit clears the flag again, like v0.43. Fixed in
+  place: loading a single frame from a library sheet set the
+  source directly and bypassed the guard — it asks now, after
+  the frame loads, so a failed load never asks about a load
+  that is not happening.
+
 ## 0.44 — 2026-11-13
 
 Animation timeline — task-list item #34:
