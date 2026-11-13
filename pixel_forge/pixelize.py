@@ -99,7 +99,16 @@ def compute_target_size(src_w, src_h, width, height, keep_aspect):
     Without keep-aspect the output is exactly width x height. With it,
     the source is fitted inside the width x height box, keeping its
     aspect ratio, never smaller than 1 pixel on a side.
+
+    A source of 0 (or negative) width or height is rejected with a
+    plain error — with keep-aspect the fit divides by the source
+    dimensions, so an empty source used to raise ZeroDivisionError
+    (review B11). The guard runs for both aspect modes: a 0-size
+    source has no size to compute from, whatever the mode.
     """
+    if src_w < 1 or src_h < 1:
+        raise PixelForgeError(
+            "cannot size a %d x %d image" % (src_w, src_h))
     if width < 1 or height < 1:
         raise PixelForgeError(
             "size must be at least 1 pixel in each direction")

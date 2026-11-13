@@ -1,5 +1,22 @@
 # Pixel Forge changelog
 
+## 0.27 — 2026-11-13
+
+`compute_target_size` now guards zero (and negative) source
+dimensions — task-list item #15 (bug B11, latent). With
+keep-aspect on, the fit divides by the source width and height,
+so a 0 x 0 source raised ZeroDivisionError; it is now a plain
+PixelForgeError naming the source size ("cannot size a 0 x 0
+image"). The guard runs for both aspect modes. No normal input
+reaches it — `load_image` rejects unreadable files and the PNG
+format forbids 0-size images — so this is a guard, not a
+behavior change; normal keep-aspect results are unchanged.
+Checked while in the code: `texture_target_size` has no
+division of its own (it returns early for images within the
+cap, and its only division path goes through
+`compute_target_size`), and no other size helper divides by a
+source dimension.
+
 ## 0.26 — 2026-11-13
 
 `load_metadata` now validates every frame entry at load time —

@@ -167,6 +167,45 @@ class PixelizeTests(unittest.TestCase):
         with self.assertRaises(PixelForgeError):
             compute_target_size(100, 100, 0, 32, False)
 
+    def test_zero_source_rejected_keep_aspect(self):
+        # B11: a 0 x 0 source with keep-aspect used to divide by
+        # zero (ZeroDivisionError); it is a plain error now.
+        for src_w, src_h in ((0, 0), (0, 32), (32, 0)):
+            with self.assertRaises(PixelForgeError) as ctx:
+                compute_target_size(src_w, src_h, 32, 32, True)
+            self.assertIn("%d x %d" % (src_w, src_h), str(ctx.exception))
+
+    def test_zero_source_rejected_without_keep_aspect(self):
+        # No division happens without keep-aspect, but a 0-size
+        # source still has no size to compute from.
+        for src_w, src_h in ((0, 0), (0, 32), (32, 0)):
+            with self.assertRaises(PixelForgeError):
+                compute_target_size(src_w, src_h, 32, 32, False)
+
+    def test_negative_source_rejected(self):
+        for src_w, src_h in ((-1, 32), (32, -5), (-2, -2)):
+            with self.assertRaises(PixelForgeError) as ctx:
+                compute_target_size(src_w, src_h, 32, 32, True)
+            self.assertIn("%d x %d" % (src_w, src_h), str(ctx.exception))
+
+    def test_keep_aspect_known_sizes_unchanged(self):
+        # The guard must not change any normal computation.
+        self.assertEqual(compute_target_size(64, 48, 32, 32, True),
+                         (32, 24))
+        self.assertEqual(compute_target_size(64, 48, 64, 64, True),
+                         (64, 48))
+        self.assertEqual(compute_target_size(48, 64, 32, 32, True),
+                         (24, 32))
+        self.assertEqual(compute_target_size(1, 1, 32, 32, True),
+                         (32, 32))
+
+    def test_downscale_zero_size_image_rejected(self):
+        # downscale routes through compute_target_size, so a
+        # 0-size Image fails plainly instead of dividing by zero.
+        from pixel_forge.image import Image
+        with self.assertRaises(PixelForgeError):
+            downscale(Image(0, 0), 32, 32, keep_aspect=True)
+
     # --------------------------------------------------------- quantize
 
     def test_palette_count_respected_from_image(self):
