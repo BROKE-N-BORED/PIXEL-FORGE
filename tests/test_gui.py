@@ -258,7 +258,8 @@ class VideoGuiTests(unittest.TestCase):
     def test_video_tab_exists_with_controls(self):
         tabs = [self.win.tabs.tabText(i)
                 for i in range(self.win.tabs.count())]
-        self.assertEqual(tabs, ["Image", "Video", "Prompt", "Code", "Library"])
+        self.assertEqual(tabs, ["Image", "Video", "Prompt", "Code",
+                                "Library", "Tileset"])
         fps = [self.win.video_fps_combo.itemData(i)
                for i in range(self.win.video_fps_combo.count())]
         self.assertEqual(fps, [2, 4, 8, 12, 24])
@@ -1007,7 +1008,8 @@ class PromptGuiTests(unittest.TestCase):
     def test_prompt_tab_exists_with_controls(self):
         tabs = [self.win.tabs.tabText(i)
                 for i in range(self.win.tabs.count())]
-        self.assertEqual(tabs, ["Image", "Video", "Prompt", "Code", "Library"])
+        self.assertEqual(tabs, ["Image", "Video", "Prompt", "Code",
+                                "Library", "Tileset"])
         self.assertEqual(self.win.prompt_edit.placeholderText(),
                          "a knight with a red shield")
         self.assertTrue(self.win.prompt_negative_edit.text())
@@ -1875,7 +1877,7 @@ class LibraryGuiTests(unittest.TestCase):
         tabs = [self.win.tabs.tabText(i)
                 for i in range(self.win.tabs.count())]
         self.assertEqual(tabs, ["Image", "Video", "Prompt", "Code",
-                                "Library"])
+                                "Library", "Tileset"])
         self.assertEqual(
             self.win.library_search_edit.placeholderText(),
             "Search name or tags")
@@ -2920,7 +2922,7 @@ class CodeTabTests(unittest.TestCase):
         tabs = [self.win.tabs.tabText(i)
                 for i in range(self.win.tabs.count())]
         self.assertEqual(tabs, ["Image", "Video", "Prompt", "Code",
-                                "Library"])
+                                "Library", "Tileset"])
         self.assertEqual(self.win.code_import_btn.text(),
                          "Import code")
         self.assertEqual(self.win.code_import_asset_btn.text(),
@@ -3560,7 +3562,7 @@ class B15MinorGroupTests(unittest.TestCase):
 
 class ShortcutsMenusTests(unittest.TestCase):
     """Task 21 (shortcuts + menus + help): the menu bar, Ctrl+O /
-    Ctrl+S routing, Ctrl+1..5 tab switching, Enter-to-generate,
+    Ctrl+S routing, Ctrl+1..6 tab switching, Enter-to-generate,
     the Help menu dialogs, and the tooltip audit."""
 
     @classmethod
@@ -3731,6 +3733,10 @@ class ShortcutsMenusTests(unittest.TestCase):
                        Qt.KeyboardModifier.ControlModifier)
         self.app.processEvents()
         self.assertEqual(self.win.tabs.currentIndex(), 4)
+        QTest.keyClick(self.win, Qt.Key.Key_6,
+                       Qt.KeyboardModifier.ControlModifier)
+        self.app.processEvents()
+        self.assertEqual(self.win.tabs.currentIndex(), 5)
         QTest.keyClick(self.win, Qt.Key.Key_1,
                        Qt.KeyboardModifier.ControlModifier)
         self.app.processEvents()
@@ -3934,11 +3940,13 @@ class PolishTests(unittest.TestCase):
             "Code": ("Import code or a game asset to see the sprites "
                      "it defines."),
             "Library": "Your saved sprites — click one to preview it.",
+            "Tileset": ("Build a Wang or blob tileset from base "
+                        "tiles, then export it for Tiled or Godot."),
         }
         # Tab 0 is already current at startup, so currentChanged
         # never fires for it until another tab is visited first —
         # visit it last.
-        for index in [1, 2, 3, 4, 0]:
+        for index in [1, 2, 3, 4, 5, 0]:
             self.win.tabs.setCurrentIndex(index)
             self.app.processEvents()
             name = self.win.tabs.tabText(index)
@@ -6920,6 +6928,212 @@ class EngineExportGuiTests(unittest.TestCase):
         self.assertTrue(self._wait_for_video())
         self.app.processEvents()
         self.assertTrue(self.win.engine_export_btn.isEnabled())
+
+
+class TilesetGuiTests(unittest.TestCase):
+    """Task 37: the Tileset tab — mode picker, base tiles,
+    Generate, exports, and Save to library."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        cls.tile_a = write_image(make_solid_image(16, 16, 255, 0, 0),
+                                 os.path.join(cls.tmp, "grass.png"))
+        cls.tile_b = write_image(make_solid_image(16, 16, 0, 0, 255),
+                                 os.path.join(cls.tmp, "water.png"))
+        cls.tile_big = write_image(
+            make_solid_image(32, 32, 0, 255, 0),
+            os.path.join(cls.tmp, "big.png"))
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self.win = MainWindow(library_dir=self.lib_dir)
+        self.win.tabs.setCurrentIndex(5)
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _pick_mode(self, mode):
+        combo = self.win.tileset_mode_combo
+        combo.setCurrentIndex(combo.findData(mode))
+        self.app.processEvents()
+
+    def _generate_wang(self):
+        self._pick_mode("wang")
+        self.assertTrue(self.win.load_tileset_base(self.tile_a, "a"))
+        self.assertTrue(self.win.load_tileset_base(self.tile_b, "b"))
+        self.win.tileset_generate_btn.click()
+        self.app.processEvents()
+
+    def _generate_blob(self):
+        self._pick_mode("blob")
+        self.assertTrue(self.win.load_tileset_base(self.tile_a, "a"))
+        self.win.tileset_generate_btn.click()
+        self.app.processEvents()
+
+    def test_tileset_tab_exists_with_controls(self):
+        tabs = [self.win.tabs.tabText(i)
+                for i in range(self.win.tabs.count())]
+        self.assertEqual(tabs, ["Image", "Video", "Prompt", "Code",
+                                "Library", "Tileset"])
+        self.assertEqual(self.win.tileset_generate_btn.text(),
+                         "Generate tileset")
+        self.assertEqual(self.win.tileset_export_png_btn.text(),
+                         "Export PNG")
+        self.assertEqual(self.win.tileset_export_tiled_btn.text(),
+                         "Export for Tiled")
+        self.assertEqual(self.win.tileset_export_godot_btn.text(),
+                         "Export for Godot")
+        self.assertEqual(self.win.tileset_save_library_btn.text(),
+                         "Save to library")
+
+    def test_generate_disabled_with_no_mode_picked(self):
+        # Nothing selected by default — the mode combo starts
+        # unpicked, so nothing can generate or export yet.
+        self.assertEqual(self.win.tileset_mode_combo.currentIndex(),
+                         -1)
+        self.assertIsNone(self.win.tileset_mode)
+        self.assertFalse(self.win.tileset_generate_btn.isEnabled())
+        self.assertFalse(self.win.tileset_export_png_btn.isEnabled())
+        self.assertFalse(
+            self.win.tileset_export_tiled_btn.isEnabled())
+        self.assertFalse(
+            self.win.tileset_export_godot_btn.isEnabled())
+        self.assertFalse(self.win.tileset_save_library_btn.isEnabled())
+
+    def test_mode_pick_shows_second_picker(self):
+        # Blob mode: one base tile, the second picker hidden.
+        self._pick_mode("blob")
+        self.assertTrue(self.win.tileset_b_section.isHidden())
+        self.assertEqual(self.win.tileset_pick_a_btn.text(),
+                         "Choose base tile")
+        # Wang mode: the second picker shows and the first one
+        # renames itself terrain A.
+        self._pick_mode("wang")
+        self.assertFalse(self.win.tileset_b_section.isHidden())
+        self.assertEqual(self.win.tileset_pick_a_btn.text(),
+                         "Choose terrain A")
+
+    def test_generate_disabled_until_both_wang_tiles(self):
+        self._pick_mode("wang")
+        self.assertTrue(self.win.load_tileset_base(self.tile_a, "a"))
+        self.assertFalse(self.win.tileset_generate_btn.isEnabled())
+        self.assertTrue(self.win.load_tileset_base(self.tile_b, "b"))
+        self.assertTrue(self.win.tileset_generate_btn.isEnabled())
+
+    def test_wang_from_two_solid_tiles(self):
+        from pixel_forge.image import argb
+        self._generate_wang()
+        self.assertEqual(len(self.win.tileset_tiles), 16)
+        self.assertEqual(self.win.tileset_count_label.text(),
+                         "16 tiles, 16 x 16 each")
+        sheet = self.win.tileset_sheet
+        self.assertEqual((sheet.width(), sheet.height()), (64, 64))
+        # Tile 0 is all terrain A, tile 15 all terrain B.
+        tile0 = self.win.tileset_tiles[0]
+        tile15 = self.win.tileset_tiles[15]
+        self.assertEqual(tile0.pixel(8, 8), argb(255, 0, 0))
+        self.assertEqual(tile15.pixel(8, 8), argb(0, 0, 255))
+        # Tile 1 (north edge B): the top edge is blue, the
+        # bottom edge red — read off the middle of each edge,
+        # away from the diagonal corners.
+        tile1 = self.win.tileset_tiles[1]
+        self.assertEqual(tile1.pixel(8, 0), argb(0, 0, 255))
+        self.assertEqual(tile1.pixel(8, 15), argb(255, 0, 0))
+        self.assertEqual(tile1.pixel(0, 8), argb(255, 0, 0))
+        self.assertEqual(tile1.pixel(15, 8), argb(255, 0, 0))
+        # Exports and Save to library enable once a set exists.
+        self.assertTrue(self.win.tileset_export_png_btn.isEnabled())
+        self.assertTrue(
+            self.win.tileset_export_tiled_btn.isEnabled())
+        self.assertTrue(
+            self.win.tileset_export_godot_btn.isEnabled())
+        self.assertTrue(self.win.tileset_save_library_btn.isEnabled())
+
+    def test_blob_from_one_tile(self):
+        self._generate_blob()
+        self.assertEqual(len(self.win.tileset_tiles), 47)
+        self.assertEqual(self.win.tileset_count_label.text(),
+                         "47 tiles, 16 x 16 each")
+        sheet = self.win.tileset_sheet
+        self.assertEqual((sheet.width(), sheet.height()),
+                         (112, 112))
+        # Mask 0 (index 0) is fully transparent; mask 255
+        # (index 46) is the base tile unchanged.
+        tile0 = self.win.tileset_tiles[0]
+        self.assertEqual(tile0.pixel(8, 8), 0)
+        tile46 = self.win.tileset_tiles[46]
+        self.assertEqual(tile46.pixel(8, 8),
+                         self.win.tileset_base_a.pixel(8, 8))
+
+    def test_new_base_clears_generated_set(self):
+        self._generate_blob()
+        self.assertIsNotNone(self.win.tileset_tiles)
+        self.assertTrue(self.win.load_tileset_base(self.tile_b, "a"))
+        self.assertIsNone(self.win.tileset_tiles)
+        self.assertIsNone(self.win.tileset_sheet)
+        self.assertEqual(self.win.tileset_count_label.text(),
+                         "No tileset yet")
+        self.assertFalse(self.win.tileset_export_png_btn.isEnabled())
+
+    def test_mode_change_clears_generated_set(self):
+        self._generate_blob()
+        self.assertIsNotNone(self.win.tileset_tiles)
+        self._pick_mode("wang")
+        self.assertIsNone(self.win.tileset_tiles)
+        self.assertFalse(self.win.tileset_generate_btn.isEnabled())
+
+    def test_mismatched_wang_bases_warn(self):
+        from unittest import mock
+        self._pick_mode("wang")
+        self.assertTrue(self.win.load_tileset_base(self.tile_a, "a"))
+        self.assertTrue(self.win.load_tileset_base(self.tile_big, "b"))
+        with mock.patch("pixel_forge.gui.warn_dialog") as warned:
+            self.win.tileset_generate_btn.click()
+            self.app.processEvents()
+        self.assertTrue(warned.called)
+        self.assertIsNone(self.win.tileset_tiles)
+
+    def test_export_png_writes_file(self):
+        from pixel_forge.pixelize import load_image
+        self._generate_blob()
+        path = os.path.join(self.tmp, "blob-tileset.png")
+        self.assertTrue(self.win.export_tileset_png(path))
+        self.assertTrue(os.path.isfile(path))
+        sheet = load_image(path)
+        self.assertEqual((sheet.width(), sheet.height()),
+                         (112, 112))
+
+    def test_save_tileset_to_library(self):
+        from pixel_forge.pixelize import PixelForgeError
+        with self.assertRaises(PixelForgeError):
+            self.win.save_tileset_to_library("Nothing yet", [])
+        self._generate_wang()
+        entry = self.win.save_tileset_to_library(
+            "Wang grass", ["tileset"])
+        self.assertEqual(entry["name"], "Wang grass")
+        self.assertEqual(self.win.library.entries()[0]["name"],
+                         "Wang grass")
+
+    def test_no_bare_ampersand_in_tileset_tab(self):
+        for text in visible_texts(self.win.tileset_tab):
+            self.assertNotIn("&", text,
+                             "bare & in visible text: %r" % text)
+
+    def test_tileset_controls_have_tooltips(self):
+        from PySide6.QtWidgets import QComboBox, QPushButton, QSlider
+        missing = []
+        for cls in (QPushButton, QComboBox, QSlider):
+            for widget in self.win.tileset_tab.findChildren(cls):
+                if not widget.toolTip().strip():
+                    missing.append(widget.__class__.__name__)
+        self.assertEqual(missing, [])
 
 
 if __name__ == "__main__":

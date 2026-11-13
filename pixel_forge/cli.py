@@ -18,6 +18,8 @@
     pixel-forge code FILE --asset NAME --out OUT.png
     pixel-forge code FILE --all [--out DIR]
     pixel-forge skin FILE --out DIR
+    pixel-forge tileset --wang A.png B.png [--out DIR]
+    pixel-forge tileset --blob TILE.png [--out DIR]
     pixel-forge gui
     pixel-forge --version
 
@@ -55,6 +57,8 @@ from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
 from .presets import PresetStore
 from .skins import extract_skin
 from .spritesheet import load_frame_dir, write_sheet
+from .tileset import (DEMO_MAP_SIZE, TILESET_EXPORTS, blob_tiles,
+                      export_tileset, wang_tiles)
 from .video import DEFAULT_FPS, video_to_frames
 
 PALETTE_CHOICES = ["image", "pico8", "gameboy", "grayscale"]
@@ -405,6 +409,35 @@ def build_parser():
                       help="output folder (default: "
                       "<skin-stem>-skin-parts next to the file)")
     _add_output_args(skin)
+
+    tileset = sub.add_parser(
+        "tileset", help="build a Wang 16 or blob 47 tileset from "
+        "base tiles, with Tiled and Godot exports")
+    which = tileset.add_mutually_exclusive_group(required=True)
+    which.add_argument("--wang", nargs=2, metavar=("A", "B"),
+                       help="two same-size base tiles (terrain A "
+                       "and terrain B) for a 16-tile Wang set")
+    which.add_argument("--blob", metavar="TILE",
+                       help="one base tile (the terrain, drawn "
+                       "against transparency) for a 47-tile blob "
+                       "set")
+    tileset.add_argument("--out", default=None,
+                         help="output folder (default: "
+                         "<base-stem>-tileset next to the first "
+                         "base tile)")
+    tileset.add_argument("--export", default="all",
+                         choices=list(TILESET_EXPORTS),
+                         help="what to write (default: all — the "
+                         "tileset PNG, the Tiled .tsx + demo "
+                         ".tmx, and the Godot .tres). png writes "
+                         "only the PNG; tsx adds the .tsx; tmx "
+                         "adds the .tsx + demo .tmx; tres adds "
+                         "the .tres")
+    tileset.add_argument("--map-size", type=int,
+                         default=DEMO_MAP_SIZE,
+                         help="demo .tmx size in tiles, square "
+                         "(default: %d)" % DEMO_MAP_SIZE)
+    _add_output_args(tileset)
 
     gui = sub.add_parser("gui", help="open the Pixel Forge window")
     _add_output_args(gui)
@@ -1011,6 +1044,32 @@ def cmd_skin(args):
     return 0
 
 
+def cmd_tileset(args):
+    if args.wang is not None:
+        mode = "wang"
+        first = Path(args.wang[0])
+        tile_a = load_image(args.wang[0])
+        tile_b = load_image(args.wang[1])
+        tiles = wang_tiles(tile_a, tile_b)
+    else:
+        mode = "blob"
+        first = Path(args.blob)
+        tiles = blob_tiles(load_image(args.blob))
+    out = args.out
+    if out is None:
+        out = str(first.with_name(first.stem + "-tileset"))
+    files = export_tileset(mode, tiles, out, first.stem,
+                           export=args.export,
+                           map_size=args.map_size)
+    _emit_json(args, {"mode": mode,
+                      "files": [str(p) for p in files],
+                      "tiles": len(tiles),
+                      "export": args.export})
+    _info(args, "%d tiles — wrote %s"
+          % (len(tiles), ", ".join(p.name for p in files)))
+    return 0
+
+
 def cmd_gui(_args):
     from .gui import main as gui_main
     return gui_main()
@@ -1059,6 +1118,8 @@ def main(argv=None):
             return cmd_code(args)
         if args.command == "skin":
             return cmd_skin(args)
+        if args.command == "tileset":
+            return cmd_tileset(args)
         if args.command == "gui":
             return cmd_gui(args)
     except PixelForgeError as exc:

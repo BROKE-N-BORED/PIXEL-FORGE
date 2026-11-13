@@ -231,6 +231,22 @@ it keeps them and prints the way to remove them by hand.
   Export library backs the whole library up to a folder, and
   Import library brings one back (entries already in the library
   are skipped, never overwritten).
+- **Tileset tab:** build a Wang 16 or blob 47 autotile set from
+  one or two base tiles, and export it for Tiled or Godot 4.
+  Pick a mode (Wang 16 / Blob 47 — nothing is picked by
+  default), choose the base tiles (one for blob, two same-size
+  tiles for Wang — the second picker only shows in Wang mode),
+  and press Generate tileset. The set shows in a grid preview
+  with a count line ("16 tiles, 32 x 32 each"), a zoom slider
+  with Fit, and export buttons: Export PNG for the tileset
+  image alone, Export for Tiled (PNG + a .tsx tileset + a demo
+  .tmx map), Export for Godot (PNG + a .tres TileSet), and Save
+  to library for the tileset PNG. A mode change or a new base
+  tile clears the generated set — it was built from the old
+  ones. Dropping a single image on the window with the Tileset
+  tab current loads it as base tile A. The bitmask conventions,
+  the quadrant construction, and what each export contains are
+  in the "Tileset / autotile tools" section below.
 - **Presets:** the Image, Video, and Prompt tabs each have a
   Preset picker. A preset is size + palette + max colors +
   dithering + keep-aspect in one pick — Game Boy 32, PICO-8 64,
@@ -301,6 +317,8 @@ pixel-forge code game.py --asset HERO --out hero.png
 pixel-forge code game.py --all --out game-sprites/
 pixel-forge code src/ --list
 pixel-forge skin steve.png --out steve-parts/
+pixel-forge tileset --wang grass.png water.png --out grass-tileset/
+pixel-forge tileset --blob grass.png --out grass-tileset/ --export tmx --map-size 12
 pixel-forge --help
 ```
 
@@ -510,6 +528,103 @@ chunk types, tags, palette, and cel pixels round-tripping to
 the source frames). No Aseprite binary, Godot, or Unity runs
 in the build sandbox, so opening the exports in the real
 engines is a real-PC check, not something proven here.
+
+## Tileset / autotile tools
+
+The Tileset tab (and `pixel-forge tileset` on the command line)
+builds an autotile set — the set of tiles a map editor needs to
+paint terrain that connects to itself. Two kinds:
+
+- **Wang 16** — from two same-size base tiles: terrain A and
+  terrain B. The 16 tiles cover every combination of the 4
+  edges, each edge showing A or B. Tile index = the 4-bit edge
+  mask: bit 0 = north, 1 = east, 2 = south, 3 = west, a set bit
+  = terrain B. Tile 0 is all A, tile 15 is all B. Each tile is
+  built quadrant by quadrant from the two base tiles: a quadrant
+  whose two meeting edges agree takes that terrain's quadrant;
+  a quadrant whose edges differ gets a diagonal split — half A,
+  half B along the corner diagonal. The base tiles must be the
+  same size; mismatched sizes refuse plainly.
+- **Blob 47** — from one base tile: the terrain, drawn against
+  transparency. The 47 tiles cover every combination of 4 edge
+  neighbors + 4 corner neighbors, minus the impossible cases —
+  a corner neighbor with neither adjacent edge neighbor can
+  never show. Neighbor bits run clockwise from north: bit 0 =
+  N, 1 = NE, 2 = E, 3 = SE, 4 = S, 5 = SW, 6 = W, 7 = NW. The
+  47 valid masks, sorted ascending, are the tile indices: mask
+  0 is tile 0, mask 255 is tile 46. Each quadrant shows the base
+  tile's quadrant when its corner's neighbors are present, is
+  cut with a diagonal when the corner neighbor is missing but
+  both edges are present, shows the half next to the edge when
+  exactly one edge is present, and is transparent when no
+  adjacent neighbor is present. The all-neighbors tile (mask
+  255) is the base tile unchanged; the no-neighbors tile (mask
+  0) is fully transparent — so an isolated painted cell shows
+  nothing, and you need at least two adjacent cells to see
+  terrain. This follows the task's construction, which differs
+  from the classic sub-blob one (where a no-edge quadrant is an
+  outer curve and an isolated cell renders as a diamond); if
+  the rounded variant is wanted later it is a small follow-up.
+
+The tileset PNG packs the tiles in a grid (4x4 for Wang, 7x7
+for blob at the default auto columns) with no padding, in tile
+index order, top-left to bottom-right.
+
+**Exports** (all written next to each other, named from the
+first base tile — a Wang set from `grass.png` + `water.png`
+exports as `grass.png`, `grass.tsx`, `grass-demo.tmx`,
+`grass.tres`):
+
+- **PNG** — the tileset image alone.
+- **Tiled (.tsx)** — a tileset file referencing the PNG, with
+  tilewidth, tileheight, tilecount, columns, and a Wang set:
+  two terrains (Terrain A / Terrain B) for Wang, one (Terrain)
+  for blob, plus one wangtile per tile carrying its Wang ID in
+  Tiled's clockwise order (top edge, top-right corner, right
+  edge, bottom-right corner, bottom edge, bottom-left corner,
+  left edge, top-left corner). The blob mask bits are that same
+  clockwise order, so a blob tile's Wang ID is its mask. A Wang
+  tile's corner takes the next edge clockwise, since a
+  diagonal-split corner is half A half B and Tiled wants one
+  color per corner.
+- **Tiled demo map (.tmx)** — a minimal valid map (default
+  10x10, one tile layer, CSV layer data) referencing the .tsx,
+  showing the set in use. In blob mode a terrain rectangle sits
+  in the middle of an empty map, each cell's tile picked from
+  its 8 neighbors (out-of-bounds counts as absent); in Wang
+  mode the whole map is filled — terrain A background with a
+  terrain B rectangle — each cell's tile picked from its 4 edge
+  neighbors' terrains. The demo map is named `<stem>-demo.tmx`
+  so it is clear it is a demo, not a real map.
+- **Godot 4 (.tres)** — a TileSet resource in Godot 4's text
+  format: an ext_resource for the PNG (`res://<png-name>` —
+  put the .tres and the PNG in the same folder in the Godot
+  project), a TileSetAtlasSource with the tile size and one
+  tile per atlas cell, and a terrain set in
+  match-corners-and-sides mode with the terrains plus per-tile
+  terrain bits matching each tile's mask. A blob tile's center
+  terrain is the terrain, except the mask-0 tile (no terrain);
+  a Wang tile's center terrain is the majority terrain of its
+  pixels, a tie going to terrain A. No uids — Godot assigns
+  one on import.
+
+**Command line:** `pixel-forge tileset --wang A.png B.png
+--out DIR` or `pixel-forge tileset --blob TILE.png --out DIR`,
+plus `--export {png,tsx,tmx,tres,all}` (default all — the PNG
+always comes along, and the .tmx brings its .tsx) and
+`--map-size N` (default 10, the demo .tmx size). `--wang` and
+`--blob` together is an error. `--json` reports the mode, the
+written files, the tile count, and the export kind.
+
+Verification: the exports are checked structurally — the .tsx
+and .tmx parse back through xml.etree in the tests (tilecount,
+columns, wangset, 16 or 47 wangtiles with the right IDs; map
+size, tileset ref, layer CSV decoding to the expected GIDs),
+and the .tres passes text checks (resource type, texture path,
+tile size, terrain set, per-tile terrain bits matching the
+masks) plus a bracket-balance check. No Tiled or Godot runs in
+the build sandbox, so opening the exports in the real editors
+is a real-PC check, not something proven here.
 
 ## Library folder and preset format
 

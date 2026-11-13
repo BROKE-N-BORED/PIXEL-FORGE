@@ -1055,6 +1055,132 @@ class SkinCliTests(unittest.TestCase):
         self.assertNotIn("Traceback", err)
 
 
+class TilesetCliTests(unittest.TestCase):
+    """Task 37: the tileset command — Wang 16 / blob 47 from base
+    tiles, with the export picker and the demo map size."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        from helpers import make_solid_image
+        cls.tile_a = write_image(
+            make_solid_image(16, 16, 255, 0, 0),
+            os.path.join(cls.tmp, "grass.png"))
+        cls.tile_b = write_image(
+            make_solid_image(16, 16, 0, 0, 255),
+            os.path.join(cls.tmp, "water.png"))
+        cls.tile_big = write_image(
+            make_solid_image(32, 32, 0, 255, 0),
+            os.path.join(cls.tmp, "big.png"))
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = main(argv)
+        except SystemExit as exc:
+            code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_tileset_wang(self):
+        out_dir = os.path.join(self.tmp, "wang-out")
+        code, out, err = self._run(
+            ["tileset", "--wang", self.tile_a, self.tile_b,
+             "--out", out_dir])
+        self.assertEqual(code, 0, err)
+        self.assertIn("16 tiles", out)
+        for name in ("grass.png", "grass.tsx", "grass-demo.tmx",
+                     "grass.tres"):
+            self.assertTrue(os.path.isfile(
+                os.path.join(out_dir, name)), name)
+        sheet = load_image(os.path.join(out_dir, "grass.png"))
+        self.assertEqual((sheet.width(), sheet.height()), (64, 64))
+
+    def test_tileset_blob(self):
+        out_dir = os.path.join(self.tmp, "blob-out")
+        code, out, err = self._run(
+            ["tileset", "--blob", self.tile_a, "--out", out_dir])
+        self.assertEqual(code, 0, err)
+        self.assertIn("47 tiles", out)
+        for name in ("grass.png", "grass.tsx", "grass-demo.tmx",
+                     "grass.tres"):
+            self.assertTrue(os.path.isfile(
+                os.path.join(out_dir, name)), name)
+        sheet = load_image(os.path.join(out_dir, "grass.png"))
+        self.assertEqual((sheet.width(), sheet.height()),
+                         (112, 112))
+
+    def test_tileset_export_png_only(self):
+        out_dir = os.path.join(self.tmp, "png-out")
+        code, _out, err = self._run(
+            ["tileset", "--blob", self.tile_a, "--out", out_dir,
+             "--export", "png"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(os.listdir(out_dir), ["grass.png"])
+
+    def test_tileset_export_tmx_and_map_size(self):
+        import xml.etree.ElementTree as ET
+        out_dir = os.path.join(self.tmp, "tmx-out")
+        code, _out, err = self._run(
+            ["tileset", "--wang", self.tile_a, self.tile_b,
+             "--out", out_dir, "--export", "tmx", "--map-size", "5"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(os.listdir(out_dir)),
+                         ["grass-demo.tmx", "grass.png",
+                          "grass.tsx"])
+        root = ET.parse(
+            os.path.join(out_dir, "grass-demo.tmx")).getroot()
+        self.assertEqual(root.get("width"), "5")
+        self.assertEqual(root.get("height"), "5")
+
+    def test_tileset_json(self):
+        out_dir = os.path.join(self.tmp, "json-out")
+        code, out, err = self._run(
+            ["tileset", "--blob", self.tile_a, "--out", out_dir,
+             "--json"])
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["mode"], "blob")
+        self.assertEqual(payload["tiles"], 47)
+        self.assertEqual(payload["export"], "all")
+        self.assertEqual(len(payload["files"]), 4)
+
+    def test_tileset_wang_and_blob_is_argparse_error(self):
+        code, _out, err = self._run(
+            ["tileset", "--wang", self.tile_a, self.tile_b,
+             "--blob", self.tile_a])
+        self.assertEqual(code, 2)
+        self.assertIn("not allowed with", err)
+
+    def test_tileset_neither_is_argparse_error(self):
+        code, _out, err = self._run(["tileset"])
+        self.assertEqual(code, 2)
+        self.assertIn("required", err)
+
+    def test_tileset_mismatched_sizes_fail_cleanly(self):
+        code, _out, err = self._run(
+            ["tileset", "--wang", self.tile_a, self.tile_big,
+             "--out", os.path.join(self.tmp, "bad-out")])
+        self.assertEqual(code, 1)
+        self.assertIn("same size", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_tileset_missing_file_fails_cleanly(self):
+        code, _out, err = self._run(
+            ["tileset", "--blob",
+             os.path.join(self.tmp, "nope.png")])
+        self.assertEqual(code, 1)
+        self.assertIn("not found", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_tileset_default_out_dir(self):
+        code, _out, err = self._run(
+            ["tileset", "--blob", self.tile_a, "--export", "png"])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "grass-tileset", "grass.png")))
+
+
 class BatchProcessingCliTests(unittest.TestCase):
     """Task 28: folder convert, code --all, library remove/rename,
     presets save/delete, --json / --quiet, and no raw tracebacks."""
