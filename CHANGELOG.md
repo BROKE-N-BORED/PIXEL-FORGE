@@ -1,5 +1,31 @@
 # Pixel Forge changelog
 
+## 0.12 — 2026-11-12
+
+Nothing selected by default, ever — task-list item #6. The
+ffmpeg option used to be pre-selected in both installers, so
+an install went ahead and installed ffmpeg (sudo + download)
+unless the user noticed and opted out.
+
+- The GUI installer's "Install ffmpeg for video support"
+  checkbox is now unticked by default. Ticking it installs
+  ffmpeg exactly as before; the image-engine checkbox was
+  already unticked and stays that way.
+- The terminal installer's ffmpeg prompt now reads `[y/N]`
+  and an empty answer means no — an explicit yes still
+  installs ffmpeg exactly as before.
+- The same default is fixed one layer down: a bare
+  `InstallWorker` or `InstallContext` no longer installs
+  ffmpeg either, so no caller can trigger the install
+  without the user's choice. The window passes the checkbox
+  state explicitly, so GUI behavior is unchanged apart from
+  the default.
+- The rest of the install surface was audited for the same
+  violation and is clean: the image engine is opt-in in both
+  installers (`--with-image-engine` / unticked checkbox),
+  the uninstaller's `--purge` is explicit, and `run.sh`
+  offers no options at all.
+
 ## 0.11 — 2026-11-12
 
 A failed install no longer leaves a dangling launcher and an

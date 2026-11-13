@@ -54,7 +54,10 @@ class InstallContext:
         self._log = log
         self.dryrun = dryrun
         self.cancelled = False
-        self.install_ffmpeg = True
+        # Nothing selected by default, ever: ffmpeg is an optional
+        # install (needs sudo + a download), so a bare context does
+        # not install it — the window passes the checkbox state in.
+        self.install_ffmpeg = False
         self.install_image_engine = False
         self.home = Path(os.path.expanduser("~"))
 
@@ -256,7 +259,7 @@ def step_ffmpeg(ctx):
     if ctx.which("ffmpeg"):
         ctx.log("OK: ffmpeg is already installed")
         return StepResult(StepResult.DONE, "already installed")
-    if not getattr(ctx, "install_ffmpeg", True):
+    if not getattr(ctx, "install_ffmpeg", False):
         ctx.log("Skipped: ffmpeg not installed (your choice) — video "
                 "import will be unavailable until you install it "
                 "(sudo apt install ffmpeg). Image import still works.")
@@ -547,7 +550,7 @@ class InstallWorker(QThread):
     progress = Signal(int)
     finished = Signal(object)  # list of StepResult
 
-    def __init__(self, dryrun=False, install_ffmpeg=True,
+    def __init__(self, dryrun=False, install_ffmpeg=False,
                  install_image_engine=False, parent=None):
         super().__init__(parent)
         self._dryrun = dryrun
@@ -657,7 +660,9 @@ class InstallerWindow(QMainWindow):
 
         self.ffmpeg_check = QCheckBox(
             "Install ffmpeg for video support (needs your password)")
-        self.ffmpeg_check.setChecked(True)
+        # Nothing selected by default, ever: unticked until the
+        # user ticks it, same as the image-engine checkbox below.
+        self.ffmpeg_check.setChecked(False)
         self.ffmpeg_check.setToolTip(
             "ffmpeg reads video files. Without it, image import "
             "still works and video import says what to install.")

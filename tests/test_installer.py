@@ -5,6 +5,7 @@ step logs what it would do. Skipped when PySide6 is not importable.
 """
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -115,6 +116,10 @@ class InstallerTests(unittest.TestCase):
 
         lines = []
         ctx = InstallContext(lines.append, dryrun=False)
+        # The failure path under test is "ffmpeg was chosen but the
+        # install failed" — choose it explicitly: the default is
+        # off since v0.12 (nothing selected by default, ever).
+        ctx.install_ffmpeg = True
         ctx.which = lambda _name: None  # ffmpeg missing
         ctx.run_admin = lambda _script, timeout=None: 100
         result = step_ffmpeg(ctx)
@@ -127,7 +132,9 @@ class InstallerTests(unittest.TestCase):
         from pixel_forge.installer import InstallerWindow
 
         win = InstallerWindow(dryrun=True)
-        self.assertTrue(win.ffmpeg_check.isChecked())
+        # Unticked by default since v0.12 — nothing selected by
+        # default, ever (task 6). It used to be checked.
+        self.assertFalse(win.ffmpeg_check.isChecked())
         self.assertNotIn("&", win.ffmpeg_check.text())
         win.close()
 
@@ -477,6 +484,187 @@ class InstallerGatingTests(unittest.TestCase):
         self.assertFalse(gui_link.is_symlink())
         self.assertFalse(gui_link.exists())
         win.close()
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 not available")
+class InstallerDefaultsTests(unittest.TestCase):
+    """Task 6: nothing selected by default, ever. The ffmpeg
+    option used to be pre-selected in the GUI installer (checked
+    checkbox) and in the worker/context defaults, so an install
+    went ahead and installed ffmpeg unless the user opted out."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        self._old_home = os.environ.get("HOME")
+        self.addCleanup(self._restore_env)
+        # _on_finished runs the venv import check against HOME;
+        # point it at an empty temp dir so nothing real is read.
+        os.environ["HOME"] = tempfile.mkdtemp(prefix="pf-install-def-")
+
+    def _restore_env(self):
+        if self._old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = self._old_home
+
+    def test_fresh_window_has_nothing_checked(self):
+        from pixel_forge.installer import InstallerWindow
+
+        win = InstallerWindow(dryrun=True)
+        self.assertFalse(win.ffmpeg_check.isChecked(),
+                         "ffmpeg checkbox is checked by default")
+        self.assertFalse(win.image_engine_check.isChecked(),
+                         "image-engine checkbox is checked by default")
+        win.close()
+
+    def test_defaults_are_off_one_layer_down(self):
+        """A bare worker or context must not install ffmpeg either
+        — no caller can trigger the install without the user's
+        choice. Mirrors test_image_engine_step_skipped_by_default."""
+        import inspect
+
+        from pixel_forge.installer import (InstallContext, InstallWorker,
+                                           StepResult, step_ffmpeg)
+
+        ctx = InstallContext(lambda _msg: None, dryrun=True)
+        self.assertFalse(ctx.install_ffmpeg)
+        default = inspect.signature(
+            InstallWorker.__init__).parameters["install_ffmpeg"].default
+        self.assertIs(default, False)
+        ctx.which = lambda _name: None  # ffmpeg missing
+        result = step_ffmpeg(ctx)
+        self.assertEqual(result.status, StepResult.DONE)
+        self.assertEqual(result.detail, "skipped")
+
+    def _steps_recording_ffmpeg_flag(self, seen):
+        """STEPS-shaped stubs; the ffmpeg stub records the flag the
+        worker handed its context and does nothing else."""
+        import pixel_forge.installer as installer_mod
+        from pixel_forge.installer import StepResult
+
+        def done(_ctx):
+            return StepResult(StepResult.DONE)
+
+        def ffmpeg(ctx):
+            seen.append(ctx.install_ffmpeg)
+            return StepResult(StepResult.DONE)
+
+        funcs = {"ffmpeg": ffmpeg}
+        return [(key, title, funcs.get(key, done))
+                for key, title, _func in installer_mod.STEPS]
+
+    def _run_window_install(self, win):
+        """Drive the real _start_install to completion over the
+        stub steps; returns when the worker finishes."""
+        from PySide6.QtCore import QEventLoop, QTimer
+
+        loop = QEventLoop()
+        win._start_install()
+        win._worker.finished.connect(lambda _r: loop.quit())
+        QTimer.singleShot(60000, loop.quit)
+        loop.exec()
+        self.app.processEvents()
+        self.app.processEvents()
+
+    def test_ticking_ffmpeg_checkbox_passes_flag_to_worker(self):
+        """The checkbox still works: ticked, the flag reaches the
+        ffmpeg step as True through the real window -> worker ->
+        context wiring. No real install runs (stub steps)."""
+        import pixel_forge.installer as installer_mod
+        from pixel_forge.installer import InstallerWindow
+
+        seen = []
+        steps = self._steps_recording_ffmpeg_flag(seen)
+        old_steps = installer_mod.STEPS
+        installer_mod.STEPS = steps
+        self.addCleanup(setattr, installer_mod, "STEPS", old_steps)
+        win = InstallerWindow(dryrun=False)
+        win.show()
+        self.app.processEvents()
+        win.ffmpeg_check.setChecked(True)
+        self._run_window_install(win)
+        self.assertEqual(seen, [True],
+                         "ticked checkbox did not reach the ffmpeg step")
+        win.close()
+
+    def test_unticked_ffmpeg_checkbox_passes_false_to_worker(self):
+        """The default, end to end: a fresh window (unticked) runs
+        the ffmpeg step with the flag False."""
+        import pixel_forge.installer as installer_mod
+        from pixel_forge.installer import InstallerWindow
+
+        seen = []
+        steps = self._steps_recording_ffmpeg_flag(seen)
+        old_steps = installer_mod.STEPS
+        installer_mod.STEPS = steps
+        self.addCleanup(setattr, installer_mod, "STEPS", old_steps)
+        win = InstallerWindow(dryrun=False)
+        win.show()
+        self.app.processEvents()
+        self._run_window_install(win)
+        self.assertEqual(seen, [False],
+                         "unticked checkbox reached the step as True")
+        win.close()
+
+
+def _ffmpeg_prompt_block():
+    """The exact ffmpeg prompt lines from install.sh, verbatim —
+    from the `read` line through the closing `esac`. The tests
+    below run these lines, not a paraphrase of them."""
+    path = os.path.join(ROOT, "install.sh")
+    with open(path) as fh:
+        text = fh.read()
+    start = text.index('read -rp "Install ffmpeg now?')
+    end = text.index("    esac", start) + len("    esac")
+    return text[start:end]
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash not available")
+class InstallScriptTests(unittest.TestCase):
+    """Task 6, terminal installer: install.sh's ffmpeg prompt
+    defaults to No. The tests run the exact shipped lines with a
+    stubbed `sudo` — never a real install."""
+
+    def _run_prompt_block(self, stdin_text):
+        block = _ffmpeg_prompt_block()
+        script = ("sudo() { echo \"SUDO-CALLED: $*\"; return 0; }\n"
+                  + block + "\n")
+        return subprocess.run(["bash", "-c", script],
+                              input=stdin_text, capture_output=True,
+                              text=True, timeout=30)
+
+    def test_prompt_shows_no_default(self):
+        block = _ffmpeg_prompt_block()
+        self.assertIn("[y/N]", block)
+        self.assertIn('${_answer:-N}', block)
+
+    def test_empty_answer_defaults_to_no(self):
+        proc = self._run_prompt_block("\n")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Skipped ffmpeg", proc.stdout)
+        self.assertNotIn("SUDO-CALLED", proc.stdout)
+
+    def test_eof_defaults_to_no(self):
+        proc = self._run_prompt_block("")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Skipped ffmpeg", proc.stdout)
+        self.assertNotIn("SUDO-CALLED", proc.stdout)
+
+    def test_explicit_yes_still_installs(self):
+        proc = self._run_prompt_block("y\n")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("SUDO-CALLED", proc.stdout)
+        self.assertNotIn("Skipped ffmpeg", proc.stdout)
+
+    def test_explicit_no_skips(self):
+        proc = self._run_prompt_block("n\n")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Skipped ffmpeg", proc.stdout)
+        self.assertNotIn("SUDO-CALLED", proc.stdout)
 
 
 if __name__ == "__main__":

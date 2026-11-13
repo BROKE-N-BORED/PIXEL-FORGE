@@ -49,8 +49,8 @@ fi
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "ffmpeg is not installed — video import needs it."
   if [ -t 0 ]; then
-    read -rp "Install ffmpeg now? [Y/n] " _answer || true
-    case "${_answer:-Y}" in
+    read -rp "Install ffmpeg now? [y/N] " _answer || true
+    case "${_answer:-N}" in
       [Yy]*)
         sudo apt-get update && sudo apt-get install -y ffmpeg \
           || echo "WARNING: ffmpeg could not be installed — video import will stay unavailable until you run: sudo apt install ffmpeg"
