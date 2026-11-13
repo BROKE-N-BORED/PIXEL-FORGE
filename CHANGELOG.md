@@ -1,5 +1,30 @@
 # Pixel Forge changelog
 
+## 0.38 — 2026-11-13
+
+Error-handling holes — task-list item #27, four sub-items in one
+release:
+
+- One corrupt candidate no longer aborts the whole pixelize
+  pass: `pixelize_candidates` now tries each candidate on its
+  own, skips the bad one with its reason recorded in the batch
+  (`pixel_error`), and still saves the batch — the good pairs
+  land as before. It returns (pairs, failures) now, and the CLI
+  prints one plain stderr line per skipped candidate.
+- Generating with a model that is not the pinned LCM file asks
+  first (Yes/No, default No), naming the found file and the
+  pinned one. The CLI keeps its existing stderr warning and
+  does not stop to ask.
+- A RAM pre-flight runs before generation: with less than 3 GB
+  free (the model needs about 2.1 GB in memory), the GUI asks
+  before starting and the CLI warns on stderr and proceeds. The
+  reading is MemAvailable from /proc/meminfo, stdlib only; a
+  machine that cannot report it generates with no warning.
+- A pixelize or load failure on the Prompt tab now shows in the
+  tab's info label — naming the candidate and the reason —
+  instead of only in the status bar, where the next message
+  overwrites it.
+
 ## 0.37 — 2026-11-13
 
 Code tab controls — task-list item #26, two sub-items in one

@@ -249,6 +249,63 @@ class CliTests(unittest.TestCase):
         self.assertIn("dummy.gguf", err)
         self.assertIn("not the pinned LCM file", err)
 
+    def test_prompt_warns_on_low_ram_and_proceeds(self):
+        # Task 27: the CLI warns on stderr when memory is short
+        # for a ~2.3 GB generation — and proceeds, because a
+        # non-interactive command does not stop to ask.
+        from unittest import mock
+        from pixel_forge import cli as cli_mod
+        out_dir = os.path.join(self.tmp, "low-ram-out")
+        with stub_env(self.stub, self.model), \
+                mock.patch.object(cli_mod, "available_ram_bytes",
+                                  return_value=1 * 1024 ** 3):
+            code, _out, err = self._run(
+                ["prompt", "a knight", "--out", out_dir,
+                 "--size", "32", "--colors", "16"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("only 1.0 GB of memory is free", err)
+        self.assertIn("2.1 GB", err)
+
+    def test_prompt_stays_silent_on_plenty_of_ram(self):
+        # Plenty of memory: no RAM warning at all.
+        from unittest import mock
+        from pixel_forge import cli as cli_mod
+        out_dir = os.path.join(self.tmp, "plenty-ram-out")
+        with stub_env(self.stub, self.model), \
+                mock.patch.object(cli_mod, "available_ram_bytes",
+                                  return_value=8 * 1024 ** 3):
+            code, _out, err = self._run(
+                ["prompt", "a knight", "--out", out_dir,
+                 "--size", "32", "--colors", "16"])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("memory is free", err)
+
+    def test_prompt_reports_pixelize_failures_on_stderr(self):
+        # Task 27: a candidate that failed to pixelize gets one
+        # plain stderr line naming it — the batch record carries
+        # the reason, the CLI prints it.
+        from unittest import mock
+        from pathlib import Path
+        from pixel_forge import cli as cli_mod
+        bdir = Path(self.tmp) / "pixel-fail-out"
+        batch = {"candidates": [
+            {"file": "cand-01.png", "status": "pending",
+             "pixel_file": "cand-01-pixel.png"},
+            {"file": "cand-02.png", "status": "pending",
+             "pixel_error": "could not load cand-02.png"},
+            {"file": "cand-03.png", "status": "pending",
+             "pixel_file": "cand-03-pixel.png"},
+        ]}
+        with stub_env(self.stub, self.model), \
+                mock.patch.object(cli_mod, "prompt_to_sprites",
+                                  return_value=(batch, bdir)):
+            code, _out, err = self._run(
+                ["prompt", "a knight", "--out", str(bdir)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("could not pixelize cand-02.png", err)
+        self.assertIn("could not load cand-02.png", err)
+        self.assertNotIn("cand-01.png", err)
+
     def test_prompt_missing_engine_fails_cleanly(self):
         from unittest import mock
         from pixel_forge import imagegen as imagegen_mod

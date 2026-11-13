@@ -78,6 +78,14 @@ NEGATIVE_PRESETS = {
 }
 PER_IMAGE_TIMEOUT_S = 1800
 MAX_PROMPT_LEN = 1000
+# RAM pre-flight for generation (task 27): the pinned model is
+# 2,135 MB on disk and the run needs it in RAM plus working
+# memory — about 2.3 GB all told. Below this much available
+# memory the run risks swapping to a crawl or being killed, so
+# the GUI asks first and the CLI warns. On an 8 GB machine with
+# a desktop running, available memory is usually 5–6 GB, so
+# this does not cry wolf on a healthy machine.
+GENERATION_MIN_RAM_BYTES = 3 * 1024 ** 3
 
 
 class GenerationCancelled(Exception):
@@ -189,6 +197,40 @@ def require_model() -> Path:
     if model is None:
         raise PixelForgeError(model_missing_text())
     return model
+
+
+def is_pinned_model(path) -> bool:
+    """True when the model file is the pinned LCM file, by name.
+    find_model picks up ANY .gguf in a model home, so this is
+    what the generation entry points check before using one."""
+    return Path(path).name == MODEL_FILENAME
+
+
+def format_bytes(n) -> str:
+    """A byte count as a short human size: "850 MB", "2.4 GB"."""
+    if n >= 1024 ** 3:
+        return "%.1f GB" % (n / 1024 ** 3)
+    if n >= 1024 ** 2:
+        return "%d MB" % round(n / 1024 ** 2)
+    return "%d KB" % max(1, round(n / 1024))
+
+
+def available_ram_bytes(meminfo_path="/proc/meminfo"):
+    """Memory available for a new process, in bytes — MemAvailable
+    from /proc/meminfo, which counts reclaimable cache, not just
+    free pages. None when it cannot be read (non-Linux, a missing
+    or unparsable file): callers treat None as "unknown, proceed
+    with no warning", never as zero. The path is a parameter so
+    tests can point at a fake meminfo. Stdlib only — no psutil,
+    no new dependency."""
+    try:
+        with open(meminfo_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
 
 
 # ------------------------------------------------------- install pins
@@ -605,28 +647,45 @@ def regenerate_candidate(batch_dir: str | Path, filename: str,
 
 def pixelize_candidates(batch_dir: str | Path, width=32, height=None,
                         keep_aspect=False, palette="image",
-                        max_colors=16, dither=True) -> list:
+                        max_colors=16, dither=True) -> tuple:
     """Pixelize every landed candidate through the Item 1 core.
 
     Writes <stem>-pixel.png next to each candidate and records it in
-    the batch. Failed candidates are skipped. Returns the list of
-    (candidate file, pixel file) pairs.
+    the batch. A candidate that fails to pixelize — a corrupt file,
+    or one that vanishes mid-run — is skipped, not fatal (task 27:
+    one bad candidate used to abort the whole loop, and the
+    trailing save never ran, so even the good pairs were never
+    recorded). The failed record gains a "pixel_error" naming
+    the reason, the loop carries on, and the batch is still
+    saved. A re-run that now succeeds clears a stale error and
+    drops a stale pixel file from the record. Returns (pairs,
+    failures): pairs is the list of (candidate file, pixel file)
+    pairs as before, failures is the list of (candidate file,
+    reason) pairs for the ones skipped.
     """
     batch = load_batch(batch_dir)
     pairs = []
+    failures = []
     for record in batch["candidates"]:
         if record["status"] not in ("pending", "kept"):
             continue
         src = Path(batch_dir) / record["file"]
         pixel_name = "%s-pixel.png" % Path(record["file"]).stem
         dest = Path(batch_dir) / pixel_name
-        pixelize_file(src, dest, width=width, height=height,
-                      keep_aspect=keep_aspect, palette=palette,
-                      max_colors=max_colors, dither=dither)
+        try:
+            pixelize_file(src, dest, width=width, height=height,
+                          keep_aspect=keep_aspect, palette=palette,
+                          max_colors=max_colors, dither=dither)
+        except (PixelForgeError, OSError) as exc:
+            record.pop("pixel_file", None)
+            record["pixel_error"] = str(exc)
+            failures.append((record["file"], str(exc)))
+            continue
+        record.pop("pixel_error", None)
         record["pixel_file"] = pixel_name
         pairs.append((record["file"], pixel_name))
     save_batch(batch_dir, batch)
-    return pairs
+    return pairs, failures
 
 
 def prompt_to_sprites(prompt: str, out_dir: str | Path,

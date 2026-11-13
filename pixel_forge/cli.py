@@ -31,8 +31,10 @@ from pathlib import Path
 from . import __version__
 from .codeinput import parse_paths
 from .imagegen import (DEFAULT_NEGATIVE, DEFAULT_SIZE, LCM_CFG,
-                       LCM_STEPS, MODEL_FILENAME, find_engine,
-                       find_model, prompt_to_sprites, slugify)
+                       LCM_STEPS, MODEL_FILENAME,
+                       GENERATION_MIN_RAM_BYTES, available_ram_bytes,
+                       find_engine, find_model, format_bytes,
+                       prompt_to_sprites, slugify)
 from .library import Library, normalize_tags
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
                        load_image, pixelize_file, plural)
@@ -328,6 +330,18 @@ def cmd_prompt(args):
             print("using model: %s (not the pinned LCM file %s)"
                   % (model, MODEL_FILENAME), file=sys.stderr)
 
+    # RAM pre-flight (task 27): the model needs about 2.1 GB in
+    # memory. The CLI only warns — a non-interactive command does
+    # not stop to ask — and proceeds. Unknown memory (None) stays
+    # silent.
+    available = available_ram_bytes()
+    if (available is not None
+            and available < GENERATION_MIN_RAM_BYTES):
+        print("pixel-forge: warning: only %s of memory is free — "
+              "the image model needs about 2.1 GB, so generation "
+              "may be slow or fail"
+              % format_bytes(available), file=sys.stderr)
+
     batch, bdir = prompt_to_sprites(
         args.prompt, out, negative=args.negative, count=args.count,
         width=width, height=height, keep_aspect=args.keep_aspect,
@@ -342,6 +356,14 @@ def cmd_prompt(args):
     if failed:
         print("%s failed — see batch.json in %s"
               % (plural(failed, "candidate"), bdir))
+    # Pixelize failures (task 27): pixelize_candidates skips a
+    # bad candidate and records the reason in the batch — one
+    # plain stderr line per skipped candidate, naming it.
+    for record in batch["candidates"]:
+        if record.get("pixel_error"):
+            print("pixel-forge: could not pixelize %s — %s"
+                  % (record["file"], record["pixel_error"]),
+                  file=sys.stderr)
     return 0
 
 

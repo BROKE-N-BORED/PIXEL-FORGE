@@ -950,7 +950,12 @@ class PromptGuiTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication(sys.argv)
         cls.tmp = tempfile.mkdtemp()
         cls.stub = write_stub_engine(cls.tmp)
-        cls.model = os.path.join(cls.tmp, "dummy.gguf")
+        # The dummy model carries the PINNED file name: a
+        # differently-named model hits the task-27 fallback
+        # confirm on every generation, and these tests are not
+        # testing that dialog.
+        cls.model = os.path.join(
+            cls.tmp, "LCM_Dreamshaper_v7-f16.gguf")
         with open(cls.model, "wb") as f:
             f.write(b"not a real model")
 
@@ -961,6 +966,15 @@ class PromptGuiTests(unittest.TestCase):
         # (task 20), so generation must not write into the real
         # ~/pixel-forge-library/ during the suite.
         self.lib_dir = tempfile.mkdtemp()
+        # The sandbox reports well under 3 GiB free, which would
+        # trip the task-27 RAM confirm on every generation —
+        # tests run with plenty of memory unless they test the
+        # confirm itself.
+        from unittest import mock
+        self._ram_patch = mock.patch(
+            "pixel_forge.gui.available_ram_bytes",
+            return_value=8 * 1024 ** 3)
+        self._ram_patch.start()
         from pixel_forge.gui import MainWindow
         self.win = MainWindow(library_dir=self.lib_dir)
         self.win.tabs.setCurrentIndex(2)
@@ -969,6 +983,7 @@ class PromptGuiTests(unittest.TestCase):
         self.win.close()
         self.win.deleteLater()
         self.app.processEvents()
+        self._ram_patch.stop()
         self._env.__exit__(None, None, None)
         shutil.rmtree(self.lib_dir, ignore_errors=True)
 
@@ -1266,6 +1281,132 @@ class PromptGuiTests(unittest.TestCase):
         self.assertIn("3 candidates", text)
         self.assertNotIn("keeper", text)
 
+    def _use_other_model(self):
+        """Point the stub env at a non-pinned .gguf for this test
+        (task 27). tearDown exits whatever env is current."""
+        other = os.path.join(self.tmp, "other-model.gguf")
+        with open(other, "wb") as f:
+            f.write(b"gguf")
+        self._env.__exit__(None, None, None)
+        self._env = stub_env(self.stub, other)
+        self._env.__enter__()
+        return other
+
+    def test_non_pinned_model_asks_first_decline_keeps_tab(self):
+        # Task 27: generating with a model that is not the pinned
+        # LCM file asks first — default No — and declining leaves
+        # the tab untouched: no worker, no batch, no dialog after.
+        from unittest import mock
+        from PySide6.QtWidgets import QMessageBox
+        from pixel_forge import gui as gui_mod
+        self._use_other_model()
+        with mock.patch.object(
+                gui_mod.QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.No) as ask:
+            self.win.prompt_edit.setText("a knight")
+            self.win._on_prompt_generate()
+        self.assertTrue(ask.called)
+        title, text = ask.call_args[0][1], ask.call_args[0][2]
+        self.assertEqual(title, "Use a different model?")
+        self.assertIn("other-model.gguf", text)
+        self.assertIn("LCM_Dreamshaper_v7-f16.gguf", text)
+        self.assertEqual(ask.call_args[0][4],
+                         QMessageBox.StandardButton.No)
+        self.assertIsNone(self.win.prompt_worker)
+        self.assertIsNone(self.win.prompt_batch_dir)
+        self.assertEqual(self.win.prompt_strip.count(), 0)
+        self.assertTrue(self.win.prompt_generate_btn.isEnabled())
+
+    def test_non_pinned_model_accept_generates(self):
+        # Accepting the fallback confirm generates normally.
+        from unittest import mock
+        from PySide6.QtWidgets import QMessageBox
+        from pixel_forge import gui as gui_mod
+        self._use_other_model()
+        with mock.patch.object(
+                gui_mod.QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.Yes) as ask:
+            self.win.prompt_edit.setText("a knight")
+            self.win._on_prompt_generate()
+        self.assertEqual(ask.call_count, 1)
+        self._wait_for_worker()
+        self.assertEqual(self.win.prompt_strip.count(), 3)
+        self.assertEqual(self.win.prompt_keeper, "cand-01.png")
+
+    def test_low_ram_asks_first_decline_keeps_tab(self):
+        # Task 27: under 3 GiB free, generation asks first —
+        # default No — naming the free memory and the ~2.1 GB
+        # model. Declining leaves the tab untouched.
+        from unittest import mock
+        from PySide6.QtWidgets import QMessageBox
+        from pixel_forge import gui as gui_mod
+        with mock.patch.object(gui_mod, "available_ram_bytes",
+                               return_value=1 * 1024 ** 3), \
+                mock.patch.object(
+                    gui_mod.QMessageBox, "question",
+                    return_value=QMessageBox.StandardButton.No) \
+                as ask:
+            self.win.prompt_edit.setText("a knight")
+            self.win._on_prompt_generate()
+        self.assertTrue(ask.called)
+        title, text = ask.call_args[0][1], ask.call_args[0][2]
+        self.assertEqual(title, "Low memory?")
+        self.assertIn("1.0 GB", text)
+        self.assertIn("2.1 GB", text)
+        self.assertEqual(ask.call_args[0][4],
+                         QMessageBox.StandardButton.No)
+        self.assertIsNone(self.win.prompt_worker)
+        self.assertIsNone(self.win.prompt_batch_dir)
+        self.assertEqual(self.win.prompt_strip.count(), 0)
+
+    def test_low_ram_accept_generates(self):
+        # Accepting the low-memory confirm generates normally.
+        from unittest import mock
+        from PySide6.QtWidgets import QMessageBox
+        from pixel_forge import gui as gui_mod
+        with mock.patch.object(gui_mod, "available_ram_bytes",
+                               return_value=1 * 1024 ** 3), \
+                mock.patch.object(
+                    gui_mod.QMessageBox, "question",
+                    return_value=QMessageBox.StandardButton.Yes) \
+                as ask:
+            self.win.prompt_edit.setText("a knight")
+            self.win._on_prompt_generate()
+        self.assertEqual(ask.call_count, 1)
+        self._wait_for_worker()
+        self.assertEqual(self.win.prompt_strip.count(), 3)
+
+    def test_info_label_names_failed_keeper_load(self):
+        # Task 27: a candidate whose file is corrupt fails to
+        # load as keeper — the info label names it and the
+        # reason, not just the status bar. The keeper stays the
+        # good one.
+        self._generate()
+        bdir = self.win.prompt_batch_dir
+        (bdir / "cand-02.png").write_bytes(b"not a png at all")
+        self.win._pick_prompt_keeper("cand-02.png")
+        self.app.processEvents()
+        info = self.win.prompt_info_label.text()
+        self.assertIn("cand-02.png", info)
+        self.assertIn("Could not load", info)
+        self.assertEqual(self.win.prompt_keeper, "cand-01.png")
+
+    def test_info_label_names_failed_preview_pixelize(self):
+        # Task 27: a pixelize failure in the preview names the
+        # keeper and the reason in the info label.
+        from unittest import mock
+        from pixel_forge import gui as gui_mod
+        from pixel_forge.pixelize import PixelForgeError
+        self._generate()
+        with mock.patch.object(
+                gui_mod, "pixelize_image",
+                side_effect=PixelForgeError("boom")):
+            self.win._update_prompt_preview()
+        info = self.win.prompt_info_label.text()
+        self.assertIn("cand-01.png", info)
+        self.assertIn("Could not pixelize", info)
+        self.assertIn("boom", info)
+
     def test_generation_does_not_block_gui(self):
         # Each candidate takes 1s with the stub; the window's event
         # loop must keep running through it — a timer fired mid-run
@@ -1368,7 +1509,11 @@ class PromptIterationTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication(sys.argv)
         cls.tmp = tempfile.mkdtemp()
         cls.stub = write_stub_engine(cls.tmp)
-        cls.model = os.path.join(cls.tmp, "dummy.gguf")
+        # Pinned file name, like PromptGuiTests: a
+        # differently-named model hits the task-27 fallback
+        # confirm on every generation.
+        cls.model = os.path.join(
+            cls.tmp, "LCM_Dreamshaper_v7-f16.gguf")
         with open(cls.model, "wb") as f:
             f.write(b"not a real model")
 
@@ -1376,6 +1521,14 @@ class PromptIterationTests(unittest.TestCase):
         self._env = stub_env(self.stub, self.model)
         self._env.__enter__()
         self.lib_dir = tempfile.mkdtemp()
+        # Plenty of memory, like PromptGuiTests — the sandbox
+        # reports well under 3 GiB free, which would trip the
+        # task-27 RAM confirm on every generation.
+        from unittest import mock
+        self._ram_patch = mock.patch(
+            "pixel_forge.gui.available_ram_bytes",
+            return_value=8 * 1024 ** 3)
+        self._ram_patch.start()
         from pixel_forge.gui import MainWindow
         self.win = MainWindow(library_dir=self.lib_dir)
         self.win.tabs.setCurrentIndex(2)
@@ -1384,6 +1537,7 @@ class PromptIterationTests(unittest.TestCase):
         self.win.close()
         self.win.deleteLater()
         self.app.processEvents()
+        self._ram_patch.stop()
         self._env.__exit__(None, None, None)
         shutil.rmtree(self.lib_dir, ignore_errors=True)
 

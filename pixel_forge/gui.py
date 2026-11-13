@@ -61,8 +61,10 @@ from .history import (batches_dir, load_history, record_batch,
 from .imagegen import (DEFAULT_COUNT, DEFAULT_NEGATIVE, DEFAULT_SIZE,
                        LCM_CFG, LCM_STEPS, MAX_PROMPT_LEN,
                        NEGATIVE_PRESETS, GenerationCancelled,
-                       MODEL_FILENAME, MODEL_URL, engine_status,
-                       generate, load_batch, new_batch,
+                       GENERATION_MIN_RAM_BYTES, MODEL_FILENAME,
+                       MODEL_URL, available_ram_bytes, engine_status,
+                       find_model, format_bytes, generate,
+                       is_pinned_model, load_batch, new_batch,
                        regenerate_candidate, require_engine,
                        require_model, set_keeper, validate_prompt)
 from .library import SOURCE_LABELS, Library
@@ -3248,6 +3250,43 @@ class MainWindow(QMainWindow):
             self._on_prompt_cancelled)
         self.prompt_worker.start()
 
+    def _confirm_model_fallback(self, model):
+        """The found model is not the pinned LCM file — ask before
+        generating with it (task 27). True when the model IS the
+        pinned file, or the user accepts the fallback. A missing
+        model never reaches here (require_model raises first);
+        None is treated as "nothing to confirm"."""
+        if model is None or is_pinned_model(model):
+            return True
+        answer = QMessageBox.question(
+            self, "Use a different model?",
+            "The model found is %s, not the pinned LCM file (%s). "
+            "It may still work, or it may generate badly. Generate "
+            "with it anyway?" % (model.name, MODEL_FILENAME),
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _confirm_low_ram(self):
+        """The machine is short on memory for a ~2.3 GB generation
+        (task 27) — ask before starting. True when memory is
+        unknown (no warning possible) or plentiful, or the user
+        accepts."""
+        available = available_ram_bytes()
+        if (available is None
+                or available >= GENERATION_MIN_RAM_BYTES):
+            return True
+        answer = QMessageBox.question(
+            self, "Low memory?",
+            "Only %s of memory is free, and the image model needs "
+            "about 2.1 GB — generation may be slow or fail. "
+            "Generate anyway?" % format_bytes(available),
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return answer == QMessageBox.StandardButton.Yes
+
     def _on_prompt_generate(self):
         if self._prompt_generating():
             return
@@ -3258,6 +3297,13 @@ class MainWindow(QMainWindow):
             require_model()
         except PixelForgeError as exc:
             warn_dialog(self, "Could not generate", str(exc))
+            return
+        # Both confirms come before the replace-batch confirm and
+        # before anything is cleaned up or created, so declining
+        # leaves the tab exactly as it was.
+        if not self._confirm_model_fallback(find_model()):
+            return
+        if not self._confirm_low_ram():
             return
         if not self._confirm_replace_batch():
             return
@@ -3816,6 +3862,12 @@ class MainWindow(QMainWindow):
             set_keeper(self.prompt_batch_dir, filename)
             image = load_image(self.prompt_batch_dir / filename)
         except PixelForgeError as exc:
+            # A load failure used to live only in the status bar,
+            # which the next message overwrites (task 27). The
+            # info label names the candidate and the reason, and
+            # stays until the next successful preview.
+            self.prompt_info_label.setText(
+                "Could not load %s — %s" % (filename, exc))
             self.statusBar().showMessage(str(exc))
             return
         self.prompt_keeper = filename
@@ -3878,6 +3930,12 @@ class MainWindow(QMainWindow):
                 max_colors=self.prompt_colors_spin.value(),
                 dither=self.prompt_dither_check.isChecked())
         except PixelForgeError as exc:
+            # Same as the keeper load above (task 27): the failure
+            # goes in the info label, not just the status bar, so
+            # it stays visible instead of being overwritten.
+            self.prompt_info_label.setText(
+                "Could not pixelize %s — %s"
+                % (self.prompt_keeper, exc))
             self.statusBar().showMessage(str(exc))
             return
         self.prompt_result_image = result

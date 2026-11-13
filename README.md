@@ -84,11 +84,17 @@ bash uninstall.sh
   candidate to keep it, adjust the size, palette, and dithering,
   and press Export PNG. The status line shows whether the image
   engine and model are installed; if either is missing, Generate
-  says plainly what to install instead of faking anything.
-  Generating again asks first, and the previous batch stays in
-  History — past batches are listed under the Generation section
-  and click to reopen, with the keeper's seed shown under the
-  candidate preview. Regenerate one re-rolls a single candidate;
+  says plainly what to install instead of faking anything. If the
+  model found is not the pinned LCM file, Generate asks before
+  using it, and if less than 3 GB of memory is free it asks
+  before starting a ~2.3 GB generation — both default to No, and
+  declining leaves the tab untouched. A candidate that fails to
+  pixelize is skipped with its reason recorded in batch.json
+  (and named in the tab's info line), instead of aborting the
+  whole batch. Generating again asks first, and the previous
+  batch stays in History — past batches are listed under the
+  Generation section and click to reopen, with the keeper's seed
+  shown under the candidate preview. Regenerate one re-rolls a single candidate;
   More like this one generates a new batch seeded from the keeper
   (keeper seed +1, +2, +3). The Generation section sets the steps,
   CFG scale, and generated image size (LCM defaults: 4 steps, cfg

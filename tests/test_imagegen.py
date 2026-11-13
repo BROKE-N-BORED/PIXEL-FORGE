@@ -26,13 +26,15 @@ from pixel_forge.imagegen import (DEFAULT_NEGATIVE,  # noqa: E402
                                   DEFAULT_SIZE, ENGINE_RELEASE,
                                   ENGINE_REPO, LCM_CFG, LCM_STEPS,
                                   NEGATIVE_PRESETS, GenerationCancelled,
+                                  GENERATION_MIN_RAM_BYTES,
                                   MODEL_FILENAME, MODEL_SHA256,
-                                  MODEL_URL, build_command,
-                                  check_model_file,
+                                  MODEL_URL, available_ram_bytes,
+                                  build_command, check_model_file,
                                   engine_clone_command,
                                   engine_missing_text, engine_status,
                                   file_sha256, find_engine, find_model,
-                                  generate, load_batch,
+                                  format_bytes, generate,
+                                  is_pinned_model, load_batch,
                                   model_download_command,
                                   model_missing_text, new_batch,
                                   pixelize_candidates, prompt_to_sprites,
@@ -590,8 +592,10 @@ class GenerateTests(ImageGenBase):
         bdir = self._batch()
         with stub_env(self.stub, self.model):
             generate(bdir)
-        pairs = pixelize_candidates(bdir, width=32, max_colors=16)
+        pairs, failures = pixelize_candidates(bdir, width=32,
+                                              max_colors=16)
         self.assertEqual(len(pairs), 3)
+        self.assertEqual(failures, [])
         for _cand, pixel in pairs:
             path = bdir / pixel
             self.assertTrue(path.is_file())
@@ -605,8 +609,56 @@ class GenerateTests(ImageGenBase):
         bdir = self._batch()
         with stub_env(self.stub, self.model, {"STUB_FAIL": "1"}):
             generate(bdir)
-        pairs = pixelize_candidates(bdir)
+        pairs, failures = pixelize_candidates(bdir)
         self.assertEqual(pairs, [])
+        self.assertEqual(failures, [])
+
+    def test_pixelize_candidates_skips_corrupt(self):
+        # Task 27: one corrupt candidate used to abort the whole
+        # loop — and the trailing save never ran, so even the
+        # good pairs were never recorded. Now the good ones
+        # pixelize, the bad one is recorded with its reason, and
+        # the batch is saved.
+        bdir = self._batch()
+        with stub_env(self.stub, self.model):
+            generate(bdir)
+        (bdir / "cand-02.png").write_bytes(b"not a png at all")
+        pairs, failures = pixelize_candidates(bdir, width=32,
+                                              max_colors=16)
+        self.assertEqual([c for c, _p in pairs],
+                         ["cand-01.png", "cand-03.png"])
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0][0], "cand-02.png")
+        self.assertTrue(failures[0][1], "no reason recorded")
+        batch = load_batch(bdir)
+        by_file = {c["file"]: c for c in batch["candidates"]}
+        self.assertIn("pixel_file", by_file["cand-01.png"])
+        self.assertIn("pixel_file", by_file["cand-03.png"])
+        self.assertNotIn("pixel_file", by_file["cand-02.png"])
+        self.assertIn("pixel_error", by_file["cand-02.png"])
+        self.assertEqual(by_file["cand-02.png"]["pixel_error"],
+                         failures[0][1])
+
+    def test_pixelize_candidates_rerun_clears_stale_error(self):
+        # A candidate that failed once and is good again must not
+        # keep its old error — or a stale pixel file pointing at
+        # a render of a file that no longer exists.
+        bdir = self._batch()
+        with stub_env(self.stub, self.model):
+            generate(bdir)
+        bad = bdir / "cand-02.png"
+        good_bytes = bad.read_bytes()
+        bad.write_bytes(b"not a png at all")
+        _pairs, failures = pixelize_candidates(bdir)
+        self.assertEqual(len(failures), 1)
+        bad.write_bytes(good_bytes)
+        pairs, failures = pixelize_candidates(bdir)
+        self.assertEqual(failures, [])
+        self.assertEqual(len(pairs), 3)
+        batch = load_batch(bdir)
+        by_file = {c["file"]: c for c in batch["candidates"]}
+        self.assertNotIn("pixel_error", by_file["cand-02.png"])
+        self.assertIn("pixel_file", by_file["cand-02.png"])
 
     def test_prompt_to_sprites_end_to_end(self):
         out_dir = os.path.join(self.work, "out")
@@ -789,6 +841,58 @@ class PromptIterationTests(ImageGenBase):
         for name, text in NEGATIVE_PRESETS.items():
             self.assertTrue(text, name)
             self.assertIn(DEFAULT_NEGATIVE, text, name)
+
+
+class RamPreflightTests(ImageGenBase):
+    """Task 27: the RAM pre-flight reads MemAvailable from a
+    meminfo file (a parameter, so tests point at a fake one),
+    and the pinned-model check is by file name."""
+
+    def _meminfo(self, text):
+        path = Path(self.work) / "meminfo"
+        path.write_text(text)
+        return str(path)
+
+    def test_available_ram_reads_memavailable(self):
+        path = self._meminfo(
+            "MemTotal:        8124900 kB\n"
+            "MemFree:          143724 kB\n"
+            "MemAvailable:     761808 kB\n")
+        self.assertEqual(available_ram_bytes(path), 761808 * 1024)
+
+    def test_available_ram_missing_file_is_none(self):
+        self.assertIsNone(available_ram_bytes(
+            os.path.join(self.work, "no-such-meminfo")))
+
+    def test_available_ram_without_memavailable_is_none(self):
+        path = self._meminfo(
+            "MemTotal:        8124900 kB\n"
+            "MemFree:          143724 kB\n")
+        self.assertIsNone(available_ram_bytes(path))
+
+    def test_available_ram_unparsable_is_none(self):
+        path = self._meminfo("MemAvailable:     not-a-number kB\n")
+        self.assertIsNone(available_ram_bytes(path))
+
+    def test_ram_threshold_is_three_gibibytes(self):
+        # The model is 2,135 MB on disk and the run needs about
+        # 2.3 GB in memory — 3 GiB leaves headroom without
+        # crying wolf on a healthy 8 GB machine.
+        self.assertEqual(GENERATION_MIN_RAM_BYTES, 3 * 1024 ** 3)
+
+    def test_format_bytes(self):
+        self.assertEqual(format_bytes(500), "1 KB")
+        self.assertEqual(format_bytes(850 * 1024 ** 2), "850 MB")
+        self.assertEqual(format_bytes(2 * 1024 ** 3), "2.0 GB")
+        self.assertEqual(format_bytes(int(2.4 * 1024 ** 3)), "2.4 GB")
+
+    def test_is_pinned_model(self):
+        self.assertTrue(is_pinned_model(
+            Path("/somewhere") / MODEL_FILENAME))
+        self.assertFalse(is_pinned_model(
+            Path("/somewhere") / "other-model.gguf"))
+        self.assertFalse(is_pinned_model(
+            Path("/somewhere") / ("x" + MODEL_FILENAME)))
 
 
 if __name__ == "__main__":
