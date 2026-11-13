@@ -20,6 +20,7 @@ readable message. No AI, no network — pure packing.
 
 import json
 import math
+import os
 from pathlib import Path
 
 from PySide6.QtGui import QImage, QPainter
@@ -199,11 +200,21 @@ def write_sheet(images, names, out_png, out_json, cols=None,
     if not sheet.save(str(png_path), "PNG"):
         raise PixelForgeError("could not write: %s" % png_path)
     json_path.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic, like save_batch: a crash mid-write must not leave a
+    # half-written metadata file next to a good PNG.
+    tmp_path = json_path.with_suffix(".json.tmp")
     try:
-        with open(json_path, "w") as handle:
+        with open(tmp_path, "w") as handle:
             json.dump(metadata, handle, indent=2)
             handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, json_path)
     except OSError as exc:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise PixelForgeError("could not write %s: %s"
                               % (json_path, exc))
     return metadata

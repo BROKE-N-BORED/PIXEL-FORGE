@@ -322,9 +322,9 @@ A preset needs all six keys: `width` and `height` (1–512),
 (true/false). A hand-edited file with a bad preset fails loudly
 instead of applying nonsense.
 
-## What v0.14 does and does not do
+## What v0.15 does and does not do
 
-v0.14 is Items 1–6 of the plan: image to pixel sprite core, video to
+v0.15 is Items 1–6 of the plan: image to pixel sprite core, video to
 sprite frames, prompt-to-sprite with a local image model,
 spritesheets + animation export, a sprite library with presets,
 and code + game-asset input — plus the window-fit fix (every tab's
@@ -350,7 +350,11 @@ selected instead of showing blank), and the ffmpeg
 failure-message fix (when ffmpeg cannot read a video, the
 error dialog now shows the last 3 lines of ffmpeg's own
 output, each on its own line, instead of the garbled
-"p; u; t" the old character slice produced). The MIMIK merge is the one remaining planned item —
+"p; u; t" the old character slice produced), and the corrupt
+batch fix (a damaged batch.json now gives a plain error
+naming the file instead of a traceback out of the Prompt
+tab, and batch saves are atomic so a crash mid-save can't
+leave a half-written file). The MIMIK merge is the one remaining planned item —
 none of that is in this build.
 
 ## Requirements

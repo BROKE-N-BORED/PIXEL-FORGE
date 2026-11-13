@@ -6,6 +6,7 @@ PNG), because no engine or model exists in this sandbox. Live
 generation against the real LCM model is NOT proven here — it needs
 Joshua's PC, where the model pull is the long pole.
 """
+import json
 import os
 import sys
 import tempfile
@@ -24,8 +25,8 @@ from pixel_forge.imagegen import (DEFAULT_NEGATIVE,  # noqa: E402
                                   engine_status, find_engine, find_model,
                                   generate, load_batch, model_missing_text,
                                   new_batch, pixelize_candidates,
-                                  prompt_to_sprites, set_keeper, slugify,
-                                  validate_prompt)
+                                  prompt_to_sprites, save_batch, set_keeper,
+                                  slugify, validate_prompt)
 from pixel_forge.pixelize import PixelForgeError  # noqa: E402
 
 
@@ -222,6 +223,101 @@ class BatchTests(ImageGenBase):
             set_keeper(bdir, "cand-99.png")
         with self.assertRaises(PixelForgeError):
             set_keeper(bdir, "cand-01.png")
+
+
+class CorruptBatchTests(ImageGenBase):
+    """Review B5: a corrupt batch.json must raise PixelForgeError
+    with a plain message — never a raw json error, TypeError, or
+    KeyError out of a GUI slot — and save_batch must be atomic."""
+
+    def test_load_batch_corrupt_json_raises_plain_error(self):
+        bdir = self._batch()
+        path = Path(bdir) / "batch.json"
+        good = path.read_bytes()
+        truncated = good[:len(good) // 2]
+        path.write_bytes(truncated)
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_batch(bdir)
+        self.assertIn("batch.json", str(ctx.exception))
+        self.assertIn("unreadable", str(ctx.exception))
+        # The corrupt file is left alone, never "repaired".
+        self.assertEqual(path.read_bytes(), truncated)
+
+    def test_load_batch_wrong_shape_raises_plain_error(self):
+        cases = {
+            "top-level list": "[1, 2, 3]",
+            "no prompt": json.dumps({"candidates": []}),
+            "no candidates": json.dumps({"prompt": "a knight"}),
+            "candidates not a list": json.dumps(
+                {"prompt": "a knight", "candidates": {}}),
+            "candidate missing file": json.dumps({
+                "prompt": "a knight",
+                "candidates": [{"seed": 1, "status": "pending"}]}),
+            "candidate missing seed": json.dumps({
+                "prompt": "a knight",
+                "candidates": [{"file": "cand-01.png",
+                                "status": "pending"}]}),
+            "candidate missing status": json.dumps({
+                "prompt": "a knight",
+                "candidates": [{"file": "cand-01.png", "seed": 1}]}),
+            "candidate not an object": json.dumps(
+                {"prompt": "a knight", "candidates": ["cand-01.png"]}),
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                bdir = self._batch()
+                path = Path(bdir) / "batch.json"
+                path.write_text(text)
+                with self.assertRaises(PixelForgeError) as ctx:
+                    load_batch(bdir)
+                self.assertIn("batch.json", str(ctx.exception))
+                self.assertIn("wrong shape", str(ctx.exception))
+                self.assertEqual(path.read_text(), text)
+
+    def test_save_batch_write_failure_keeps_previous(self):
+        bdir = self._batch()
+        batch = load_batch(bdir)
+        path = Path(bdir) / "batch.json"
+        before = path.read_bytes()
+        batch["candidates"] = [
+            {"file": "cand-01.png", "seed": 1, "status": "pending"}]
+        with mock.patch("builtins.open",
+                        side_effect=OSError("disk full")):
+            with self.assertRaises(PixelForgeError) as ctx:
+                save_batch(bdir, batch)
+        self.assertIn("could not write", str(ctx.exception))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse((Path(bdir) / "batch.json.tmp").exists())
+
+    def test_save_batch_replace_failure_keeps_previous(self):
+        bdir = self._batch()
+        batch = load_batch(bdir)
+        path = Path(bdir) / "batch.json"
+        before = path.read_bytes()
+        batch["candidates"] = [
+            {"file": "cand-01.png", "seed": 1, "status": "pending"}]
+        with mock.patch("os.replace",
+                        side_effect=OSError("no space")):
+            with self.assertRaises(PixelForgeError) as ctx:
+                save_batch(bdir, batch)
+        self.assertIn("could not write", str(ctx.exception))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse((Path(bdir) / "batch.json.tmp").exists())
+
+    def test_save_then_load_round_trips(self):
+        bdir = self._batch()
+        batch = load_batch(bdir)
+        batch["candidates"] = [
+            {"file": "cand-01.png", "seed": 7, "status": "kept"},
+            {"file": "cand-02.png", "seed": 8, "status": "failed",
+             "error": "boom"},
+        ]
+        batch["keeper"] = "cand-01.png"
+        save_batch(bdir, batch)
+        self.assertFalse((Path(bdir) / "batch.json.tmp").exists())
+        self.assertEqual(load_batch(bdir), batch)
+        self.assertEqual((Path(bdir) / "batch.json").read_text(),
+                         json.dumps(batch, indent=2) + "\n")
 
 
 class CommandTests(ImageGenBase):

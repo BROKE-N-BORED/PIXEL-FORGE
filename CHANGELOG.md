@@ -1,5 +1,40 @@
 # Pixel Forge changelog
 
+## 0.15 — 2026-11-12
+
+A corrupt `batch.json` no longer crashes out of a GUI slot —
+task-list item #9 (review bug B5). `load_batch` read the Prompt
+tab's batch record with no error handling at all: a truncated
+file raised a raw `JSONDecodeError`, and valid JSON with the
+wrong shape sailed through the load and then raised `TypeError`
+or `KeyError` in `set_keeper` — out of `_pick_prompt_keeper`
+(which catches only `PixelForgeError`) or `_on_prompt_cancelled`
+(which caught nothing).
+
+- `load_batch` now raises `PixelForgeError` with a plain
+  message naming the file and the problem — "prompt batch is
+  unreadable: .../batch.json (Expecting ',' delimiter...)" for
+  bad JSON, "prompt batch has the wrong shape: ... (no
+  candidate list)" and friends for valid JSON with missing or
+  wrong fields. The corrupt file is left alone: never deleted,
+  never "repaired".
+- `_on_prompt_cancelled` catches the error and shows it in the
+  normal warning dialog; the keeper slot already caught
+  `PixelForgeError`, so a corrupt batch there is now a plain
+  status-bar message. Either way the window stays alive and
+  usable.
+- `save_batch` is atomic: the full content goes to a temp file
+  in the same directory, is flushed + fsynced, then
+  `os.replace` moves it over `batch.json`. A crash or failure
+  mid-save leaves the previous `batch.json` intact — never a
+  half-written file — and the temp file is cleaned up.
+- Same-class audit: the spritesheet metadata write
+  (`write_sheet`) also went straight to its final path, so it
+  is atomic now too. The library index already raised
+  `PixelForgeError` on an unparseable file and already saved
+  atomically (unchanged); presets.json's first-invalid-preset
+  problem is task 61, untouched here.
+
 ## 0.14 — 2026-11-12
 
 The ffmpeg failure message reads like English now — task-list

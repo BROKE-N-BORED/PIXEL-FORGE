@@ -2034,7 +2034,17 @@ class MainWindow(QMainWindow):
         self.prompt_generate_btn.setEnabled(True)
         self.prompt_cancel_btn.setEnabled(False)
         if self.prompt_batch_dir is not None:
-            batch = load_batch(self.prompt_batch_dir)
+            try:
+                batch = load_batch(self.prompt_batch_dir)
+            except PixelForgeError as exc:
+                # A corrupt batch.json must not kill the slot: say
+                # so plainly and leave the batch alone (review B5).
+                # The buttons are already re-enabled above, so the
+                # window stays usable.
+                QMessageBox.warning(self, "Pixel Forge", str(exc))
+                self.statusBar().showMessage(
+                    "Cancelled — the batch record could not be read")
+                return
             self.prompt_candidates = [
                 c for c in batch["candidates"]
                 if c["status"] in ("pending", "kept")]

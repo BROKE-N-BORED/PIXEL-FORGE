@@ -191,15 +191,69 @@ def _stamp() -> str:
 
 
 def load_batch(batch_dir: str | Path) -> dict:
+    """Read a batch record. Raises PixelForgeError — never a raw
+    json error or KeyError — on a missing, unreadable, or
+    wrong-shaped batch.json, naming the file and the problem
+    (review B5: a corrupt batch used to raise an uncaught
+    exception out of a GUI slot). The file is left alone:
+    never deleted, never "repaired"."""
     path = Path(batch_dir) / "batch.json"
     if not path.exists():
         raise PixelForgeError("no prompt batch at %s" % batch_dir)
-    return json.loads(path.read_text())
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise PixelForgeError(
+            "prompt batch is unreadable: %s (%s)" % (path, exc))
+    if not isinstance(data, dict):
+        raise PixelForgeError(
+            "prompt batch has the wrong shape: %s "
+            "(expected an object, got %s)"
+            % (path, type(data).__name__))
+    if not isinstance(data.get("prompt"), str):
+        raise PixelForgeError(
+            "prompt batch has the wrong shape: %s (no prompt)"
+            % path)
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list):
+        raise PixelForgeError(
+            "prompt batch has the wrong shape: %s "
+            "(no candidate list)" % path)
+    for record in candidates:
+        if not isinstance(record, dict) or \
+                not isinstance(record.get("file"), str) or \
+                not isinstance(record.get("status"), str) or \
+                not isinstance(record.get("seed"), int):
+            raise PixelForgeError(
+                "prompt batch has the wrong shape: %s "
+                "(a candidate is missing its file, seed, or status)"
+                % path)
+    return data
 
 
 def save_batch(batch_dir: str | Path, batch: dict) -> None:
-    (Path(batch_dir) / "batch.json").write_text(
-        json.dumps(batch, indent=2) + "\n")
+    """Write the batch record atomically: the full content goes to
+    a temp file in the same directory, is flushed + fsynced, then
+    os.replace moves it over batch.json. A crash or failure
+    mid-save leaves the previous batch.json intact (or absent, if
+    there was none) — never a half-written file. Raises
+    PixelForgeError with a readable message on any write failure;
+    the temp file is cleaned up."""
+    path = Path(batch_dir) / "batch.json"
+    tmp = path.with_suffix(".json.tmp")
+    text = json.dumps(batch, indent=2) + "\n"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise PixelForgeError("could not write %s: %s" % (path, exc))
 
 
 def new_batch(out_dir: str | Path, prompt: str,

@@ -901,6 +901,49 @@ class PromptGuiTests(unittest.TestCase):
         self.assertIn("type a prompt first", warn.call_args[0][2])
         self.assertIsNone(self.win.prompt_worker)
 
+    def test_prompt_cancel_with_corrupt_batch_shows_dialog(self):
+        # Review B5: a corrupt batch.json on cancel used to raise an
+        # uncaught JSONDecodeError out of the slot. Now the dialog
+        # names the file and the window stays usable.
+        from unittest import mock
+        from pixel_forge import gui as gui_mod
+        from pixel_forge import imagegen as imagegen_mod
+        work = tempfile.mkdtemp()
+        _batch, bdir = imagegen_mod.new_batch(work, "a knight")
+        path = bdir / "batch.json"
+        good = path.read_bytes()
+        truncated = good[:len(good) // 2]
+        path.write_bytes(truncated)
+        self.win.prompt_batch_dir = bdir
+        self.win.prompt_worker = None
+        self.win.prompt_candidates = []
+        with mock.patch.object(gui_mod.QMessageBox, "warning") as warn:
+            self.win._on_prompt_cancelled()
+        self.assertTrue(warn.called)
+        self.assertIn("batch.json", warn.call_args[0][2])
+        self.assertIn("unreadable", warn.call_args[0][2])
+        self.assertTrue(self.win.prompt_generate_btn.isEnabled())
+        self.assertFalse(self.win.prompt_cancel_btn.isEnabled())
+        self.assertEqual(path.read_bytes(), truncated)
+
+    def test_pick_keeper_with_corrupt_batch_shows_status(self):
+        # The keeper slot catches PixelForgeError already; with
+        # load_batch wrapped, a corrupt batch lands there as a plain
+        # status-bar message instead of a traceback.
+        from pixel_forge import imagegen as imagegen_mod
+        work = tempfile.mkdtemp()
+        _batch, bdir = imagegen_mod.new_batch(work, "a knight")
+        path = bdir / "batch.json"
+        good = path.read_bytes()
+        truncated = good[:len(good) // 2]
+        path.write_bytes(truncated)
+        self.win.prompt_batch_dir = bdir
+        self.win._pick_prompt_keeper("cand-01.png")
+        self.assertIn("batch.json",
+                      self.win.statusBar().currentMessage())
+        self.assertIsNone(self.win.prompt_keeper)
+        self.assertEqual(path.read_bytes(), truncated)
+
     def test_generate_three_candidates_and_keeper(self):
         self._generate()
         self.assertEqual(self.win.prompt_strip.count(), 3)

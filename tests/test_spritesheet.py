@@ -225,6 +225,29 @@ class MetadataTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(png))
         self.assertTrue(os.path.isfile(js))
 
+    def test_write_sheet_replace_failure_keeps_previous(self):
+        # The metadata write is atomic (same fix class as
+        # save_batch): a failed replace leaves the previous
+        # metadata intact and no temp file behind.
+        from unittest import mock
+        tmp = tempfile.mkdtemp()
+        frames = make_frames(2)
+        names = ["a.png", "b.png"]
+        png = os.path.join(tmp, "sheet.png")
+        js = os.path.join(tmp, "sheet.json")
+        write_sheet(frames, names, png, js)
+        with open(js, "rb") as handle:
+            before = handle.read()
+        with mock.patch("os.replace",
+                        side_effect=OSError("no space")):
+            with self.assertRaises(PixelForgeError) as ctx:
+                write_sheet(frames, names, png, js)
+        self.assertIn("could not write", str(ctx.exception))
+        with open(js, "rb") as handle:
+            self.assertEqual(handle.read(), before)
+        self.assertFalse(
+            os.path.exists(os.path.join(tmp, "sheet.json.tmp")))
+
     def test_write_sheet_mixed_sizes_names_the_file(self):
         tmp = tempfile.mkdtemp()
         frames = [make_solid_image(32, 32, 1, 2, 3),
