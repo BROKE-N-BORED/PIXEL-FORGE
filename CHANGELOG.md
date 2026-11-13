@@ -1,5 +1,25 @@
 # Pixel Forge changelog
 
+## 0.22 — 2026-11-13
+
+Re-Generate asks before discarding a batch — task-list item #10
+(bug B6). Pressing Generate on the Prompt tab used to silently
+destroy the previous batch, keeper included; now a batch with
+candidates prompts first, and declining leaves everything
+untouched.
+
+- GUI: `_on_prompt_generate` asks "Generate a new batch? The
+  current N candidate(s)[, including your keeper] will be
+  discarded." (Yes/No, default No) whenever candidates exist,
+  after the prompt/engine/model checks and before the old batch
+  is cleaned up. Declining returns without touching the batch —
+  candidates, keeper, pixel preview, and batch.json all stay.
+  With no candidates, Generate runs straight away, no dialog.
+- CLI: no change needed — `pixel-forge prompt` already writes
+  each run to a fresh timestamped directory (`new_batch` adds a
+  numeric suffix when the name exists), so it never overwrites
+  an existing batch.
+
 ## 0.21 — 2026-11-13
 
 User presets are fail-soft now — task-list item #61 (repo-audit

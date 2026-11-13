@@ -969,6 +969,94 @@ class PromptGuiTests(unittest.TestCase):
         self.assertEqual(len(set(seeds)), 3)
         self.assertEqual(batch["keeper"], "cand-01.png")
 
+    def test_regenerate_with_candidates_asks_first_decline_keeps_batch(
+            self):
+        # B6: Re-Generate used to silently destroy the previous
+        # batch, keeper included. Declining the confirm leaves
+        # everything untouched — candidates, keeper, batch.json.
+        from unittest import mock
+        from PySide6.QtWidgets import QMessageBox
+        from pixel_forge import gui as gui_mod
+        self._generate()
+        bdir = self.win.prompt_batch_dir
+        batch_json = (bdir / "batch.json").read_bytes()
+        candidates = [c["file"] for c in self.win.prompt_candidates]
+        keeper = self.win.prompt_keeper
+        worker = self.win.prompt_worker
+        with mock.patch.object(
+                gui_mod.QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.No) as ask:
+            self.win.prompt_edit.setText("a dragon")
+            self.win._on_prompt_generate()
+        self.assertTrue(ask.called)
+        text = ask.call_args[0][2]
+        self.assertIn("3 candidate(s)", text)
+        self.assertIn("keeper", text)
+        self.assertEqual(ask.call_args[0][4],
+                         QMessageBox.StandardButton.No)
+        self.assertEqual(self.win.prompt_batch_dir, bdir)
+        self.assertEqual((bdir / "batch.json").read_bytes(), batch_json)
+        self.assertEqual([c["file"] for c in self.win.prompt_candidates],
+                         candidates)
+        self.assertEqual(self.win.prompt_keeper, keeper)
+        self.assertEqual(self.win.prompt_strip.count(), 3)
+        self.assertIs(self.win.prompt_worker, worker)
+        self.assertTrue(self.win.prompt_generate_btn.isEnabled())
+
+    def test_regenerate_with_candidates_accept_replaces_batch(self):
+        # Accepting the confirm replaces the batch: the old batch
+        # dir is gone and the new generation lands.
+        from unittest import mock
+        from PySide6.QtWidgets import QMessageBox
+        from pixel_forge import gui as gui_mod
+        self._generate()
+        old_dir = self.win.prompt_batch_dir
+        old_parent = old_dir.parent
+        with mock.patch.object(
+                gui_mod.QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.Yes):
+            self.win.prompt_edit.setText("a dragon")
+            self.win._on_prompt_generate()
+        self._wait_for_worker()
+        self.assertFalse(old_parent.exists())
+        self.assertNotEqual(self.win.prompt_batch_dir, old_dir)
+        self.assertEqual(self.win.prompt_strip.count(), 3)
+        self.assertEqual(self.win.prompt_keeper, "cand-01.png")
+        from pixel_forge.imagegen import load_batch
+        batch = load_batch(self.win.prompt_batch_dir)
+        self.assertEqual(batch["prompt"], "a dragon")
+
+    def test_regenerate_without_candidates_asks_nothing(self):
+        # No candidates means nothing to lose — Generate runs
+        # straight away with no dialog.
+        from unittest import mock
+        from pixel_forge import gui as gui_mod
+        with mock.patch.object(gui_mod.QMessageBox, "question") as ask:
+            self.win.prompt_edit.setText("a knight")
+            self.win._on_prompt_generate()
+            self._wait_for_worker()
+        self.assertFalse(ask.called)
+        self.assertEqual(self.win.prompt_strip.count(), 3)
+
+    def test_regenerate_confirm_without_keeper_omits_keeper_clause(
+            self):
+        # With candidates but no keeper picked, the dialog names
+        # the candidates and says nothing about a keeper.
+        from unittest import mock
+        from PySide6.QtWidgets import QMessageBox
+        from pixel_forge import gui as gui_mod
+        self._generate()
+        self.win.prompt_keeper = None
+        with mock.patch.object(
+                gui_mod.QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.No) as ask:
+            self.win.prompt_edit.setText("a dragon")
+            self.win._on_prompt_generate()
+        self.assertTrue(ask.called)
+        text = ask.call_args[0][2]
+        self.assertIn("3 candidate(s)", text)
+        self.assertNotIn("keeper", text)
+
     def test_generation_does_not_block_gui(self):
         # Each candidate takes 1s with the stub; the window's event
         # loop must keep running through it — a timer fired mid-run

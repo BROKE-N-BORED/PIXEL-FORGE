@@ -1956,6 +1956,26 @@ class MainWindow(QMainWindow):
         except PixelForgeError as exc:
             QMessageBox.warning(self, "Pixel Forge", str(exc))
             return
+        if self.prompt_candidates:
+            # B6: Re-Generate used to silently destroy the previous
+            # batch, keeper included. Candidates exist means there
+            # is something to lose, so confirm first — declining
+            # leaves the batch untouched.
+            count = len(self.prompt_candidates)
+            if self.prompt_keeper is not None:
+                lost = ("%d candidate(s) (including your keeper)"
+                        % count)
+            else:
+                lost = "%d candidate(s)" % count
+            answer = QMessageBox.question(
+                self, "Pixel Forge",
+                "Generate a new batch? The current %s will be "
+                "discarded." % lost,
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         self._cleanup_prompt_batch()
         tmp = tempfile.mkdtemp(prefix="pixel-forge-prompt-")
         try:
