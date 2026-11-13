@@ -124,6 +124,14 @@ bash uninstall.sh
   you choose. Changing a control by hand drops the picker back
   to Custom. Delete preset removes a saved preset (built-ins
   cannot be deleted).
+- **Shortcuts:** Enter in the prompt field generates; Ctrl+O
+  imports for the current tab and Ctrl+S exports from it
+  (nothing happens on a tab with nothing to import or export);
+  Ctrl+1..5 switch tabs in order. The File menu mirrors Import
+  and Export, and the Help menu has About, What the Code tab
+  detects, and Library location (with an Open folder button).
+  Every control has a one-line tooltip — hover to see what it
+  does.
 
 **Command line:**
 

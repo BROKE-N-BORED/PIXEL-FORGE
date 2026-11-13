@@ -32,6 +32,7 @@ stay green on a wrong label. Write "and" instead.
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -39,7 +40,8 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QImage, QImageReader, QPainter, QPixmap
+from PySide6.QtGui import (QAction, QImage, QImageReader, QKeySequence,
+                           QPainter, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
                                QDialog, QDoubleSpinBox, QFileDialog,
                                QHBoxLayout, QInputDialog, QLabel,
@@ -47,9 +49,10 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
                                QMainWindow, QMessageBox, QProgressBar,
                                QPushButton, QScrollArea, QSlider,
                                QSpinBox, QSplitter, QStackedWidget,
-                               QStatusBar, QTabWidget, QVBoxLayout,
-                               QWidget)
+                               QStatusBar, QTabWidget, QTextEdit,
+                               QVBoxLayout, QWidget)
 
+from . import __version__
 from .codeinput import CODE_EXTENSIONS, parse_paths
 from .history import (batches_dir, load_history, record_batch,
                       record_prompt, save_history)
@@ -627,12 +630,192 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_library_tab(), "Library")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self.tabs)
+        self._build_menu_bar()
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready — import an image to begin.")
         self._refresh_preset_combos()
         self._refresh_library()
         self._refresh_prompt_status()
         self._load_prompt_history()
+
+    # ================================================ menus, shortcuts, help
+
+    def _build_menu_bar(self):
+        """File + Help menus and the keyboard shortcuts (task 21).
+
+        Import/Export are QActions with their shortcuts, so the
+        menu shows the keys and the actions work from anywhere in
+        the window. Tab switching is plain QShortcuts — there is
+        no menu entry for it. Both use the default WindowShortcut
+        context, so they do not fire while a modal dialog is open:
+        the dialog is the active window then, not this one (pinned
+        by a test — do not \"fix\" it by switching contexts).
+        """
+        file_menu = self.menuBar().addMenu("File")
+        import_action = QAction("Import", self)
+        import_action.setShortcut(QKeySequence("Ctrl+O"))
+        import_action.triggered.connect(self._on_shortcut_import)
+        file_menu.addAction(import_action)
+        export_action = QAction("Export", self)
+        export_action.setShortcut(QKeySequence("Ctrl+S"))
+        export_action.triggered.connect(self._on_shortcut_export)
+        file_menu.addAction(export_action)
+        self._import_action = import_action
+        self._export_action = export_action
+
+        help_menu = self.menuBar().addMenu("Help")
+        about_action = QAction("About Pixel Forge", self)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
+        detects_action = QAction("What the Code tab detects", self)
+        detects_action.triggered.connect(self._show_code_detects)
+        help_menu.addAction(detects_action)
+        library_action = QAction("Library location", self)
+        library_action.triggered.connect(self._show_library_location)
+        help_menu.addAction(library_action)
+
+        # Ctrl+1..5 switch tabs in their current order (Image,
+        # Video, Prompt, Code, Library). Kept on self: a QShortcut
+        # with no other owner is garbage-collected with its parent
+        # — these are parented to the window, so they live as long
+        # as it does, but the list keeps the intent explicit.
+        self._tab_shortcuts = []
+        for index in range(self.tabs.count()):
+            shortcut = QShortcut(
+                QKeySequence("Ctrl+%d" % (index + 1)), self)
+            shortcut.activated.connect(
+                lambda _checked=False, i=index:
+                self.tabs.setCurrentIndex(i))
+            self._tab_shortcuts.append(shortcut)
+
+    def _on_shortcut_import(self):
+        """Ctrl+O: import for the current tab. The Prompt tab has
+        nothing to import (silent no-op); the Library tab has no
+        import of its own, so it takes the user to the Image tab
+        and opens its import dialog."""
+        index = self.tabs.currentIndex()
+        if index == 0:
+            self._on_import()
+        elif index == 1:
+            self._on_video_import()
+        elif index == 3:
+            self._on_import_code()
+        elif index == 4:
+            self.tabs.setCurrentIndex(0)
+            self._on_import()
+        # Index 2 (Prompt): nothing to import — do nothing.
+
+    def _on_shortcut_export(self):
+        """Ctrl+S: export for the current tab. Every handler below
+        is already a silent no-op when its tab has nothing to
+        export (no result, no kept frames, no keeper, no asset,
+        no library selection), so this never pops a dialog or
+        crashes on an empty tab."""
+        index = self.tabs.currentIndex()
+        if index == 0:
+            self._on_export()
+        elif index == 1:
+            self._on_export_frames()
+        elif index == 2:
+            self._on_export_prompt_keeper()
+        elif index == 3:
+            self._on_export_code_asset()
+        elif index == 4:
+            self._on_library_export()
+
+    def _about_text(self):
+        """About box text. The version comes from __version__, so
+        it can never drift from the shipped version."""
+        return ("Pixel Forge %s\n\n"
+                "Turn images, videos, prompts, and source code "
+                "into reusable pixel art and sprites — all on "
+                "your own machine, no account, no cloud."
+                % __version__)
+
+    def _show_about(self):
+        QMessageBox.about(self, "About Pixel Forge",
+                          self._about_text())
+
+    def _code_detects_text(self):
+        """What the Code tab finds — every claim here is grounded
+        in codeinput.py and skins.py. Keep it in sync with them:
+        the test pins the key phrases, not the exact text."""
+        return (
+            "What the Code tab detects\n"
+            "\n"
+            "Source code (.py, .js, .ts) is read statically — it "
+            "is never run, imported, or executed. Only literal "
+            "values in the code are rendered.\n"
+            "\n"
+            "Pixel maps — a variable holding rows of pixels:\n"
+            "- int rows: numbers, where 0 is transparent and the "
+            "rest are palette colors (a palette from the same "
+            "file when one covers the values, otherwise the "
+            "built-in PICO-8 colors in order)\n"
+            "- hex rows: color strings like \"#ff0000\" (empty, "
+            "None, and \"transparent\" are transparent)\n"
+            "- RGB rows: (red, green, blue) or "
+            "(red, green, blue, alpha) tuples\n"
+            "- char rows: strings of characters, with a dict in "
+            "the same file mapping each character to a color "
+            "(\".\" and space are always transparent)\n"
+            "\n"
+            "Palettes — a flat list of colors, or a dict mapping "
+            "names, numbers, or characters to colors. Rendered "
+            "as a strip, one block per color.\n"
+            "\n"
+            "Game assets — a 64x64 or 64x32 PNG is treated as a "
+            "Minecraft skin and split into its parts (head, "
+            "body, arms, legs, and overlays; the 64x32 classic "
+            "layout mirrors the left limbs). Any other image "
+            "pixelizes as a texture at its native size.\n"
+            "\n"
+            "Limits:\n"
+            "- maps are capped at 512 x 512; rows must all be "
+            "the same length\n"
+            "- anything computed — function calls, loops, "
+            "arithmetic — is reported as found but not "
+            "rendered, never faked\n"
+            "- sprites loaded from image files at run time, and "
+            "anything drawn by a game engine, cannot be detected\n"
+            "- skins are detected by size only: a non-skin "
+            "64x64 image would be misread as a skin\n")
+
+    def _show_code_detects(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("What the Code tab detects")
+        dialog.resize(560, 460)
+        layout = QVBoxLayout(dialog)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(self._code_detects_text())
+        layout.addWidget(text)
+        close_btn = QPushButton("Close")
+        close_btn.setToolTip("Close this dialog")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        dialog.exec()
+
+    def _library_location_text(self):
+        """The library-location message — the actual folder,
+        honoring PIXELFORGE_LIBRARY (via the Library object)."""
+        return ("Sprites are stored in:\n%s"
+                % self.library.directory)
+
+    def _open_library_folder(self):
+        """Open the library folder in the file manager."""
+        subprocess.Popen(["xdg-open", str(self.library.directory)])
+
+    def _show_library_location(self):
+        box = QMessageBox(self)
+        box.setWindowTitle("Library location")
+        box.setText(self._library_location_text())
+        open_btn = box.addButton(
+            "Open folder", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is open_btn:
+            self._open_library_folder()
 
     @staticmethod
     def _section(text):
@@ -679,6 +862,9 @@ class MainWindow(QMainWindow):
                   "prompt": "prompt_"}[tab]
         form.addWidget(self._section("Preset"))
         combo = QComboBox()
+        combo.setToolTip(
+            "Apply a saved set of size, palette, colors, and "
+            "dithering")
         combo.currentIndexChanged.connect(
             lambda _i, t=tab: self._on_library_preset(t))
         form.addWidget(combo)
@@ -696,11 +882,14 @@ class MainWindow(QMainWindow):
         setattr(self, prefix + "preset_warning_label", warning)
         button_row = QHBoxLayout()
         save_btn = QPushButton("Save current as preset")
+        save_btn.setToolTip(
+            "Save the current controls as a named preset")
         save_btn.clicked.connect(
             lambda _c, t=tab: self._on_save_preset(t))
         button_row.addWidget(save_btn)
         setattr(self, prefix + "preset_save_btn", save_btn)
         delete_btn = QPushButton("Delete preset")
+        delete_btn.setToolTip("Delete the selected preset")
         delete_btn.setEnabled(False)
         delete_btn.clicked.connect(
             lambda _c, t=tab: self._on_delete_preset(t))
@@ -725,11 +914,14 @@ class MainWindow(QMainWindow):
         form.setContentsMargins(0, 0, 0, 0)
 
         self.import_btn = QPushButton("Import image")
+        self.import_btn.setToolTip(
+            "Import an image to turn into a sprite")
         self.import_btn.clicked.connect(self._on_import)
         form.addWidget(self.import_btn)
 
         form.addWidget(self._section("Size"))
         self.size_combo = QComboBox()
+        self.size_combo.setToolTip("Sprite size in pixels")
         for preset in SIZE_PRESETS:
             self.size_combo.addItem("%d x %d" % (preset, preset), preset)
         self.size_combo.addItem("Custom", None)
@@ -742,22 +934,28 @@ class MainWindow(QMainWindow):
         self.width_spin.setRange(1, MAX_CUSTOM_SIZE)
         self.width_spin.setValue(32)
         self.width_spin.setPrefix("W ")
+        self.width_spin.setToolTip("Sprite width in pixels")
         self.width_spin.valueChanged.connect(self._on_custom_size)
         self.height_spin = QSpinBox()
         self.height_spin.setRange(1, MAX_CUSTOM_SIZE)
         self.height_spin.setValue(32)
         self.height_spin.setPrefix("H ")
+        self.height_spin.setToolTip("Sprite height in pixels")
         self.height_spin.valueChanged.connect(self._on_custom_size)
         size_row.addWidget(self.width_spin)
         size_row.addWidget(self.height_spin)
         form.addLayout(size_row)
 
         self.aspect_check = QCheckBox("Keep aspect ratio")
+        self.aspect_check.setToolTip(
+            "Keep the original proportions when resizing")
         self.aspect_check.toggled.connect(self._on_control_changed)
         form.addWidget(self.aspect_check)
 
         form.addWidget(self._section("Palette"))
         self.palette_combo = QComboBox()
+        self.palette_combo.setToolTip(
+            "Colors the sprite may use")
         for key in ("image", "pico8", "gameboy", "grayscale"):
             self.palette_combo.addItem(PALETTE_LABELS[key], key)
         self.palette_combo.currentIndexChanged.connect(
@@ -769,6 +967,8 @@ class MainWindow(QMainWindow):
         self.colors_spin = QSpinBox()
         self.colors_spin.setRange(MIN_COLORS, MAX_COLORS)
         self.colors_spin.setValue(16)
+        self.colors_spin.setToolTip(
+            "Most colors the sprite may use")
         self.colors_spin.valueChanged.connect(self._on_control_changed)
         colors_row.addWidget(self.colors_spin)
         form.addLayout(colors_row)
@@ -786,6 +986,7 @@ class MainWindow(QMainWindow):
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.zoom_slider.setRange(1, 16)
         self.zoom_slider.setValue(8)
+        self.zoom_slider.setToolTip("Zoom the pixel preview")
         self.zoom_slider.valueChanged.connect(self._on_zoom_changed)
         zoom_row.addWidget(self.zoom_slider)
         self.zoom_label = QLabel("8x")
@@ -800,11 +1001,15 @@ class MainWindow(QMainWindow):
 
         self.export_btn = QPushButton("Export PNG")
         self.export_btn.setObjectName("export")
+        self.export_btn.setToolTip(
+            "Export the pixel sprite as a transparent PNG")
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self._on_export)
         form.addWidget(self.export_btn)
 
         self.save_library_btn = QPushButton("Save to library")
+        self.save_library_btn.setToolTip(
+            "Save the pixel sprite to the library")
         self.save_library_btn.setEnabled(False)
         self.save_library_btn.clicked.connect(
             self._on_save_image_to_library)
@@ -1077,6 +1282,8 @@ class MainWindow(QMainWindow):
         form.setContentsMargins(0, 0, 0, 0)
 
         self.video_import_btn = QPushButton("Import video")
+        self.video_import_btn.setToolTip(
+            "Import a video to turn its frames into sprites")
         self.video_import_btn.clicked.connect(self._on_video_import)
         form.addWidget(self.video_import_btn)
 
@@ -1084,6 +1291,8 @@ class MainWindow(QMainWindow):
         fps_row = QHBoxLayout()
         fps_row.addWidget(QLabel("Extract fps"))
         self.video_fps_combo = QComboBox()
+        self.video_fps_combo.setToolTip(
+            "Frames extracted per second of video")
         for preset in FPS_PRESETS:
             self.video_fps_combo.addItem(str(preset), preset)
         self.video_fps_combo.setCurrentIndex(
@@ -1098,6 +1307,7 @@ class MainWindow(QMainWindow):
         self.video_every_spin = QSpinBox()
         self.video_every_spin.setRange(1, 60)
         self.video_every_spin.setValue(1)
+        self.video_every_spin.setToolTip("Keep one frame in every N")
         self.video_every_spin.valueChanged.connect(
             self._on_video_extract_changed)
         every_row.addWidget(self.video_every_spin)
@@ -1107,6 +1317,8 @@ class MainWindow(QMainWindow):
         start_row.addWidget(QLabel("Start time"))
         self.video_start_edit = QLineEdit()
         self.video_start_edit.setPlaceholderText("0.0")
+        self.video_start_edit.setToolTip(
+            "Start extracting at this time, in seconds")
         self.video_start_edit.editingFinished.connect(
             self._on_video_extract_changed)
         start_row.addWidget(self.video_start_edit)
@@ -1116,6 +1328,8 @@ class MainWindow(QMainWindow):
         end_row.addWidget(QLabel("End time"))
         self.video_end_edit = QLineEdit()
         self.video_end_edit.setPlaceholderText("to the end")
+        self.video_end_edit.setToolTip(
+            "Stop extracting at this time, in seconds")
         self.video_end_edit.editingFinished.connect(
             self._on_video_extract_changed)
         end_row.addWidget(self.video_end_edit)
@@ -1123,6 +1337,7 @@ class MainWindow(QMainWindow):
 
         form.addWidget(self._section("Size"))
         self.video_size_combo = QComboBox()
+        self.video_size_combo.setToolTip("Frame size in pixels")
         for preset in SIZE_PRESETS:
             self.video_size_combo.addItem("%d x %d" % (preset, preset),
                                           preset)
@@ -1137,12 +1352,14 @@ class MainWindow(QMainWindow):
         self.video_width_spin.setRange(1, MAX_CUSTOM_SIZE)
         self.video_width_spin.setValue(32)
         self.video_width_spin.setPrefix("W ")
+        self.video_width_spin.setToolTip("Frame width in pixels")
         self.video_width_spin.valueChanged.connect(
             self._on_video_custom_size)
         self.video_height_spin = QSpinBox()
         self.video_height_spin.setRange(1, MAX_CUSTOM_SIZE)
         self.video_height_spin.setValue(32)
         self.video_height_spin.setPrefix("H ")
+        self.video_height_spin.setToolTip("Frame height in pixels")
         self.video_height_spin.valueChanged.connect(
             self._on_video_custom_size)
         video_size_row.addWidget(self.video_width_spin)
@@ -1150,12 +1367,16 @@ class MainWindow(QMainWindow):
         form.addLayout(video_size_row)
 
         self.video_aspect_check = QCheckBox("Keep aspect ratio")
+        self.video_aspect_check.setToolTip(
+            "Keep the original proportions when resizing")
         self.video_aspect_check.toggled.connect(
             self._on_video_control_changed)
         form.addWidget(self.video_aspect_check)
 
         form.addWidget(self._section("Palette"))
         self.video_palette_combo = QComboBox()
+        self.video_palette_combo.setToolTip(
+            "Colors the frames may use")
         for key in ("image", "pico8", "gameboy", "grayscale"):
             self.video_palette_combo.addItem(PALETTE_LABELS[key], key)
         self.video_palette_combo.currentIndexChanged.connect(
@@ -1167,6 +1388,8 @@ class MainWindow(QMainWindow):
         self.video_colors_spin = QSpinBox()
         self.video_colors_spin.setRange(MIN_COLORS, MAX_COLORS)
         self.video_colors_spin.setValue(16)
+        self.video_colors_spin.setToolTip(
+            "Most colors the frames may use")
         self.video_colors_spin.valueChanged.connect(
             self._on_video_control_changed)
         video_colors_row.addWidget(self.video_colors_spin)
@@ -1187,6 +1410,7 @@ class MainWindow(QMainWindow):
         self.video_zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.video_zoom_slider.setRange(1, 16)
         self.video_zoom_slider.setValue(8)
+        self.video_zoom_slider.setToolTip("Zoom the frame preview")
         self.video_zoom_slider.valueChanged.connect(
             self._on_video_zoom_changed)
         video_zoom_row.addWidget(self.video_zoom_slider)
@@ -1199,6 +1423,8 @@ class MainWindow(QMainWindow):
         sheet_cols_row = QHBoxLayout()
         sheet_cols_row.addWidget(QLabel("Columns"))
         self.sheet_cols_combo = QComboBox()
+        self.sheet_cols_combo.setToolTip(
+            "Columns in the packed spritesheet")
         self.sheet_cols_combo.addItem("Auto", None)
         for count in (2, 3, 4, 5, 6, 8, 10, 12, 16):
             self.sheet_cols_combo.addItem(str(count), count)
@@ -1211,6 +1437,8 @@ class MainWindow(QMainWindow):
         self.sheet_padding_spin.setRange(0, 32)
         self.sheet_padding_spin.setValue(0)
         self.sheet_padding_spin.setSuffix(" px")
+        self.sheet_padding_spin.setToolTip(
+            "Blank pixels between frames in the sheet")
         sheet_padding_row.addWidget(self.sheet_padding_spin)
         form.addLayout(sheet_padding_row)
 
@@ -1219,10 +1447,14 @@ class MainWindow(QMainWindow):
         self.sheet_fps_spin = QSpinBox()
         self.sheet_fps_spin.setRange(1, 30)
         self.sheet_fps_spin.setValue(DEFAULT_FPS)
+        self.sheet_fps_spin.setToolTip(
+            "Playback speed stored in the sheet metadata")
         sheet_fps_row.addWidget(self.sheet_fps_spin)
         form.addLayout(sheet_fps_row)
 
         self.sheet_preview_btn = QPushButton("Preview spritesheet")
+        self.sheet_preview_btn.setToolTip(
+            "Preview the spritesheet and play its animation")
         self.sheet_preview_btn.setEnabled(False)
         self.sheet_preview_btn.clicked.connect(
             self._on_preview_spritesheet)
@@ -1235,18 +1467,25 @@ class MainWindow(QMainWindow):
 
         self.video_export_btn = QPushButton("Export frames")
         self.video_export_btn.setObjectName("export")
+        self.video_export_btn.setToolTip(
+            "Export the kept frames as numbered PNGs")
         self.video_export_btn.setEnabled(False)
         self.video_export_btn.clicked.connect(self._on_export_frames)
         form.addWidget(self.video_export_btn)
 
         self.sheet_export_btn = QPushButton("Export spritesheet")
         self.sheet_export_btn.setObjectName("export")
+        self.sheet_export_btn.setToolTip(
+            "Export the kept frames as one spritesheet PNG and "
+            "metadata")
         self.sheet_export_btn.setEnabled(False)
         self.sheet_export_btn.clicked.connect(
             self._on_export_spritesheet)
         form.addWidget(self.sheet_export_btn)
 
         self.sheet_library_btn = QPushButton("Save sheet to library")
+        self.sheet_library_btn.setToolTip(
+            "Save the spritesheet to the library")
         self.sheet_library_btn.setEnabled(False)
         self.sheet_library_btn.clicked.connect(
             self._on_save_sheet_to_library)
@@ -1274,6 +1513,8 @@ class MainWindow(QMainWindow):
 
         playback_row = QHBoxLayout()
         self.video_play_btn = QPushButton("Play")
+        self.video_play_btn.setToolTip(
+            "Play or pause the animation preview")
         self.video_play_btn.setEnabled(False)
         self.video_play_btn.clicked.connect(self._on_play_pause)
         playback_row.addWidget(self.video_play_btn)
@@ -1281,10 +1522,14 @@ class MainWindow(QMainWindow):
         self.video_play_fps_spin = QSpinBox()
         self.video_play_fps_spin.setRange(1, 30)
         self.video_play_fps_spin.setValue(DEFAULT_FPS)
+        self.video_play_fps_spin.setToolTip(
+            "Playback speed of the preview")
         self.video_play_fps_spin.valueChanged.connect(
             self._on_play_fps_changed)
         playback_row.addWidget(self.video_play_fps_spin)
         self.video_loop_check = QCheckBox("Loop")
+        self.video_loop_check.setToolTip(
+            "Loop the animation preview")
         self.video_loop_check.setChecked(True)
         playback_row.addWidget(self.video_loop_check)
         self.video_counter_label = QLabel("")
@@ -1301,15 +1546,19 @@ class MainWindow(QMainWindow):
             "Frames — uncheck to drop"))
         strip_head.addStretch(1)
         self.video_keep_all_btn = QPushButton("Keep all")
+        self.video_keep_all_btn.setToolTip("Keep every frame")
         self.video_keep_all_btn.setEnabled(False)
         self.video_keep_all_btn.clicked.connect(self._on_keep_all)
         strip_head.addWidget(self.video_keep_all_btn)
         self.video_drop_all_btn = QPushButton("Drop all")
+        self.video_drop_all_btn.setToolTip("Drop every frame")
         self.video_drop_all_btn.setEnabled(False)
         self.video_drop_all_btn.clicked.connect(self._on_drop_all)
         strip_head.addWidget(self.video_drop_all_btn)
         strip_layout.addLayout(strip_head)
         self.video_strip = QListWidget()
+        self.video_strip.setToolTip(
+            "Frames — click one to preview it, uncheck to drop it")
         self.video_strip.setIconSize(
             QSize(STRIP_THUMB, STRIP_THUMB))
         self.video_strip.setFlow(QListWidget.Flow.LeftToRight)
@@ -1895,6 +2144,15 @@ class MainWindow(QMainWindow):
         self.prompt_edit = QLineEdit()
         self.prompt_edit.setPlaceholderText(
             "a knight with a red shield")
+        self.prompt_edit.setToolTip(
+            "Describe the sprite to generate")
+        # Enter-to-generate (task 21): Enter in THIS field starts
+        # a generation, the same as the Generate button. Other
+        # fields keep their own Enter behavior — the negative
+        # field, the search box, and the time fields do not
+        # generate anything.
+        self.prompt_edit.returnPressed.connect(
+            self._on_prompt_generate)
         form.addWidget(self.prompt_edit)
 
         # Past prompts, most recent first (task 20) — picking one
@@ -1927,6 +2185,8 @@ class MainWindow(QMainWindow):
         # text — the combo mirrors the field, it does not choose
         # for the user.
         self.prompt_negative_preset_combo = QComboBox()
+        self.prompt_negative_preset_combo.setToolTip(
+            "Fill the negative prompt from a preset")
         for name in NEGATIVE_PRESETS:
             self.prompt_negative_preset_combo.addItem(name, name)
         self.prompt_negative_preset_combo.addItem("Custom", None)
@@ -1938,11 +2198,15 @@ class MainWindow(QMainWindow):
 
         self.prompt_generate_btn = QPushButton("Generate")
         self.prompt_generate_btn.setObjectName("export")
+        self.prompt_generate_btn.setToolTip(
+            "Generate 3 sprite candidates from the prompt")
         self.prompt_generate_btn.clicked.connect(
             self._on_prompt_generate)
         form.addWidget(self.prompt_generate_btn)
 
         self.prompt_cancel_btn = QPushButton("Cancel")
+        self.prompt_cancel_btn.setToolTip(
+            "Stop the current generation")
         self.prompt_cancel_btn.setEnabled(False)
         self.prompt_cancel_btn.clicked.connect(self._on_prompt_cancel)
         form.addWidget(self.prompt_cancel_btn)
@@ -1951,12 +2215,16 @@ class MainWindow(QMainWindow):
         # batch seeded from the keeper. Both start disabled —
         # there is nothing to re-roll or imitate yet.
         self.prompt_regen_one_btn = QPushButton("Regenerate one")
+        self.prompt_regen_one_btn.setToolTip(
+            "Re-roll the selected candidate with a fresh seed")
         self.prompt_regen_one_btn.setEnabled(False)
         self.prompt_regen_one_btn.clicked.connect(
             self._on_prompt_regenerate_one)
         form.addWidget(self.prompt_regen_one_btn)
 
         self.prompt_more_like_btn = QPushButton("More like this one")
+        self.prompt_more_like_btn.setToolTip(
+            "Generate a new batch seeded from the keeper")
         self.prompt_more_like_btn.setEnabled(False)
         self.prompt_more_like_btn.clicked.connect(
             self._on_prompt_more_like)
@@ -2032,6 +2300,7 @@ class MainWindow(QMainWindow):
 
         form.addWidget(self._section("Size"))
         self.prompt_size_combo = QComboBox()
+        self.prompt_size_combo.setToolTip("Sprite size in pixels")
         for preset in SIZE_PRESETS:
             self.prompt_size_combo.addItem("%d x %d" % (preset, preset),
                                            preset)
@@ -2046,12 +2315,14 @@ class MainWindow(QMainWindow):
         self.prompt_width_spin.setRange(1, MAX_CUSTOM_SIZE)
         self.prompt_width_spin.setValue(32)
         self.prompt_width_spin.setPrefix("W ")
+        self.prompt_width_spin.setToolTip("Sprite width in pixels")
         self.prompt_width_spin.valueChanged.connect(
             self._on_prompt_custom_size)
         self.prompt_height_spin = QSpinBox()
         self.prompt_height_spin.setRange(1, MAX_CUSTOM_SIZE)
         self.prompt_height_spin.setValue(32)
         self.prompt_height_spin.setPrefix("H ")
+        self.prompt_height_spin.setToolTip("Sprite height in pixels")
         self.prompt_height_spin.valueChanged.connect(
             self._on_prompt_custom_size)
         prompt_size_row.addWidget(self.prompt_width_spin)
@@ -2059,12 +2330,16 @@ class MainWindow(QMainWindow):
         form.addLayout(prompt_size_row)
 
         self.prompt_aspect_check = QCheckBox("Keep aspect ratio")
+        self.prompt_aspect_check.setToolTip(
+            "Keep the original proportions when resizing")
         self.prompt_aspect_check.toggled.connect(
             self._on_prompt_control_changed)
         form.addWidget(self.prompt_aspect_check)
 
         form.addWidget(self._section("Palette"))
         self.prompt_palette_combo = QComboBox()
+        self.prompt_palette_combo.setToolTip(
+            "Colors the sprite may use")
         for key in ("image", "pico8", "gameboy", "grayscale"):
             self.prompt_palette_combo.addItem(PALETTE_LABELS[key], key)
         self.prompt_palette_combo.currentIndexChanged.connect(
@@ -2076,6 +2351,8 @@ class MainWindow(QMainWindow):
         self.prompt_colors_spin = QSpinBox()
         self.prompt_colors_spin.setRange(MIN_COLORS, MAX_COLORS)
         self.prompt_colors_spin.setValue(16)
+        self.prompt_colors_spin.setToolTip(
+            "Most colors the sprite may use")
         self.prompt_colors_spin.valueChanged.connect(
             self._on_prompt_control_changed)
         prompt_colors_row.addWidget(self.prompt_colors_spin)
@@ -2096,6 +2373,7 @@ class MainWindow(QMainWindow):
         self.prompt_zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.prompt_zoom_slider.setRange(1, 16)
         self.prompt_zoom_slider.setValue(8)
+        self.prompt_zoom_slider.setToolTip("Zoom the pixel preview")
         self.prompt_zoom_slider.valueChanged.connect(
             self._on_prompt_zoom_changed)
         prompt_zoom_row.addWidget(self.prompt_zoom_slider)
@@ -2111,12 +2389,16 @@ class MainWindow(QMainWindow):
 
         self.prompt_export_btn = QPushButton("Export PNG")
         self.prompt_export_btn.setObjectName("export")
+        self.prompt_export_btn.setToolTip(
+            "Export the keeper's pixel sprite as a transparent PNG")
         self.prompt_export_btn.setEnabled(False)
         self.prompt_export_btn.clicked.connect(
             self._on_export_prompt_keeper)
         form.addWidget(self.prompt_export_btn)
 
         self.prompt_save_library_btn = QPushButton("Save to library")
+        self.prompt_save_library_btn.setToolTip(
+            "Save the keeper's pixel sprite to the library")
         self.prompt_save_library_btn.setEnabled(False)
         self.prompt_save_library_btn.clicked.connect(
             self._on_save_prompt_keeper_to_library)
@@ -2172,6 +2454,8 @@ class MainWindow(QMainWindow):
         strip_layout.addWidget(self._section(
             "Candidates — click one to keep it"))
         self.prompt_strip = QListWidget()
+        self.prompt_strip.setToolTip(
+            "Candidates — click one to keep it")
         self.prompt_strip.setIconSize(QSize(STRIP_THUMB, STRIP_THUMB))
         self.prompt_strip.setFlow(QListWidget.Flow.LeftToRight)
         self.prompt_strip.setWrapping(True)
@@ -2986,21 +3270,31 @@ class MainWindow(QMainWindow):
         form.setContentsMargins(0, 0, 0, 0)
 
         self.code_import_btn = QPushButton("Import code")
+        self.code_import_btn.setToolTip(
+            "Import source code files to find the pixel art they "
+            "define")
         self.code_import_btn.clicked.connect(self._on_import_code)
         form.addWidget(self.code_import_btn)
 
         self.code_import_folder_btn = QPushButton("Import code folder")
+        self.code_import_folder_btn.setToolTip(
+            "Import a folder of source code files")
         self.code_import_folder_btn.clicked.connect(
             self._on_import_code_folder)
         form.addWidget(self.code_import_folder_btn)
 
         self.code_import_asset_btn = QPushButton("Import game asset")
+        self.code_import_asset_btn.setToolTip(
+            "Import a game asset — a Minecraft skin or a texture")
         self.code_import_asset_btn.clicked.connect(
             self._on_import_game_asset)
         form.addWidget(self.code_import_asset_btn)
 
         form.addWidget(self._section("Assets"))
         self.code_list = QListWidget()
+        self.code_list.setToolTip(
+            "Assets found in the imported code — click one to "
+            "see it")
         self.code_list.setIconSize(QSize(32, 32))
         self.code_list.itemClicked.connect(
             self._on_code_item_clicked)
@@ -3028,6 +3322,7 @@ class MainWindow(QMainWindow):
         self.code_zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.code_zoom_slider.setRange(1, 16)
         self.code_zoom_slider.setValue(8)
+        self.code_zoom_slider.setToolTip("Zoom the sprite preview")
         self.code_zoom_slider.valueChanged.connect(
             self._on_code_zoom_changed)
         zoom_row.addWidget(self.code_zoom_slider)
@@ -3042,18 +3337,24 @@ class MainWindow(QMainWindow):
 
         self.code_export_btn = QPushButton("Export PNG")
         self.code_export_btn.setObjectName("export")
+        self.code_export_btn.setToolTip(
+            "Export the selected asset as a PNG")
         self.code_export_btn.setEnabled(False)
         self.code_export_btn.clicked.connect(
             self._on_export_code_asset)
         form.addWidget(self.code_export_btn)
 
         self.code_export_parts_btn = QPushButton("Export parts")
+        self.code_export_parts_btn.setToolTip(
+            "Export the skin's parts as separate PNGs")
         self.code_export_parts_btn.setEnabled(False)
         self.code_export_parts_btn.clicked.connect(
             self._on_export_code_parts)
         form.addWidget(self.code_export_parts_btn)
 
         self.code_save_library_btn = QPushButton("Save to library")
+        self.code_save_library_btn.setToolTip(
+            "Save the selected asset to the library")
         self.code_save_library_btn.setEnabled(False)
         self.code_save_library_btn.clicked.connect(
             self._on_save_code_to_library)
@@ -3625,6 +3926,8 @@ class MainWindow(QMainWindow):
         self.library_search_edit = QLineEdit()
         self.library_search_edit.setPlaceholderText(
             "Search name or tags")
+        self.library_search_edit.setToolTip(
+            "Search the library by name or tags")
         self.library_search_edit.textChanged.connect(
             self._refresh_library)
         left_layout.addWidget(self.library_search_edit)
@@ -3632,6 +3935,8 @@ class MainWindow(QMainWindow):
         tag_row = QHBoxLayout()
         tag_row.addWidget(QLabel("Tag"))
         self.library_tag_combo = QComboBox()
+        self.library_tag_combo.setToolTip(
+            "Show only sprites with this tag")
         self.library_tag_combo.addItem("All tags", None)
         self.library_tag_combo.currentIndexChanged.connect(
             self._refresh_library)
@@ -3639,6 +3944,8 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(tag_row)
 
         self.library_list = QListWidget()
+        self.library_list.setToolTip(
+            "Sprites in the library — click one to preview it")
         self.library_list.setIconSize(QSize(64, 64))
         self.library_list.setFlow(QListWidget.Flow.LeftToRight)
         self.library_list.setWrapping(True)
@@ -3685,23 +3992,31 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.library_info_label)
 
         self.library_load_btn = QPushButton("Load into Image tab")
+        self.library_load_btn.setToolTip(
+            "Load the selected sprite into the Image tab")
         self.library_load_btn.setEnabled(False)
         self.library_load_btn.clicked.connect(self._on_library_load)
         right_layout.addWidget(self.library_load_btn)
 
         self.library_rename_btn = QPushButton("Rename")
+        self.library_rename_btn.setToolTip(
+            "Rename the selected sprite")
         self.library_rename_btn.setEnabled(False)
         self.library_rename_btn.clicked.connect(
             self._on_library_rename)
         right_layout.addWidget(self.library_rename_btn)
 
         self.library_delete_btn = QPushButton("Delete")
+        self.library_delete_btn.setToolTip(
+            "Delete the selected sprite from the library")
         self.library_delete_btn.setEnabled(False)
         self.library_delete_btn.clicked.connect(
             self._on_library_delete)
         right_layout.addWidget(self.library_delete_btn)
 
         self.library_export_btn = QPushButton("Export a copy")
+        self.library_export_btn.setToolTip(
+            "Export a copy of the selected sprite")
         self.library_export_btn.setEnabled(False)
         self.library_export_btn.clicked.connect(
             self._on_library_export)

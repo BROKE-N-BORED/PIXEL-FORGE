@@ -2831,5 +2831,329 @@ class B15MinorGroupTests(unittest.TestCase):
         self.assertNotIn("not the pinned LCM file", text)
 
 
+class ShortcutsMenusTests(unittest.TestCase):
+    """Task 21 (shortcuts + menus + help): the menu bar, Ctrl+O /
+    Ctrl+S routing, Ctrl+1..5 tab switching, Enter-to-generate,
+    the Help menu dialogs, and the tooltip audit."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = tempfile.mkdtemp()
+        self.win = MainWindow(library_dir=self.lib_dir)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.lib_dir, ignore_errors=True)
+
+    def _menus(self):
+        bar = self.win.menuBar()
+        return {action.text(): action.menu()
+                for action in bar.actions()}
+
+    def test_menu_bar_has_file_and_help_menus(self):
+        menus = self._menus()
+        self.assertEqual(sorted(menus), ["File", "Help"])
+        file_items = [(a.text(), a.shortcut().toString())
+                      for a in menus["File"].actions()]
+        self.assertEqual(file_items, [("Import", "Ctrl+O"),
+                                      ("Export", "Ctrl+S")])
+        help_items = [a.text()
+                      for a in menus["Help"].actions()]
+        self.assertEqual(help_items,
+                         ["About Pixel Forge",
+                          "What the Code tab detects",
+                          "Library location"])
+
+    def test_about_text_shows_real_version(self):
+        # The About text reads __version__, so it can never drift
+        # from the shipped version — a hardcoded string would.
+        from pixel_forge import __version__
+        text = self.win._about_text()
+        self.assertIn("Pixel Forge", text)
+        self.assertIn(__version__, text)
+        self.assertIn("pixel art", text)
+
+    def test_about_dialog_shows_version(self):
+        # The real dialog, opened through the Help menu action —
+        # a QTimer watcher reads it and closes it.
+        from PySide6.QtCore import QTimer
+        seen = []
+
+        def watch():
+            dialog = QApplication.activeModalWidget()
+            if dialog is not None and isinstance(dialog, QMessageBox):
+                seen.append(dialog.text())
+                dialog.accept()
+
+        watcher = QTimer()
+        watcher.timeout.connect(watch)
+        watcher.start(50)
+        try:
+            self._menus()["Help"].actions()[0].trigger()
+        finally:
+            watcher.stop()
+        from pixel_forge import __version__
+        self.assertEqual(len(seen), 1)
+        self.assertIn(__version__, seen[0])
+
+    def test_code_detects_text_names_maps_palettes_skins_and_limits(self):
+        # Grounded in codeinput.py and skins.py: the four map
+        # kinds, palettes, skins, and the honest limits.
+        text = self.win._code_detects_text()
+        for phrase in ("int rows", "hex rows", "RGB rows",
+                       "char rows", "Palettes", "Minecraft skin",
+                       "never run", "512 x 512",
+                       "found but not rendered",
+                       "detected by size only"):
+            self.assertIn(phrase, text, "missing from Code detects "
+                          "text: %r" % phrase)
+
+    def test_code_detects_dialog_opens_with_the_text(self):
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QDialog, QTextEdit
+        seen = []
+
+        def watch():
+            dialog = QApplication.activeModalWidget()
+            if dialog is not None and isinstance(dialog, QDialog):
+                edit = dialog.findChild(QTextEdit)
+                if edit is not None:
+                    seen.append(edit.toPlainText())
+                dialog.accept()
+
+        watcher = QTimer()
+        watcher.timeout.connect(watch)
+        watcher.start(50)
+        try:
+            self._menus()["Help"].actions()[1].trigger()
+        finally:
+            watcher.stop()
+        self.assertEqual(len(seen), 1)
+        self.assertIn("Minecraft skin", seen[0])
+        self.assertIn("int rows", seen[0])
+
+    def test_library_location_names_actual_folder(self):
+        text = self.win._library_location_text()
+        self.assertIn(self.lib_dir, text)
+
+    def test_library_location_dialog_shows_the_folder(self):
+        from PySide6.QtCore import QTimer
+        seen = []
+
+        def watch():
+            dialog = QApplication.activeModalWidget()
+            if dialog is not None and isinstance(dialog, QMessageBox):
+                seen.append(dialog.text())
+                dialog.accept()
+
+        watcher = QTimer()
+        watcher.timeout.connect(watch)
+        watcher.start(50)
+        try:
+            self._menus()["Help"].actions()[2].trigger()
+        finally:
+            watcher.stop()
+        self.assertEqual(len(seen), 1)
+        self.assertIn(self.lib_dir, seen[0])
+
+    def test_open_library_folder_uses_xdg_open(self):
+        from unittest import mock
+        from pixel_forge import gui as gui_mod
+        with mock.patch.object(gui_mod.subprocess, "Popen") as popen:
+            self.win._open_library_folder()
+        popen.assert_called_once_with(
+            ["xdg-open", str(self.win.library.directory)])
+
+    def test_ctrl_number_switches_tabs(self):
+        # The real key path: Ctrl+3 lands on the Prompt tab.
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        self.win.show()
+        self.app.processEvents()
+        self.win.tabs.setCurrentIndex(0)
+        QTest.keyClick(self.win, Qt.Key.Key_3,
+                       Qt.KeyboardModifier.ControlModifier)
+        self.app.processEvents()
+        self.assertEqual(self.win.tabs.currentIndex(), 2)
+        QTest.keyClick(self.win, Qt.Key.Key_5,
+                       Qt.KeyboardModifier.ControlModifier)
+        self.app.processEvents()
+        self.assertEqual(self.win.tabs.currentIndex(), 4)
+        QTest.keyClick(self.win, Qt.Key.Key_1,
+                       Qt.KeyboardModifier.ControlModifier)
+        self.app.processEvents()
+        self.assertEqual(self.win.tabs.currentIndex(), 0)
+
+    def test_enter_in_prompt_field_generates(self):
+        # Enter in the prompt field is the Generate button.
+        from unittest import mock
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        self.win.show()
+        self.app.processEvents()
+        self.win.tabs.setCurrentIndex(2)
+        with mock.patch.object(self.win, "_on_prompt_generate") \
+                as generate:
+            self.win.prompt_edit.setFocus()
+            QTest.keyClick(self.win.prompt_edit, Qt.Key.Key_Return)
+            self.app.processEvents()
+        generate.assert_called_once()
+
+    def test_enter_in_other_fields_does_not_generate(self):
+        # Only the prompt field generates on Enter — the negative
+        # field, the search box, and the time fields keep their
+        # own behavior.
+        from unittest import mock
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        self.win.show()
+        self.app.processEvents()
+        with mock.patch.object(self.win, "_on_prompt_generate") \
+                as generate:
+            self.win.tabs.setCurrentIndex(2)
+            self.win.prompt_negative_edit.setFocus()
+            QTest.keyClick(self.win.prompt_negative_edit,
+                           Qt.Key.Key_Return)
+            self.win.tabs.setCurrentIndex(1)
+            self.win.video_start_edit.setFocus()
+            QTest.keyClick(self.win.video_start_edit,
+                           Qt.Key.Key_Return)
+            self.win.tabs.setCurrentIndex(4)
+            self.win.library_search_edit.setFocus()
+            QTest.keyClick(self.win.library_search_edit,
+                           Qt.Key.Key_Return)
+            self.app.processEvents()
+        generate.assert_not_called()
+
+    def test_ctrl_o_routes_import_per_tab(self):
+        from unittest import mock
+        routes = [(0, "_on_import"),
+                  (1, "_on_video_import"),
+                  (3, "_on_import_code")]
+        for index, handler in routes:
+            with mock.patch.object(self.win, handler) as call:
+                self.win.tabs.setCurrentIndex(index)
+                self.win._on_shortcut_import()
+            call.assert_called_once()
+        # Prompt tab: nothing to import — silent no-op.
+        with mock.patch.object(self.win, "_on_import") as imp, \
+                mock.patch.object(self.win, "_on_video_import") \
+                as vid, \
+                mock.patch.object(self.win, "_on_import_code") \
+                as code:
+            self.win.tabs.setCurrentIndex(2)
+            self.win._on_shortcut_import()
+        imp.assert_not_called()
+        vid.assert_not_called()
+        code.assert_not_called()
+        # Library tab: no import of its own — it takes the user
+        # to the Image tab and opens its import dialog.
+        with mock.patch.object(self.win, "_on_import") as call:
+            self.win.tabs.setCurrentIndex(4)
+            self.win._on_shortcut_import()
+        call.assert_called_once()
+        self.assertEqual(self.win.tabs.currentIndex(), 0)
+
+    def test_ctrl_s_routes_export_per_tab(self):
+        from unittest import mock
+        routes = [(0, "_on_export"),
+                  (1, "_on_export_frames"),
+                  (2, "_on_export_prompt_keeper"),
+                  (3, "_on_export_code_asset"),
+                  (4, "_on_library_export")]
+        for index, handler in routes:
+            with mock.patch.object(self.win, handler) as call:
+                self.win.tabs.setCurrentIndex(index)
+                self.win._on_shortcut_export()
+            call.assert_called_once()
+
+    def test_ctrl_s_noop_with_nothing_to_export(self):
+        # A fresh window, every tab: Ctrl+S must open no dialog
+        # and crash nothing — each export handler guards its own
+        # empty state.
+        from unittest import mock
+        from pixel_forge import gui as gui_mod
+        with mock.patch.object(
+                QFileDialog, "getSaveFileName") as save, \
+                mock.patch.object(
+                    QFileDialog, "getExistingDirectory") as folder, \
+                mock.patch.object(
+                    gui_mod.QMessageBox, "warning") as warn:
+            for index in range(5):
+                self.win.tabs.setCurrentIndex(index)
+                self.win._on_shortcut_export()
+                self.app.processEvents()
+        save.assert_not_called()
+        folder.assert_not_called()
+        warn.assert_not_called()
+
+    def test_shortcuts_do_not_fire_while_modal_dialog_open(self):
+        # WindowShortcut context: with a modal dialog up, the
+        # main window is not the active window, so its shortcuts
+        # stay quiet — Ctrl+3 must not switch tabs, Ctrl+O must
+        # not import.
+        from unittest import mock
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        self.win.show()
+        self.app.processEvents()
+        self.win.tabs.setCurrentIndex(0)
+        box = QMessageBox(self.win)
+        box.setWindowTitle("modal")
+        box.setText("blocking")
+        box.setWindowModality(Qt.WindowModality.WindowModal)
+        box.show()
+        self.app.processEvents()
+        with mock.patch.object(self.win, "_on_import") as imp:
+            QTest.keyClick(box, Qt.Key.Key_3,
+                           Qt.KeyboardModifier.ControlModifier)
+            QTest.keyClick(box, Qt.Key.Key_O,
+                           Qt.KeyboardModifier.ControlModifier)
+            self.app.processEvents()
+        imp.assert_not_called()
+        self.assertEqual(self.win.tabs.currentIndex(), 0)
+        box.close()
+
+    def test_every_control_has_a_tooltip(self):
+        # Task 21: every control group carries a one-line tooltip
+        # saying what it does. The rule covers buttons, combos,
+        # spin boxes, sliders, checkboxes, line edits, and lists
+        # — everything the user can touch. Spin boxes carry their
+        # own tooltip; their internal qt_spinbox_lineedit is not
+        # a control and is skipped.
+        from PySide6.QtWidgets import (QAbstractSpinBox, QCheckBox,
+                                       QComboBox, QLineEdit,
+                                       QListWidget, QPushButton,
+                                       QSlider)
+        types = (QPushButton, QComboBox, QAbstractSpinBox, QSlider,
+                 QCheckBox, QLineEdit, QListWidget)
+        missing = []
+        total = 0
+        for cls in types:
+            for widget in self.win.findChildren(cls):
+                if isinstance(widget, QLineEdit) and isinstance(
+                        widget.parent(), QAbstractSpinBox):
+                    continue  # spin box internals, not a control
+                total += 1
+                if not widget.toolTip().strip():
+                    label = ""
+                    if isinstance(widget, (QPushButton, QCheckBox)):
+                        label = widget.text()
+                    missing.append("%s %r"
+                                   % (widget.__class__.__name__,
+                                      label))
+        self.assertEqual(missing, [],
+                         "controls without a tooltip: %r" % missing)
+        self.assertGreaterEqual(total, 80,
+                                "only %d controls audited" % total)
+
+
 if __name__ == "__main__":
     unittest.main()

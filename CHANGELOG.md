@@ -1,5 +1,34 @@
 # Pixel Forge changelog
 
+## 0.32 — 2026-11-13
+
+Shortcuts + menus + help — task-list item #21:
+
+- Keyboard shortcuts, working from anywhere in the window:
+  Enter in the prompt field starts a generation (the same as
+  the Generate button — other fields keep their own Enter
+  behavior); Ctrl+O imports for the current tab (image, video,
+  or code files; the Prompt tab has nothing to import, and the
+  Library tab takes you to the Image tab, since it has no
+  import of its own); Ctrl+S exports for the current tab
+  (sprite, frames, keeper, code asset, or the selected library
+  entry — a silent no-op on a tab with nothing to export);
+  Ctrl+1..5 switch tabs in order (Image, Video, Prompt, Code,
+  Library). Shortcuts do not fire while a modal dialog is open.
+- A menu bar: File has Import (Ctrl+O) and Export (Ctrl+S),
+  mirroring the shortcuts; Help has About Pixel Forge (the
+  version, read from the package so it can never drift), What
+  the Code tab detects (pixel maps — int, hex, RGB, and char
+  rows — palettes, and game assets, with the honest limits:
+  code is never run, maps cap at 512 x 512, skins are detected
+  by size only), and Library location (the actual folder, with
+  an Open folder button).
+- Every control group on all five tabs now carries a one-line
+  tooltip saying what it does — 84 tooltips in all, up from 9.
+  A test walks the window and pins the rule: every button,
+  combo, spin box, slider, checkbox, text field, and list must
+  have a non-empty tooltip.
+
 ## 0.31 — 2026-11-13
 
 Prompt iteration — task-list item #20, eight sub-items in one
