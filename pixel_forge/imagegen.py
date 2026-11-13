@@ -56,6 +56,14 @@ ENGINE_RELEASE = "master-1086-465adf3"
 # installer tests check against this value.
 MODEL_SHA256 = ("0642060766117fdeb8cae0ccdc73ee974ac5779be1112d0a"
                 "82f2b965bbd00e15")
+# Exact size of the pinned model file (2,134,675,232 bytes, the
+# verified copy). A file named MODEL_FILENAME at any other size
+# is a partial or corrupt download, never the model — the
+# installers use this to tell an interrupted download (resume
+# it) from a finished one (keep it). install.sh carries a literal
+# copy (SD_MODEL_SIZE) that the installer tests check against
+# this value, like the hash.
+MODEL_SIZE_BYTES = 2134675232
 
 DEFAULT_COUNT = 3
 DEFAULT_SIZE = 512
@@ -233,6 +241,58 @@ def available_ram_bytes(meminfo_path="/proc/meminfo"):
     return None
 
 
+# Build-job cap for the image-engine source build (task 84):
+# cmake --build -j<nproc> runs one g++ per thread, and each ggml
+# translation unit eats a large amount of RAM. On an 8 GB machine
+# that fills memory, the machine swaps to the HDD, and the whole
+# desktop appears frozen for minutes (Joshua's real-PC report,
+# 2026-11-13 — his Ryzen 3 3250U + 8 GB froze at 92% of the
+# compile). Under this much available memory the build is capped
+# at BUILD_JOBS_LOW_MEMORY jobs; at or above it the build uses
+# every core. Unknown memory (non-Linux, a missing or unparsable
+# meminfo) means "proceed with the current behavior" — never a
+# refusal. install.sh's build_jobs mirrors this rule in shell.
+BUILD_JOBS_LOW_MEMORY_BYTES = 16 * 1024 ** 3
+BUILD_JOBS_LOW_MEMORY = 2
+
+
+def build_jobs(available=None, cpu_count=None,
+               meminfo_path="/proc/meminfo"):
+    """How many parallel jobs the sd.cpp source build may use.
+
+    `available` is bytes of available memory (MemAvailable); when
+    it is None the value is read from meminfo_path, and when that
+    cannot be read either the memory is unknown and the build
+    uses every core, as before. `cpu_count` is the machine's core
+    count (os.cpu_count() when None). The result is at least 1 —
+    a one-core machine never gets 0 jobs. The parameters exist so
+    tests can pass fake values without touching /proc."""
+    cpus = cpu_count if cpu_count is not None else (os.cpu_count()
+                                                    or 1)
+    if available is None:
+        available = available_ram_bytes(meminfo_path)
+    if available is None or available >= BUILD_JOBS_LOW_MEMORY_BYTES:
+        return max(1, cpus)
+    return max(1, min(BUILD_JOBS_LOW_MEMORY, cpus))
+
+
+def is_partial_model(path):
+    """True when `path` is the pinned model file at the wrong
+    size — a download interrupted partway (or a corrupt file),
+    never the finished model. A file with any other name is not
+    judged here: find_model also accepts renamed or newer .gguf
+    files whose size is unknown, and those keep the old behavior.
+    A file that vanished between the find and the stat is not
+    partial — the caller treats it as missing on its own."""
+    candidate = Path(path)
+    if candidate.name != MODEL_FILENAME:
+        return False
+    try:
+        return candidate.stat().st_size != MODEL_SIZE_BYTES
+    except OSError:
+        return False
+
+
 # ------------------------------------------------------- install pins
 
 def engine_clone_command(dest) -> list:
@@ -247,6 +307,34 @@ def engine_clone_command(dest) -> list:
     return ["git", "clone", "--depth", "1",
             "--branch", ENGINE_RELEASE,
             "--recursive", ENGINE_REPO, str(dest)]
+
+
+def engine_checkout_tag_command(dest):
+    """The git command whose output names the tag the checkout at
+    `dest` sits on — or fails when the checkout is not exactly on
+    a tag. The installers use it to tell a checkout that is
+    already at the pinned release (reuse it, no network needed)
+    from one at another commit or a damaged one (update it, or
+    check it out again)."""
+    return ["git", "-C", str(dest), "describe", "--tags",
+            "--exact-match", "HEAD"]
+
+
+def engine_update_commands(dest):
+    """The commands that move an existing checkout at `dest` to
+    the pinned release, in order: fetch the tag, check it out,
+    then bring the ggml submodule in line. The fetch is shallow
+    like the clone — no history is pulled down. Run only when the
+    checkout is not already at the pin (see
+    engine_checkout_tag_command); when any of them fails the
+    installers wipe the checkout and clone again."""
+    return [
+        ["git", "-C", str(dest), "fetch", "--depth", "1",
+         "origin", "tag", ENGINE_RELEASE],
+        ["git", "-C", str(dest), "checkout", ENGINE_RELEASE],
+        ["git", "-C", str(dest), "submodule", "update", "--init",
+         "--recursive"],
+    ]
 
 
 def model_download_command(dest) -> list:

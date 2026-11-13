@@ -48,6 +48,19 @@ from .pixelize import PixelForgeError, plural  # noqa: E402
 NETWORK_CHECK_URL = "https://pypi.org/simple/"
 NETWORK_CHECK_TIMEOUT = 10  # seconds — a dead connection must fail fast
 
+# Where the image-engine source build lives (task 85), relative
+# to the user's home: a persistent folder under the install home,
+# NOT a temp dir. A freeze or failure mid-build leaves the
+# checkout and the half-built objects here, and the next run
+# resumes from them instead of re-cloning and rebuilding the
+# whole ~30 minutes from scratch. It is removed after a
+# successful install — the built engine lives in /opt/sd.cpp and
+# the build files are multi-GB junk after that. install.sh uses
+# the same path (SD_BUILD_ROOT). The uninstaller's --purge
+# already removes the whole install home, so this goes with it.
+SD_BUILD_SUBDIR = (Path(".local") / "share" / "pixel-forge"
+                   / "sd-build")
+
 
 def has_network(url=NETWORK_CHECK_URL, timeout=NETWORK_CHECK_TIMEOUT):
     """True when an HTTP request to url gets any response. An HTTP
@@ -372,6 +385,113 @@ def step_ffmpeg(ctx):
                       "ffmpeg missing — video import unavailable")
 
 
+def _ensure_engine_checkout(ctx, src):
+    """Make sure `src` holds the engine at the pinned release.
+    Returns True on success, False when the checkout could not be
+    had (the caller warns and stops).
+
+    An existing checkout at the pin is reused as-is — no network
+    needed, which is what makes a re-run after a freeze cheap.
+    A checkout at another commit is fetched and checked out to
+    the pin; a damaged checkout (git cannot answer for it) or a
+    directory with no .git (an interrupted clone) is wiped and
+    cloned again. A failed update falls back to a fresh clone —
+    the checkout is never left half-moved."""
+    from .imagegen import (ENGINE_RELEASE, engine_checkout_tag_command,
+                           engine_clone_command, engine_update_commands)
+
+    if src.is_dir() and (src / ".git").is_dir():
+        code, tag = ctx.run_output(engine_checkout_tag_command(src))
+        if code == 0 and tag == ENGINE_RELEASE:
+            ctx.log("Resuming from the engine checkout in %s "
+                    "(already at %s)…" % (src, ENGINE_RELEASE))
+            return True
+        if code == 0:
+            ctx.log("The engine checkout is at %s, not %s — "
+                    "updating it…" % (tag or "an unknown commit",
+                                      ENGINE_RELEASE))
+        else:
+            ctx.log("The engine checkout in %s is damaged — "
+                    "checking it out again…" % src)
+        updated = all(ctx.run(cmd, timeout=900) == 0
+                      for cmd in engine_update_commands(src))
+        if updated:
+            return True
+        ctx.log("Could not update the checkout — checking it out "
+                "again from scratch…")
+        shutil.rmtree(src, ignore_errors=True)
+    elif src.exists():
+        # A directory with no .git: an interrupted clone left it
+        # behind. It is not a checkout — remove it, then clone.
+        ctx.log("Removing the unfinished engine checkout in %s…"
+                % src)
+        shutil.rmtree(src, ignore_errors=True)
+    code = ctx.run(engine_clone_command(src), timeout=900)
+    if code != 0:
+        ctx.log("WARNING: could not check out the image engine "
+                "at %s (git clone exit %s) — prompt import will "
+                "stay unavailable. Try ./install.sh "
+                "--with-image-engine in a terminal to see the git "
+                "output." % (ENGINE_RELEASE, code))
+        return False
+    return True
+
+
+def _configure_and_build(ctx, src, build_dir, jobs, configure):
+    """One configure (when asked) + build pass. Returns the exit
+    code of the step that ran last — 0 when the build landed."""
+    if configure:
+        code = ctx.run(
+            ["cmake", "-S", str(src), "-B", str(build_dir),
+             "-DCMAKE_BUILD_TYPE=Release"], timeout=600)
+        if code != 0:
+            return code
+    return ctx.run(
+        ["cmake", "--build", str(build_dir),
+         "-j%d" % jobs], timeout=3600)
+
+
+def _build_engine(ctx, src, build_dir, jobs):
+    """Configure + build the engine in `build_dir`, resuming an
+    interrupted build when one is there. Returns True when the
+    build landed, False when it failed (the caller warns).
+
+    A build folder with a CMakeCache.txt is a configured build:
+    cmake --build reuses the objects already compiled, so a
+    freeze at 92% costs the remaining 8%, not the whole half
+    hour. A build folder with no cache never finished its
+    configure — it is wiped and configured fresh. When a resumed
+    build fails, the leftover build state may itself be broken,
+    so the folder is wiped and the build is tried once from
+    clean before giving up. A failed build never installs
+    anything: the install step runs only after this returns True,
+    and the build folder is left in place for the next run."""
+    resumed = (build_dir / "CMakeCache.txt").is_file()
+    if build_dir.is_dir() and not resumed:
+        ctx.log("The engine build folder has no finished setup — "
+                "clearing it and starting the build fresh…")
+        shutil.rmtree(build_dir, ignore_errors=True)
+    if resumed:
+        ctx.log("Resuming the engine build in %s…" % build_dir)
+    code = _configure_and_build(ctx, src, build_dir, jobs,
+                                configure=not resumed)
+    if code == 0:
+        return True
+    if resumed:
+        ctx.log("The resumed build failed — clearing the build "
+                "folder and rebuilding once from clean…")
+        shutil.rmtree(build_dir, ignore_errors=True)
+        code = _configure_and_build(ctx, src, build_dir, jobs,
+                                    configure=True)
+        if code == 0:
+            return True
+    ctx.log("WARNING: the image engine build failed — prompt "
+            "import will stay unavailable. Try ./install.sh "
+            "--with-image-engine in a terminal to see the build "
+            "output.")
+    return False
+
+
 def step_image_engine(ctx):
     """Image engine + model — optional, only needed for prompt
     import.
@@ -387,16 +507,40 @@ def step_image_engine(ctx):
     MODEL_SHA256 (both from imagegen — the one source of truth). A
     download that fails the check is deleted, never kept; a curl
     failure leaves any partial file in place, so the next run
-    resumes it instead of starting over.
+    resumes it instead of starting over — and a partial file is
+    never mistaken for the finished model (is_partial_model
+    checks the pinned size), so an interrupted download always
+    re-runs instead of passing as installed.
+
+    Resumable (task 85): the checkout and the build live in a
+    persistent folder under ~/.local/share/pixel-forge/sd-build,
+    so a freeze or failure mid-build resumes on the next run
+    instead of starting the ~30-minute build over. The build is
+    removed after a successful install. The build also runs with
+    a capped job count on low-memory machines (task 84), so the
+    desktop stays usable while it compiles.
     """
-    from .imagegen import (ENGINE_RELEASE, MODEL_FILENAME,
-                           check_model_file, engine_clone_command,
-                           find_engine, find_model,
-                           model_download_command)
+    from .imagegen import (MODEL_FILENAME, MODEL_SIZE_BYTES,
+                           available_ram_bytes, build_jobs,
+                           check_model_file, find_engine,
+                           find_model, format_bytes,
+                           is_partial_model, model_download_command)
 
     ctx.log("Checking the image engine (for prompt import)…")
     engine = find_engine()
     model = find_model()
+    if model is not None and is_partial_model(model):
+        # An interrupted download: the file is there but short.
+        # Treat it as missing so the download below resumes it
+        # (curl -C -) instead of the step calling it installed.
+        try:
+            have = format_bytes(model.stat().st_size)
+        except OSError:
+            have = "some"
+        ctx.log("The model download was interrupted (%s of %s "
+                "downloaded) — resuming it instead of starting "
+                "over…" % (have, format_bytes(MODEL_SIZE_BYTES)))
+        model = None
     if engine is not None and model is not None:
         ctx.log("OK: image engine and model are already installed")
         return StepResult(StepResult.DONE, "already installed")
@@ -440,67 +584,68 @@ def step_image_engine(ctx):
         # HEAD happens to be that day.
         ctx.log("Building the image engine from source (one-time "
                 "compile — allow up to half an hour)…")
-        tmpd = tempfile.mkdtemp(prefix="pixel-forge-sd-")
-        try:
-            src = os.path.join(tmpd, "sd")
-            build_dir = os.path.join(src, "build")
-            code = ctx.run(engine_clone_command(src), timeout=900)
-            if code != 0:
-                ctx.log("WARNING: could not check out the image "
-                        "engine at %s (git clone exit %s) — prompt "
-                        "import will stay unavailable. Try "
-                        "./install.sh --with-image-engine in a "
-                        "terminal to see the git output."
-                        % (ENGINE_RELEASE, code))
-                return StepResult(StepResult.WARN,
-                                  "engine checkout failed — prompt "
-                                  "import unavailable")
-            code = ctx.run(
-                ["cmake", "-S", src, "-B", build_dir,
-                 "-DCMAKE_BUILD_TYPE=Release"], timeout=600)
-            if code == 0:
-                code = ctx.run(
-                    ["cmake", "--build", build_dir,
-                     "-j%s" % (os.cpu_count() or 1)], timeout=3600)
-            if code != 0:
-                ctx.log("WARNING: the image engine build failed — "
-                        "prompt import will stay unavailable. Try "
-                        "./install.sh --with-image-engine in a "
-                        "terminal to see the build output.")
-                return StepResult(StepResult.WARN,
-                                  "engine build failed — prompt "
-                                  "import unavailable")
-            # The old engine is moved aside first, never wiped: a
-            # failed build must not destroy the working engine, and
-            # the move happens only now, after the new build
-            # succeeded. `set -e` stops the script if the backup
-            # move fails, so the old engine stays in place.
-            if Path("/opt/sd.cpp").is_dir():
-                ctx.log("Backing up the existing image engine to "
-                        "/opt/sd.cpp.bak…")
-            code = ctx.run_admin(
-                "set -e; "
-                "if [ -d /opt/sd.cpp ]; then "
-                "rm -rf /opt/sd.cpp.bak; "
-                "mv /opt/sd.cpp /opt/sd.cpp.bak; "
-                "echo 'Backed up the old engine to /opt/sd.cpp.bak'; "
-                "fi; "
-                "mkdir -p /opt/sd.cpp/bin; "
-                "cp %s /opt/sd.cpp/bin/; "
-                "ln -sf /opt/sd.cpp/bin/sd-cli /usr/local/bin/sd-cli"
-                % os.path.join(build_dir, "bin", "*"), timeout=300)
-            engine = find_engine()
-            if code != 0 or engine is None:
-                ctx.log("WARNING: the built engine could not be "
-                        "installed to /opt/sd.cpp — prompt import "
-                        "will stay unavailable.")
-                return StepResult(StepResult.WARN,
-                                  "engine install failed — prompt "
-                                  "import unavailable")
-            ctx.log("OK: image engine built: %s" % engine)
-        finally:
-            shutil.rmtree(tmpd, ignore_errors=True)
-    if find_model() is None:
+        # The checkout + build live in a persistent folder (task
+        # 85), not a temp dir: a freeze or failure mid-build
+        # resumes from here on the next run. The job count is
+        # capped on low-memory machines (task 84) so the desktop
+        # stays usable while the build runs.
+        build_root = ctx.home / SD_BUILD_SUBDIR
+        src = build_root / "sd"
+        build_dir = src / "build"
+        available = available_ram_bytes()
+        jobs = build_jobs(available=available)
+        cpus = os.cpu_count() or 1
+        if available is not None and jobs < cpus:
+            ctx.log("Building with %d parallel jobs (%s available "
+                    "memory — capped so the desktop stays usable)…"
+                    % (jobs, format_bytes(available)))
+        else:
+            ctx.log("Building with %d parallel jobs…" % jobs)
+        if not _ensure_engine_checkout(ctx, src):
+            return StepResult(StepResult.WARN,
+                              "engine checkout failed — prompt "
+                              "import unavailable")
+        if not _build_engine(ctx, src, build_dir, jobs):
+            return StepResult(StepResult.WARN,
+                              "engine build failed — prompt "
+                              "import unavailable")
+        # The old engine is moved aside first, never wiped: a
+        # failed build must not destroy the working engine, and
+        # the move happens only now, after the new build
+        # succeeded. `set -e` stops the script if the backup
+        # move fails, so the old engine stays in place.
+        if Path("/opt/sd.cpp").is_dir():
+            ctx.log("Backing up the existing image engine to "
+                    "/opt/sd.cpp.bak…")
+        code = ctx.run_admin(
+            "set -e; "
+            "if [ -d /opt/sd.cpp ]; then "
+            "rm -rf /opt/sd.cpp.bak; "
+            "mv /opt/sd.cpp /opt/sd.cpp.bak; "
+            "echo 'Backed up the old engine to /opt/sd.cpp.bak'; "
+            "fi; "
+            "mkdir -p /opt/sd.cpp/bin; "
+            "cp %s /opt/sd.cpp/bin/; "
+            "ln -sf /opt/sd.cpp/bin/sd-cli /usr/local/bin/sd-cli"
+            % os.path.join(build_dir, "bin", "*"), timeout=300)
+        engine = find_engine()
+        if code != 0 or engine is None:
+            ctx.log("WARNING: the built engine could not be "
+                    "installed to /opt/sd.cpp — prompt import "
+                    "will stay unavailable.")
+            return StepResult(StepResult.WARN,
+                              "engine install failed — prompt "
+                              "import unavailable")
+        ctx.log("OK: image engine built: %s" % engine)
+        # The engine is installed — the build files are multi-GB
+        # junk now. Remove the checkout and the object files; the
+        # installed engine stays in /opt/sd.cpp, and the model
+        # (downloaded below) stays in its own home.
+        shutil.rmtree(build_root, ignore_errors=True)
+        ctx.log("Removed the engine build files from %s (checkout "
+                "and build objects gone; the installed engine "
+                "stays in /opt/sd.cpp)." % build_root)
+    if model is None:
         # Shared with the Design Shell: one download serves both.
         ctx.log("Downloading the image model (%s, about 2.1 GB)…"
                 % MODEL_FILENAME)

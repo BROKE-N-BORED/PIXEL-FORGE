@@ -39,6 +39,12 @@ a one-time job that takes a while):
 bash install.sh --with-image-engine
 ```
 
+If the engine build or the model download is interrupted (a
+freeze, a lost connection, a closed window), just run the
+installer again — it resumes from where it stopped instead of
+starting over. On a machine with under 16 GB of memory the build
+runs with 2 parallel jobs so the desktop stays usable.
+
 The engine is a source build because the prebuilt binary needs a
 newer system library than Mint ships. Building it needs git, cmake,
 and a C++ compiler — if any are missing, the installer stops and

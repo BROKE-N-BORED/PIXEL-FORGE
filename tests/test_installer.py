@@ -467,6 +467,594 @@ class ImageEnginePinTests(unittest.TestCase):
         self.assertIn("~/pixel-forge-models/", log)
 
 
+class BuildJobsTests(unittest.TestCase):
+    """Task 84: the engine source build caps its parallel jobs on
+    low-memory machines. Fake meminfo values — no /proc reads."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(
+            lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+    def _meminfo(self, available_kb):
+        path = os.path.join(self.tmp, "meminfo")
+        with open(path, "w") as fh:
+            fh.write("MemTotal:       16384000 kB\n")
+            fh.write("MemAvailable:   %d kB\n" % available_kb)
+        return path
+
+    def test_eight_gb_caps_at_two_jobs(self):
+        from pixel_forge.imagegen import build_jobs
+
+        meminfo = self._meminfo(8 * 1024 * 1024)
+        self.assertEqual(
+            build_jobs(cpu_count=4, meminfo_path=meminfo), 2)
+
+    def test_sixteen_gb_uses_every_core(self):
+        from pixel_forge.imagegen import build_jobs
+
+        meminfo = self._meminfo(16 * 1024 * 1024)
+        self.assertEqual(
+            build_jobs(cpu_count=4, meminfo_path=meminfo), 4)
+
+    def test_thirty_two_gb_uses_every_core(self):
+        from pixel_forge.imagegen import build_jobs
+
+        meminfo = self._meminfo(32 * 1024 * 1024)
+        self.assertEqual(
+            build_jobs(cpu_count=8, meminfo_path=meminfo), 8)
+
+    def test_missing_meminfo_uses_every_core(self):
+        # Unknown memory means "proceed with the current
+        # behavior" — never a refusal, never a cap.
+        from pixel_forge.imagegen import build_jobs
+
+        missing = os.path.join(self.tmp, "no-such-meminfo")
+        self.assertEqual(
+            build_jobs(cpu_count=4, meminfo_path=missing), 4)
+
+    def test_unparsable_meminfo_uses_every_core(self):
+        from pixel_forge.imagegen import build_jobs
+
+        path = os.path.join(self.tmp, "meminfo")
+        with open(path, "w") as fh:
+            fh.write("this is not a meminfo file\n")
+        self.assertEqual(
+            build_jobs(cpu_count=4, meminfo_path=path), 4)
+
+    def test_one_core_never_gets_zero_jobs(self):
+        from pixel_forge.imagegen import build_jobs
+
+        meminfo = self._meminfo(8 * 1024 * 1024)
+        self.assertEqual(
+            build_jobs(cpu_count=1, meminfo_path=meminfo), 1)
+
+    def test_explicit_available_wins_over_meminfo(self):
+        from pixel_forge.imagegen import build_jobs
+
+        missing = os.path.join(self.tmp, "no-such-meminfo")
+        self.assertEqual(
+            build_jobs(available=8 * 1024 ** 3, cpu_count=4,
+                       meminfo_path=missing), 2)
+
+
+class IsPartialModelTests(unittest.TestCase):
+    """Task 85: a pinned-model file at the wrong size is a partial
+    download, never the finished model."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(
+            lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+    def _model(self, name, size):
+        # Sparse: instant even at the full 2.1 GB.
+        path = Path(self.tmp) / name
+        with open(path, "wb") as fh:
+            fh.truncate(size)
+        return path
+
+    def test_short_file_is_partial(self):
+        from pixel_forge.imagegen import (
+            MODEL_FILENAME, is_partial_model)
+
+        path = self._model(MODEL_FILENAME, 500_000_000)
+        self.assertTrue(is_partial_model(path))
+
+    def test_full_size_file_is_not_partial(self):
+        from pixel_forge.imagegen import (
+            MODEL_FILENAME, MODEL_SIZE_BYTES, is_partial_model)
+
+        path = self._model(MODEL_FILENAME, MODEL_SIZE_BYTES)
+        self.assertFalse(is_partial_model(path))
+
+    def test_oversize_file_is_partial(self):
+        from pixel_forge.imagegen import (
+            MODEL_FILENAME, MODEL_SIZE_BYTES, is_partial_model)
+
+        path = self._model(MODEL_FILENAME, MODEL_SIZE_BYTES + 1)
+        self.assertTrue(is_partial_model(path))
+
+    def test_renamed_model_is_not_judged(self):
+        # find_model also accepts renamed or newer .gguf files
+        # whose size is unknown — those keep the old behavior.
+        from pixel_forge.imagegen import is_partial_model
+
+        path = self._model("some-other-model.gguf", 100)
+        self.assertFalse(is_partial_model(path))
+
+    def test_missing_file_is_not_partial(self):
+        from pixel_forge.imagegen import (
+            MODEL_FILENAME, is_partial_model)
+
+        path = Path(self.tmp) / MODEL_FILENAME
+        self.assertFalse(is_partial_model(path))
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 not available")
+class ImageEngineResumeTests(unittest.TestCase):
+    """Tasks 84 + 85: the GUI installer's engine build caps its
+    jobs on low-memory machines and resumes after a failure or
+    freeze. The subprocess calls are stubbed at the
+    InstallContext boundary — no test clones, builds, or
+    downloads anything for real."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(
+            lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+    def _build_root(self):
+        from pixel_forge.installer import SD_BUILD_SUBDIR
+
+        return Path(self.tmp) / SD_BUILD_SUBDIR
+
+    def _drive(self, run, engine_values, model_values,
+               run_output=None, check=None, meminfo=None,
+               cpu_count=None):
+        """Drive the real step_image_engine with stubbed process
+        calls, like ImageEnginePinTests._drive_step, plus a
+        run_output stub (the git tag check), a meminfo patch (the
+        job cap reads available_ram_bytes) and a cpu_count patch.
+        Returns (result, lines, commands, checked)."""
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import (
+            InstallContext, step_image_engine)
+
+        lines = []
+        commands = []
+        checked = []
+
+        def recording_run(cmd, timeout=None):
+            commands.append(list(cmd))
+            return run(cmd, timeout)
+
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.install_image_engine = True
+        ctx.home = Path(self.tmp)
+        ctx.which = lambda _name: "/usr/bin/" + _name
+        ctx.run = recording_run
+        ctx.run_admin = lambda _script, timeout=None: 0
+        if run_output is not None:
+            ctx.run_output = run_output
+        engine_iter = iter(engine_values)
+        model_iter = iter(model_values)
+        patches = [
+            mock.patch.object(imagegen, "find_engine",
+                              lambda: next(engine_iter)),
+            mock.patch.object(imagegen, "find_model",
+                              lambda: next(model_iter)),
+            mock.patch.object(
+                imagegen, "check_model_file",
+                check if check is not None
+                else lambda p: checked.append(Path(p))),
+        ]
+        if meminfo is not None:
+            patches.append(mock.patch.object(
+                imagegen, "available_ram_bytes",
+                lambda meminfo_path="/proc/meminfo": meminfo))
+        if cpu_count is not None:
+            patches.append(mock.patch(
+                "os.cpu_count", return_value=cpu_count))
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            result = step_image_engine(ctx)
+        return result, lines, commands, checked
+
+    def _curl_lands_a_file(self, cmd, timeout=None):
+        """A stub run: curl writes a small file at its -o target,
+        everything else succeeds silently."""
+        if cmd[0] == "curl":
+            dest = Path(cmd[cmd.index("-o") + 1])
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"fake model bytes")
+        return 0
+
+    def test_fresh_run_clones_into_the_persistent_dir(self):
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import StepResult
+
+        result, lines, commands, _checked = self._drive(
+            self._curl_lands_a_file,
+            engine_values=[None, Path("/opt/sd.cpp/bin/sd-cli")],
+            model_values=[None, None])
+        self.assertEqual(result.status, StepResult.DONE)
+        clones = [c for c in commands
+                  if len(c) > 1 and c[1] == "clone"]
+        self.assertEqual(len(clones), 1)
+        # The checkout lives under the persistent build folder,
+        # not a temp dir — a freeze must leave it behind.
+        self.assertEqual(clones[0][-1],
+                         str(self._build_root() / "sd"))
+        self.assertNotIn("pixel-forge-sd-", clones[0][-1],
+                         "the clone still goes to a temp dir")
+        builds = [c for c in commands
+                  if c[0] == "cmake" and "--build" in c]
+        self.assertEqual(len(builds), 1)
+        self.assertIn(str(self._build_root() / "sd" / "build"),
+                      builds[0])
+        # A successful install cleans the build files up — the
+        # installed engine is in /opt/sd.cpp, the multi-GB build
+        # folder is junk after that.
+        self.assertFalse(self._build_root().exists(),
+                         "the build folder was left behind")
+        log = "\n".join(lines)
+        self.assertIn("Removed the engine build files", log)
+        self.assertIn("/opt/sd.cpp", log)
+
+    def test_build_uses_two_jobs_on_eight_gb(self):
+        from pixel_forge.installer import StepResult
+
+        result, lines, commands, _checked = self._drive(
+            self._curl_lands_a_file,
+            engine_values=[None, Path("/opt/sd.cpp/bin/sd-cli")],
+            model_values=[None, None],
+            meminfo=8 * 1024 ** 3, cpu_count=4)
+        self.assertEqual(result.status, StepResult.DONE)
+        builds = [c for c in commands
+                  if c[0] == "cmake" and "--build" in c]
+        self.assertEqual(len(builds), 1)
+        self.assertIn("-j2", builds[0])
+        log = "\n".join(lines)
+        self.assertIn("Building with 2 parallel jobs", log)
+        self.assertIn("capped", log)
+
+    def test_build_uses_every_core_on_big_memory(self):
+        from pixel_forge.installer import StepResult
+
+        result, lines, commands, _checked = self._drive(
+            self._curl_lands_a_file,
+            engine_values=[None, Path("/opt/sd.cpp/bin/sd-cli")],
+            model_values=[None, None],
+            meminfo=32 * 1024 ** 3, cpu_count=4)
+        self.assertEqual(result.status, StepResult.DONE)
+        builds = [c for c in commands
+                  if c[0] == "cmake" and "--build" in c]
+        self.assertEqual(len(builds), 1)
+        self.assertIn("-j4", builds[0])
+        log = "\n".join(lines)
+        self.assertIn("Building with 4 parallel jobs", log)
+        self.assertNotIn("capped", log)
+
+    def _prepare_checkout(self, with_cache=False, with_marker=False):
+        """A leftover build folder from an interrupted run: the
+        checkout with a .git dir, and optionally a configured
+        build folder with a fake compiled object in it."""
+        src = self._build_root() / "sd"
+        (src / ".git").mkdir(parents=True)
+        build_dir = src / "build"
+        if with_cache or with_marker:
+            build_dir.mkdir(parents=True)
+        if with_cache:
+            (build_dir / "CMakeCache.txt").write_text("fake cache")
+        marker = None
+        if with_marker:
+            marker = build_dir / "marker.o"
+            marker.write_bytes(b"fake object file")
+        return src, build_dir, marker
+
+    def _tag_output(self, tag):
+        import pixel_forge.imagegen as imagegen
+
+        def run_output(cmd, timeout=60):
+            if "describe" in cmd:
+                return 0, tag
+            return 0, ""
+        return run_output
+
+    def test_resume_reuses_the_checkout_and_the_build(self):
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import StepResult
+
+        _src, build_dir, marker = self._prepare_checkout(
+            with_cache=True, with_marker=True)
+        seen = []
+
+        def run(cmd, timeout=None):
+            if cmd[0] == "cmake" and "--build" in cmd:
+                # The object file must still be there when the
+                # build runs — the resume reuses it, not wipes it.
+                seen.append(marker.exists())
+            if cmd[0] == "curl":
+                dest = Path(cmd[cmd.index("-o") + 1])
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(b"fake model bytes")
+            return 0
+
+        result, lines, commands, _checked = self._drive(
+            run,
+            engine_values=[None, Path("/opt/sd.cpp/bin/sd-cli")],
+            model_values=[None, None],
+            run_output=self._tag_output(imagegen.ENGINE_RELEASE))
+        self.assertEqual(result.status, StepResult.DONE)
+        self.assertFalse(any(len(c) > 1 and c[1] == "clone"
+                             for c in commands),
+                         "the checkout was cloned again")
+        self.assertFalse(any(c[0] == "cmake" and "-S" in c
+                             for c in commands),
+                         "the build was configured again")
+        builds = [c for c in commands
+                  if c[0] == "cmake" and "--build" in c]
+        self.assertEqual(len(builds), 1)
+        self.assertEqual(seen, [True],
+                         "the build folder was wiped before the "
+                         "resumed build ran")
+        log = "\n".join(lines)
+        self.assertIn("Resuming from the engine checkout", log)
+        self.assertIn("Resuming the engine build", log)
+
+    def test_resume_updates_a_checkout_at_the_wrong_tag(self):
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import StepResult
+
+        self._prepare_checkout()
+        result, lines, commands, _checked = self._drive(
+            self._curl_lands_a_file,
+            engine_values=[None, Path("/opt/sd.cpp/bin/sd-cli")],
+            model_values=[None, None],
+            run_output=self._tag_output("some-other-tag"))
+        self.assertEqual(result.status, StepResult.DONE)
+        self.assertFalse(any(len(c) > 1 and c[1] == "clone"
+                             for c in commands),
+                         "the checkout was cloned again")
+        git_calls = [c for c in commands if c[0] == "git"]
+        kinds = [c[3] if len(c) > 3 else "" for c in git_calls]
+        self.assertEqual(kinds, ["fetch", "checkout", "submodule"],
+                         "the update did not fetch, check out, and "
+                         "update the submodule in order")
+        self.assertIn(imagegen.ENGINE_RELEASE, git_calls[0])
+        self.assertIn(imagegen.ENGINE_RELEASE, git_calls[1])
+        log = "\n".join(lines)
+        self.assertIn("updating it", log)
+
+    def test_damaged_checkout_is_cloned_again(self):
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import StepResult
+
+        self._prepare_checkout()
+
+        def run_output(cmd, timeout=60):
+            if "describe" in cmd:
+                return 128, ""  # git cannot answer for the checkout
+            return 0, ""
+
+        def run(cmd, timeout=None):
+            if cmd[0] == "git" and "fetch" in cmd:
+                return 1  # the update fails too — fall back
+            return self._curl_lands_a_file(cmd, timeout)
+
+        result, lines, commands, _checked = self._drive(
+            run,
+            engine_values=[None, Path("/opt/sd.cpp/bin/sd-cli")],
+            model_values=[None, None],
+            run_output=run_output)
+        self.assertEqual(result.status, StepResult.DONE)
+        clones = [c for c in commands
+                  if len(c) > 1 and c[1] == "clone"]
+        self.assertEqual(len(clones), 1)
+        log = "\n".join(lines)
+        self.assertIn("damaged", log)
+
+    def test_unfinished_checkout_without_git_is_cloned_again(self):
+        from pixel_forge.installer import StepResult
+
+        src = self._build_root() / "sd"
+        src.mkdir(parents=True)
+        (src / "stray-file").write_text("an interrupted clone")
+        result, lines, commands, _checked = self._drive(
+            self._curl_lands_a_file,
+            engine_values=[None, Path("/opt/sd.cpp/bin/sd-cli")],
+            model_values=[None, None])
+        self.assertEqual(result.status, StepResult.DONE)
+        clones = [c for c in commands
+                  if len(c) > 1 and c[1] == "clone"]
+        self.assertEqual(len(clones), 1)
+        self.assertFalse((src / "stray-file").exists(),
+                         "the unfinished checkout was not cleared")
+        log = "\n".join(lines)
+        self.assertIn("unfinished engine checkout", log)
+
+    def test_build_folder_without_a_cache_is_cleared_and_configured(
+            self):
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import StepResult
+
+        _src, build_dir, marker = self._prepare_checkout(
+            with_marker=True)  # a build folder, no CMakeCache.txt
+        seen = []
+
+        def run(cmd, timeout=None):
+            if cmd[0] == "cmake" and "-S" in cmd:
+                # The stale folder must be gone before the fresh
+                # configure runs.
+                seen.append(marker.exists())
+            return self._curl_lands_a_file(cmd, timeout)
+
+        result, lines, commands, _checked = self._drive(
+            run,
+            engine_values=[None, Path("/opt/sd.cpp/bin/sd-cli")],
+            model_values=[None, None],
+            run_output=self._tag_output(imagegen.ENGINE_RELEASE))
+        self.assertEqual(result.status, StepResult.DONE)
+        configures = [c for c in commands
+                      if c[0] == "cmake" and "-S" in c]
+        self.assertEqual(len(configures), 1)
+        self.assertEqual(seen, [False],
+                         "the stale build folder was not cleared")
+        log = "\n".join(lines)
+        self.assertIn("no finished setup", log)
+
+    def test_failed_resumed_build_rebuilds_once_from_clean(self):
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import StepResult
+
+        _src, build_dir, marker = self._prepare_checkout(
+            with_cache=True, with_marker=True)
+        seen = []
+        builds = {"count": 0}
+
+        def run(cmd, timeout=None):
+            if cmd[0] == "cmake" and "--build" in cmd:
+                builds["count"] += 1
+                seen.append(marker.exists())
+                if builds["count"] == 1:
+                    return 1  # the resumed build fails
+            return self._curl_lands_a_file(cmd, timeout)
+
+        result, lines, commands, _checked = self._drive(
+            run,
+            engine_values=[None, Path("/opt/sd.cpp/bin/sd-cli")],
+            model_values=[None, None],
+            run_output=self._tag_output(imagegen.ENGINE_RELEASE))
+        self.assertEqual(result.status, StepResult.DONE)
+        build_calls = [c for c in commands
+                       if c[0] == "cmake" and "--build" in c]
+        self.assertEqual(len(build_calls), 2,
+                         "the failed resumed build was not retried")
+        configures = [c for c in commands
+                      if c[0] == "cmake" and "-S" in c]
+        self.assertEqual(len(configures), 1,
+                         "the retry did not configure fresh")
+        self.assertEqual(seen, [True, False],
+                         "the build folder was not wiped between "
+                         "the failed resume and the clean rebuild")
+        log = "\n".join(lines)
+        self.assertIn("rebuilding once from clean", log)
+
+    def test_failed_fresh_build_does_not_retry(self):
+        from pixel_forge.installer import StepResult
+
+        def run(cmd, timeout=None):
+            if cmd[0] == "cmake" and "--build" in cmd:
+                return 1
+            return 0
+
+        result, lines, commands, _checked = self._drive(
+            run, engine_values=[None],
+            model_values=[Path("/m/model.gguf"), Path("/m/model.gguf")])
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("build failed", result.detail)
+        build_calls = [c for c in commands
+                       if c[0] == "cmake" and "--build" in c]
+        self.assertEqual(len(build_calls), 1,
+                         "a fresh build failure retried — only a "
+                         "resumed build gets a clean rebuild")
+        log = "\n".join(lines)
+        self.assertNotIn("Removed the engine build files", log,
+                         "the failed build folder was cleaned up — "
+                         "the next run must resume from it")
+
+    def test_partial_model_download_resumes_end_to_end(self):
+        # The real find_model, a real partial file in the real
+        # model home (HOME pointed at the temp dir): the step must
+        # run curl with -C - and append to the partial file,
+        # instead of calling it installed.
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import (
+            InstallContext, StepResult, step_image_engine)
+
+        model_home = Path(self.tmp) / "design-shell-models"
+        model_home.mkdir(parents=True)
+        model_path = model_home / imagegen.MODEL_FILENAME
+        model_path.write_bytes(b"partial-")
+        lines = []
+        commands = []
+        checked = []
+
+        def run(cmd, timeout=None):
+            commands.append(list(cmd))
+            if cmd[0] == "curl":
+                dest = Path(cmd[cmd.index("-o") + 1])
+                with open(dest, "ab") as fh:
+                    fh.write(b"rest-of-model")
+            return 0
+
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.install_image_engine = True
+        ctx.home = Path(self.tmp)
+        ctx.which = lambda _name: "/usr/bin/" + _name
+        ctx.run = run
+        ctx.run_admin = lambda _script, timeout=None: 0
+        with mock.patch.dict(os.environ, {"HOME": self.tmp}), \
+                mock.patch.object(
+                    imagegen, "find_engine",
+                    return_value=Path("/opt/sd.cpp/bin/sd-cli")), \
+                mock.patch.object(
+                    imagegen, "check_model_file",
+                    lambda p: checked.append(Path(p))):
+            result = step_image_engine(ctx)
+        self.assertEqual(result.status, StepResult.DONE)
+        curls = [c for c in commands if c[0] == "curl"]
+        self.assertEqual(len(curls), 1,
+                         "the partial model was not re-downloaded")
+        self.assertIn("-C", curls[0])
+        self.assertEqual(curls[0][curls[0].index("-C") + 1], "-")
+        self.assertEqual(model_path.read_bytes(),
+                         b"partial-rest-of-model",
+                         "the download restarted instead of "
+                         "resuming the partial file")
+        self.assertEqual(checked, [model_path],
+                         "the resumed download was never "
+                         "hash-checked")
+        log = "\n".join(lines)
+        self.assertIn("resuming it instead of starting over", log)
+
+    def test_full_size_model_is_kept_without_a_download(self):
+        # The size check must not force a re-download of a good
+        # model: a full-size file is already installed.
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import (
+            InstallContext, StepResult, step_image_engine)
+
+        model_home = Path(self.tmp) / "design-shell-models"
+        model_home.mkdir(parents=True)
+        model_path = model_home / imagegen.MODEL_FILENAME
+        with open(model_path, "wb") as fh:
+            fh.truncate(imagegen.MODEL_SIZE_BYTES)
+        lines = []
+        commands = []
+
+        def run(cmd, timeout=None):
+            commands.append(list(cmd))
+            return 0
+
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.install_image_engine = True
+        ctx.home = Path(self.tmp)
+        ctx.run = run
+        with mock.patch.dict(os.environ, {"HOME": self.tmp}), \
+                mock.patch.object(
+                    imagegen, "find_engine",
+                    return_value=Path("/opt/sd.cpp/bin/sd-cli")):
+            result = step_image_engine(ctx)
+        self.assertEqual(result.status, StepResult.DONE)
+        self.assertEqual(result.detail, "already installed")
+        self.assertFalse(any(c[0] == "curl" for c in commands),
+                         "the finished model was downloaded again")
+        self.assertIn("already installed", "\n".join(lines))
+
+
 @unittest.skipUnless(HAS_QT, "PySide6 not available")
 class InstallerGatingTests(unittest.TestCase):
     """Task 5 (W5): step_files is skipped when step_packages fails,
@@ -1131,6 +1719,29 @@ def _model_download_block():
     return text[start:end]
 
 
+def _engine_build_block():
+    """The exact engine build lines from install.sh, verbatim —
+    from the `if [ -z "$SD_BIN" ]` through its closing `fi` (the
+    model block starts after it). The tests below run these
+    lines, not a paraphrase of them."""
+    text = _install_sh_text()
+    start = text.index('  if [ -z "$SD_BIN" ]; then')
+    end = text.index("  # A partial model download", start)
+    return text[start:end]
+
+
+def _model_resume_block():
+    """The exact partial-model check + download lines from
+    install.sh, verbatim — from the SD_MODEL_FOUND assignment
+    through the closing `fi` of the download if/else. The tests
+    below run these lines, not a paraphrase of them."""
+    text = _install_sh_text()
+    start = text.index('  SD_MODEL_FOUND="$(find_sd_model)"')
+    marker = 'echo "Image model already downloaded: $SD_MODEL_FOUND"'
+    end = text.index(marker, start) + len(marker) + len("\n  fi")
+    return text[start:end]
+
+
 @unittest.skipUnless(shutil.which("bash"), "bash not available")
 class InstallScriptPinTests(unittest.TestCase):
     """Task 31 (core): install.sh pins the same release and model
@@ -1206,6 +1817,357 @@ class InstallScriptPinTests(unittest.TestCase):
         self.assertTrue(os.path.exists(path))
         with open(path) as fh:
             self.assertEqual(fh.read(), content)
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash not available")
+class InstallScriptResumeTests(unittest.TestCase):
+    """Tasks 84 + 85, terminal installer: build_jobs caps the
+    jobs, the engine block resumes an interrupted build, and a
+    partial model resumes. Bash runs use stubbed commands —
+    never a real install."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(
+            lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+    def _run_bash(self, script, env=None):
+        full_env = dict(os.environ)
+        if env:
+            full_env.update(env)
+        return subprocess.run(["bash", "-c", script],
+                              capture_output=True, text=True,
+                              timeout=60, env=full_env)
+
+    # -- build_jobs ---------------------------------------------------
+
+    def _meminfo(self, available_kb):
+        path = os.path.join(self.tmp, "meminfo")
+        with open(path, "w") as fh:
+            fh.write("MemTotal:       16384000 kB\n")
+            fh.write("MemAvailable:   %d kB\n" % available_kb)
+        return path
+
+    def _run_build_jobs(self, meminfo_path, nproc_value):
+        script = ("nproc() { echo %d; }\n" % nproc_value
+                  + "PIXELFORGE_MEMINFO=%s\n"
+                  % shlex.quote(meminfo_path)
+                  + _install_sh_function("build_jobs")
+                  + "build_jobs\n")
+        proc = self._run_bash(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout.strip()
+
+    def test_build_jobs_caps_at_two_on_eight_gb(self):
+        meminfo = self._meminfo(8 * 1024 * 1024)
+        self.assertEqual(self._run_build_jobs(meminfo, 4), "2")
+
+    def test_build_jobs_uses_every_core_on_sixteen_gb(self):
+        meminfo = self._meminfo(16 * 1024 * 1024)
+        self.assertEqual(self._run_build_jobs(meminfo, 4), "4")
+
+    def test_build_jobs_uses_every_core_without_meminfo(self):
+        missing = os.path.join(self.tmp, "no-such-meminfo")
+        self.assertEqual(self._run_build_jobs(missing, 4), "4")
+
+    def test_build_jobs_uses_every_core_on_garbage_meminfo(self):
+        path = os.path.join(self.tmp, "meminfo")
+        with open(path, "w") as fh:
+            fh.write("MemAvailable:   banana kB\n")
+        self.assertEqual(self._run_build_jobs(path, 4), "4")
+
+    def test_build_jobs_never_exceeds_the_core_count(self):
+        meminfo = self._meminfo(8 * 1024 * 1024)
+        self.assertEqual(self._run_build_jobs(meminfo, 1), "1")
+
+    # -- shared pins --------------------------------------------------
+
+    def test_model_size_matches_imagegen(self):
+        match = re.search(r'^SD_MODEL_SIZE=(\d+)$',
+                          _install_sh_text(), re.MULTILINE)
+        self.assertIsNotNone(match,
+                             "install.sh has no SD_MODEL_SIZE")
+        self.assertEqual(int(match.group(1)),
+                         _imagegen_constant("MODEL_SIZE_BYTES"))
+
+    def test_build_root_matches_gui_installer(self):
+        text = _install_sh_text()
+        self.assertIn('SD_BUILD_ROOT="$PREFIX/sd-build"', text)
+        with open(os.path.join(
+                ROOT, "pixel_forge", "installer.py")) as fh:
+            gui = fh.read()
+        self.assertIn('"sd-build"', gui,
+                      "the GUI installer and install.sh disagree "
+                      "on the build folder name")
+
+    # -- the engine block ---------------------------------------------
+
+    _GIT_STUB = (
+        "git() {\n"
+        "  echo \"git $*\" >> \"$CALL_LOG\"\n"
+        "  case \"$*\" in\n"
+        "    *describe*)\n"
+        "      if [ \"$DESCRIBE_RC\" = \"0\" ]; then "
+        "echo \"$DESCRIBE_TAG\"; return 0; fi\n"
+        "      return \"$DESCRIBE_RC\";;\n"
+        "    clone*)\n"
+        "      for _last in \"$@\"; do :; done\n"
+        "      mkdir -p \"$_last/.git\"\n"
+        "      return 0;;\n"
+        "    *) return 0;;\n"
+        "  esac\n"
+        "}\n"
+    )
+
+    _CMAKE_STUB = (
+        "cmake() {\n"
+        "  echo \"cmake $*\" >> \"$CALL_LOG\"\n"
+        "  if [ \"$1\" = \"-S\" ]; then\n"
+        "    _b=\"\"\n"
+        "    while [ $# -gt 0 ]; do\n"
+        "      case \"$1\" in\n"
+        "        -B) _b=\"$2\"; shift 2;;\n"
+        "        *) shift;;\n"
+        "      esac\n"
+        "    done\n"
+        "    mkdir -p \"$_b\"\n"
+        "    touch \"$_b/CMakeCache.txt\"\n"
+        "    return 0\n"
+        "  fi\n"
+        "  if [ -f \"$2/marker.o\" ]; then\n"
+        "    echo \"marker-present\" >> \"$CALL_LOG\"\n"
+        "  else\n"
+        "    echo \"marker-absent\" >> \"$CALL_LOG\"\n"
+        "  fi\n"
+        "  if [ \"$BUILD_FAIL_ONCE\" = \"1\" ] "
+        "&& [ ! -f \"$TMPD/failed-once\" ]; then\n"
+        "    touch \"$TMPD/failed-once\"\n"
+        "    return 1\n"
+        "  fi\n"
+        "  mkdir -p \"$2/bin\"\n"
+        "  touch \"$2/bin/sd-cli\"\n"
+        "  return 0\n"
+        "}\n"
+    )
+
+    def _engine_script(self, meminfo_kb=8 * 1024 * 1024,
+                       describe_tag="", describe_rc=0,
+                       build_fail_once=False):
+        """The shipped engine block with stubbed git/cmake/sudo.
+        describe_tag/describe_rc drive the git describe answer;
+        build_fail_once makes the first cmake --build fail.
+        Returns (script, paths)."""
+        home = os.path.join(self.tmp, "home")
+        os.makedirs(home, exist_ok=True)
+        build_root = os.path.join(
+            home, ".local", "share", "pixel-forge", "sd-build")
+        install_dir = os.path.join(self.tmp, "sd.cpp")
+        call_log = os.path.join(self.tmp, "calls.log")
+        meminfo = self._meminfo(meminfo_kb)
+        script = (
+            "set -euo pipefail\n"
+            "SD_RELEASE=\"master-1086-465adf3\"\n"
+            "SD_REPO=\"https://example.invalid/sd.cpp\"\n"
+            "SD_BUILD_ROOT=%s\n"
+            "SD_INSTALL_DIR=%s\n"
+            "SD_BIN=\"\"\n"
+            "CALL_LOG=%s\n"
+            "DESCRIBE_TAG=%s\n"
+            "DESCRIBE_RC=%d\n"
+            "BUILD_FAIL_ONCE=%d\n"
+            "TMPD=%s\n"
+            "PIXELFORGE_MEMINFO=%s\n"
+            "nproc() { echo 4; }\n"
+            "g++() { return 0; }\n"
+            # sudo runs the command for real, except ln — the
+            # block links into /usr/local/bin, which must never
+            # happen in a test.
+            "sudo() { if [ \"$1\" = \"ln\" ]; then "
+            "echo \"sudo ln $*\" >> \"$CALL_LOG\"; return 0; fi; "
+            "\"$@\"; }\n"
+            % (shlex.quote(build_root), shlex.quote(install_dir),
+               shlex.quote(call_log), shlex.quote(describe_tag),
+               describe_rc, 1 if build_fail_once else 0,
+               shlex.quote(self.tmp), shlex.quote(meminfo))
+            + self._GIT_STUB + self._CMAKE_STUB
+            + _install_sh_function("build_jobs")
+            + _install_sh_function("backup_sd_cpp")
+            + _engine_build_block()
+        )
+        return script, {"build_root": build_root,
+                        "install_dir": install_dir,
+                        "call_log": call_log,
+                        "home": home}
+
+    def _calls(self, paths):
+        with open(paths["call_log"]) as fh:
+            return fh.read()
+
+    def test_engine_block_clones_into_the_persistent_dir(self):
+        script, paths = self._engine_script()
+        proc = self._run_bash(script)
+        output = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, output)
+        calls = self._calls(paths)
+        build_root = paths["build_root"]
+        self.assertIn("git clone --depth 1 --branch "
+                      "master-1086-465adf3 --recursive "
+                      "https://example.invalid/sd.cpp %s/sd"
+                      % build_root, calls)
+        self.assertIn("cmake -S %s/sd -B %s/sd/build "
+                      "-DCMAKE_BUILD_TYPE=Release"
+                      % (build_root, build_root), calls)
+        self.assertIn("cmake --build %s/sd/build -j2"
+                      % build_root, calls)
+        self.assertTrue(os.path.exists(os.path.join(
+            paths["install_dir"], "bin", "sd-cli")),
+            "the built engine was not installed")
+        self.assertFalse(os.path.exists(build_root),
+                         "the build folder was left behind")
+        self.assertIn("Building with 2 parallel jobs", output)
+        self.assertIn("Removed the engine build files", output)
+
+    def test_engine_block_uses_every_core_on_big_memory(self):
+        script, paths = self._engine_script(
+            meminfo_kb=32 * 1024 * 1024)
+        proc = self._run_bash(script)
+        output = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, output)
+        self.assertIn("cmake --build %s/sd/build -j4"
+                      % paths["build_root"], self._calls(paths))
+        self.assertIn("Building with 4 parallel jobs", output)
+
+    def _prepare_interrupted_build(self, paths):
+        """A leftover build folder from an interrupted run: the
+        checkout with a .git dir, a configured build folder with
+        a fake compiled object and the built binary in it."""
+        src = os.path.join(paths["build_root"], "sd")
+        build_dir = os.path.join(src, "build")
+        os.makedirs(os.path.join(src, ".git"))
+        os.makedirs(os.path.join(build_dir, "bin"))
+        Path(os.path.join(build_dir,
+                          "CMakeCache.txt")).touch()
+        Path(os.path.join(build_dir, "marker.o")).write_text(
+            "fake object file")
+        Path(os.path.join(build_dir, "bin", "sd-cli")).touch()
+        return src, build_dir
+
+    def test_engine_block_resumes_an_interrupted_build(self):
+        script, paths = self._engine_script(
+            describe_tag="master-1086-465adf3")
+        self._prepare_interrupted_build(paths)
+        proc = self._run_bash(script)
+        output = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, output)
+        calls = self._calls(paths)
+        self.assertNotIn("git clone", calls,
+                         "the checkout was cloned again")
+        self.assertNotIn("cmake -S", calls,
+                         "the build was configured again")
+        self.assertEqual(calls.count("cmake --build"), 1)
+        self.assertIn("marker-present", calls,
+                      "the build folder was wiped before the "
+                      "resumed build ran")
+        self.assertIn("Resuming from the engine checkout", output)
+        self.assertIn("Resuming the engine build", output)
+        self.assertFalse(os.path.exists(paths["build_root"]),
+                         "the build folder was left behind")
+
+    def test_engine_block_rebuilds_once_after_a_failed_resume(self):
+        script, paths = self._engine_script(
+            describe_tag="master-1086-465adf3",
+            build_fail_once=True)
+        self._prepare_interrupted_build(paths)
+        proc = self._run_bash(script)
+        output = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, output)
+        calls = self._calls(paths)
+        self.assertEqual(calls.count("cmake --build"), 2,
+                         "the failed resumed build was not retried")
+        self.assertEqual(calls.count("cmake -S"), 1,
+                         "the retry did not configure fresh")
+        marker_lines = [line for line in calls.splitlines()
+                        if line.startswith("marker-")]
+        self.assertEqual(marker_lines,
+                         ["marker-present", "marker-absent"],
+                         "the build folder was not wiped between "
+                         "the failed resume and the clean rebuild")
+        self.assertIn("rebuilding once from clean", output)
+        self.assertTrue(os.path.exists(os.path.join(
+            paths["install_dir"], "bin", "sd-cli")),
+            "the rebuilt engine was not installed")
+
+    # -- the model block ----------------------------------------------
+
+    def _model_script(self, sha, curl_body):
+        """The shipped partial-model check + download block with a
+        stubbed curl. Returns (script, model_home, call_log)."""
+        model_home = os.path.join(self.tmp, "design-shell-models")
+        os.makedirs(model_home, exist_ok=True)
+        call_log = os.path.join(self.tmp, "curl-calls.log")
+        script = (
+            "set -euo pipefail\n"
+            "SD_MODEL_HOME=%s\n"
+            "SD_MODEL_FILE=LCM_Dreamshaper_v7-f16.gguf\n"
+            "SD_MODEL_URL=https://example.invalid/model.gguf\n"
+            "SD_MODEL_SHA256=%s\n"
+            "SD_MODEL_SIZE=2134675232\n"
+            "CALL_LOG=%s\n"
+            "curl() { %s; }\n"
+            % (shlex.quote(model_home), sha,
+               shlex.quote(call_log), curl_body)
+            + _install_sh_function("find_sd_model")
+            + _model_resume_block()
+        )
+        return script, model_home, call_log
+
+    def test_partial_model_download_resumes(self):
+        final = b"partial-rest"
+        sha = hashlib.sha256(final).hexdigest()
+        curl_body = (
+            "echo \"curl $*\" >> \"$CALL_LOG\"; "
+            "while [ $# -gt 0 ]; do case \"$1\" in "
+            "-o) _o=\"$2\"; shift 2;; *) shift;; esac; done; "
+            "printf 'rest' >> \"$_o\""
+        )
+        script, model_home, call_log = self._model_script(
+            sha, curl_body)
+        model_path = os.path.join(
+            model_home, "LCM_Dreamshaper_v7-f16.gguf")
+        Path(model_path).write_bytes(b"partial-")
+        proc = self._run_bash(script)
+        output = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, output)
+        with open(call_log) as fh:
+            calls = fh.read()
+        self.assertIn("curl -fSL -C -", calls,
+                      "the download did not resume with -C -")
+        with open(model_path, "rb") as fh:
+            self.assertEqual(fh.read(), final,
+                             "the download restarted instead of "
+                             "resuming the partial file")
+        self.assertIn("resuming it instead of starting over",
+                      output)
+
+    def test_full_size_model_is_kept_without_a_download(self):
+        curl_body = (
+            "echo \"CURL-CALLED\" >> \"$CALL_LOG\"; return 1"
+        )
+        script, model_home, call_log = self._model_script(
+            "0" * 64, curl_body)
+        model_path = os.path.join(
+            model_home, "LCM_Dreamshaper_v7-f16.gguf")
+        with open(model_path, "wb") as fh:
+            fh.truncate(2134675232)
+        proc = self._run_bash(script)
+        output = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, output)
+        self.assertIn("already downloaded", output)
+        if os.path.exists(call_log):
+            with open(call_log) as fh:
+                self.assertNotIn("CURL-CALLED", fh.read(),
+                                 "the finished model was "
+                                 "downloaded again")
 
 
 def _load_launcher():

@@ -1,5 +1,37 @@
 # Pixel Forge changelog
 
+## 0.51 — 2026-11-13
+
+Installer hardening — tasks 84 + 85 (from Joshua's real-PC
+install, where the image-engine build froze his desktop at 92%
+of the compile):
+
+- The engine source build caps its parallel jobs on low-memory
+  machines (task 84): under 16 GB of available memory it builds
+  with 2 jobs instead of one per core, so the desktop stays
+  usable while the compile runs. At 16 GB or more, or when the
+  memory cannot be read, it uses every core as before. The
+  installer logs the job count it chose. Both installers (the
+  GUI installer and install.sh) use the same rule.
+- The image-engine step is resumable (task 85): the checkout
+  and the build now live in a persistent folder under
+  ~/.local/share/pixel-forge/sd-build instead of a temp dir, so
+  a freeze or failure mid-build resumes on the next run — the
+  checkout is reused when it is already at the pinned release
+  (or updated to it), and cmake --build reuses the objects
+  already compiled. A build folder with no finished setup is
+  cleared and configured fresh, and a resumed build that fails
+  is rebuilt once from clean before the step gives up. After a
+  successful install the build files are removed (the installed
+  engine stays in /opt/sd.cpp) — the log says what was kept and
+  what was removed.
+- A partial model download no longer passes as the finished
+  model: a file named LCM_Dreamshaper_v7-f16.gguf at the wrong
+  size is treated as an interrupted download, and the next run
+  resumes it (curl -C -) instead of calling the install done.
+  A full-size model is still kept without a download, and a
+  renamed .gguf keeps the old behavior.
+
 ## 0.50 — 2026-11-13
 
 Spritesheet / GIF import + splitter — task-list item #40:

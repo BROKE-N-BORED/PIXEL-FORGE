@@ -27,11 +27,22 @@ SD_MODEL_URL="https://huggingface.co/Steward/lcm-dreamshaper-v7-gguf/resolve/mai
 # download is SHA-256-checked against this hash.
 SD_RELEASE="master-1086-465adf3"
 SD_MODEL_SHA256="0642060766117fdeb8cae0ccdc73ee974ac5779be1112d0a82f2b965bbd00e15"
+# Exact size of the pinned model file, in bytes — MUST match
+# MODEL_SIZE_BYTES in pixel_forge/imagegen.py (the installer
+# tests check they agree). A file named SD_MODEL_FILE at any
+# other size is a partial download, never the model.
+SD_MODEL_SIZE=2134675232
 # Shared with the Design Shell: one download serves both programs.
 SD_MODEL_HOME="$HOME/design-shell-models"
 # Where the built engine is installed (root-owned). Override with
 # PIXELFORGE_SD_INSTALL_DIR to put it somewhere else.
 SD_INSTALL_DIR="${PIXELFORGE_SD_INSTALL_DIR:-/opt/sd.cpp}"
+# Where the engine source build lives (task 85) — a persistent
+# folder under the install home, not a temp dir, so a failed or
+# interrupted build resumes on the next run instead of starting
+# the ~30-minute build over. Removed after a successful install.
+# Same path the GUI installer uses (SD_BUILD_SUBDIR).
+SD_BUILD_ROOT="$PREFIX/sd-build"
 WITH_IMAGE=0
 for arg in "$@"; do
   case "$arg" in
@@ -133,6 +144,30 @@ backup_sd_cpp() {
     sudo mv "$SD_INSTALL_DIR" "${SD_INSTALL_DIR}.bak" || return 1
   fi
   return 0
+}
+
+build_jobs() {
+  # How many parallel jobs the engine source build may use (task
+  # 84): one g++ per core fills 8 GB of RAM and the machine swaps
+  # to the HDD, freezing the desktop. Under 16 GB available memory
+  # the build is capped at 2 jobs; at or above it, every core is
+  # used. Unknown memory (no /proc/meminfo, or a value that is not
+  # a number) means "use every core" — never a refusal. Mirrors
+  # imagegen.build_jobs in the GUI installer. PIXELFORGE_MEMINFO
+  # points at a fake meminfo (tests only).
+  local avail_kb jobs cpus
+  cpus="$(nproc)"
+  jobs="$cpus"
+  avail_kb="$(awk '/^MemAvailable:/ {print $2}' "${PIXELFORGE_MEMINFO:-/proc/meminfo}" 2>/dev/null || true)"
+  case "$avail_kb" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ "$avail_kb" -lt 16777216 ] && [ "$jobs" -gt 2 ]; then
+        jobs=2
+      fi
+      ;;
+  esac
+  echo "$jobs"
 }
 
 verify_install() {
@@ -267,32 +302,92 @@ if [ "$WITH_IMAGE" = "1" ]; then
     done
     echo "Building the image engine (stable-diffusion.cpp) from source..."
     echo "(one-time compile — allow up to half an hour on a small machine)"
-    TMPD="$(mktemp -d)"
-    git clone --depth 1 --branch "$SD_RELEASE" --recursive "$SD_REPO" "$TMPD/sd" \
-      || { echo "ERROR: could not check out the image engine at $SD_RELEASE." >&2
-           echo "       Check your connection and run ./install.sh --with-image-engine again." >&2
-           exit 1; }
-    cmake -S "$TMPD/sd" -B "$TMPD/sd/build" -DCMAKE_BUILD_TYPE=Release >/dev/null
-    cmake --build "$TMPD/sd/build" -j"$(nproc)" >/dev/null
+    JOBS="$(build_jobs)"
+    if [ "$JOBS" -lt "$(nproc)" ]; then
+      echo "Building with $JOBS parallel jobs (limited for low memory, so the desktop stays usable)…"
+    else
+      echo "Building with $JOBS parallel jobs…"
+    fi
+    SD_SRC="$SD_BUILD_ROOT/sd"
+    SD_BUILD_DIR="$SD_SRC/build"
+    # Resume (task 85): an earlier run may have left a checkout
+    # and a half-built build folder here. Reuse them instead of
+    # starting over — a freeze at 92% costs the remaining 8%, not
+    # the whole half hour.
+    if [ -d "$SD_SRC/.git" ]; then
+      if [ "$(git -C "$SD_SRC" describe --tags --exact-match HEAD 2>/dev/null || true)" = "$SD_RELEASE" ]; then
+        echo "Resuming from the engine checkout in $SD_SRC (already at $SD_RELEASE)…"
+      else
+        echo "Updating the engine checkout in $SD_SRC to $SD_RELEASE…"
+        if ! git -C "$SD_SRC" fetch --depth 1 origin tag "$SD_RELEASE" \
+            || ! git -C "$SD_SRC" checkout "$SD_RELEASE" \
+            || ! git -C "$SD_SRC" submodule update --init --recursive; then
+          echo "Could not update the checkout — checking it out again from scratch…"
+          rm -rf "$SD_SRC"
+          git clone --depth 1 --branch "$SD_RELEASE" --recursive "$SD_REPO" "$SD_SRC" \
+            || { echo "ERROR: could not check out the image engine at $SD_RELEASE." >&2
+                 echo "       Check your connection and run ./install.sh --with-image-engine again." >&2
+                 exit 1; }
+        fi
+      fi
+    else
+      rm -rf "$SD_SRC"
+      git clone --depth 1 --branch "$SD_RELEASE" --recursive "$SD_REPO" "$SD_SRC" \
+        || { echo "ERROR: could not check out the image engine at $SD_RELEASE." >&2
+             echo "       Check your connection and run ./install.sh --with-image-engine again." >&2
+             exit 1; }
+    fi
+    if [ -d "$SD_BUILD_DIR" ] && [ ! -f "$SD_BUILD_DIR/CMakeCache.txt" ]; then
+      echo "The engine build folder has no finished setup — clearing it and starting the build fresh…"
+      rm -rf "$SD_BUILD_DIR"
+    fi
+    if [ -f "$SD_BUILD_DIR/CMakeCache.txt" ]; then
+      echo "Resuming the engine build in $SD_BUILD_DIR…"
+      if ! cmake --build "$SD_BUILD_DIR" -j"$JOBS" >/dev/null; then
+        echo "The resumed build failed — clearing the build folder and rebuilding once from clean…"
+        rm -rf "$SD_BUILD_DIR"
+        cmake -S "$SD_SRC" -B "$SD_BUILD_DIR" -DCMAKE_BUILD_TYPE=Release >/dev/null
+        cmake --build "$SD_BUILD_DIR" -j"$JOBS" >/dev/null
+      fi
+    else
+      cmake -S "$SD_SRC" -B "$SD_BUILD_DIR" -DCMAKE_BUILD_TYPE=Release >/dev/null
+      cmake --build "$SD_BUILD_DIR" -j"$JOBS" >/dev/null
+    fi
     # The build succeeded — only now is the old engine touched, and
     # it is moved aside (backup_sd_cpp), never wiped. If the backup
-    # move fails, stop here: the old engine stays in place.
+    # move fails, stop here: the old engine stays in place. (The
+    # build folder is kept, so the next run resumes from the built
+    # engine instead of rebuilding.)
     if ! backup_sd_cpp; then
       echo "ERROR: could not back up the existing image engine at $SD_INSTALL_DIR." >&2
       echo "       The new build was not installed — the old engine is untouched." >&2
-      rm -rf "$TMPD"
       exit 1
     fi
     sudo mkdir -p "$SD_INSTALL_DIR/bin"
-    sudo cp "$TMPD/sd/build/bin/"* "$SD_INSTALL_DIR/bin/"
+    sudo cp "$SD_BUILD_DIR/bin/"* "$SD_INSTALL_DIR/bin/"
     sudo ln -sf "$SD_INSTALL_DIR/bin/sd-cli" /usr/local/bin/sd-cli
-    rm -rf "$TMPD"
+    # The engine is installed — the build files are multi-GB junk
+    # now. Remove the checkout and the object files; the installed
+    # engine stays in $SD_INSTALL_DIR.
+    rm -rf "$SD_BUILD_ROOT"
+    echo "Removed the engine build files from $SD_BUILD_ROOT (the installed engine stays in $SD_INSTALL_DIR)."
     SD_BIN="$SD_INSTALL_DIR/bin/sd-cli"
     echo "Image engine built: $SD_BIN"
   else
     echo "Image engine already installed: $SD_BIN"
   fi
-  if [ -z "$(find_sd_model)" ]; then
+  # A partial model download must not pass as the finished model:
+  # a file named SD_MODEL_FILE at the wrong size is an interrupted
+  # download, and the curl below resumes it (-C -) instead of the
+  # install calling it done. A renamed or newer .gguf keeps the
+  # old behavior — its size is unknown, so it is accepted as-is.
+  SD_MODEL_FOUND="$(find_sd_model)"
+  if [ -n "$SD_MODEL_FOUND" ] && [ "$(basename "$SD_MODEL_FOUND")" = "$SD_MODEL_FILE" ] \
+      && [ "$(stat -c%s "$SD_MODEL_FOUND" 2>/dev/null || echo 0)" != "$SD_MODEL_SIZE" ]; then
+    echo "The model download was interrupted — resuming it instead of starting over…"
+    SD_MODEL_FOUND=""
+  fi
+  if [ -z "$SD_MODEL_FOUND" ]; then
     echo "Downloading the image model ($SD_MODEL_FILE, about 2.1 GB)..."
     mkdir -p "$SD_MODEL_HOME"
     curl -fSL -C - "$SD_MODEL_URL" -o "$SD_MODEL_HOME/$SD_MODEL_FILE"
@@ -309,7 +404,7 @@ if [ "$WITH_IMAGE" = "1" ]; then
     fi
     echo "Model downloaded to $SD_MODEL_HOME/$SD_MODEL_FILE"
   else
-    echo "Image model already downloaded: $(find_sd_model)"
+    echo "Image model already downloaded: $SD_MODEL_FOUND"
   fi
 fi
 
