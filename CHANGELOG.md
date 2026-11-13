@@ -1,5 +1,65 @@
 # Pixel Forge changelog
 
+## 0.30 — 2026-11-13
+
+The B15 minor group — task-list item #19, eleven small fixes in
+one release:
+
+- The negative-prompt field is scrolled to the start
+  (`setCursorPosition(0)` after the default text): it used to
+  show the tail of "blurry, deformed, distorted, low quality,
+  watermark", reading as a typo ("eformed, distorted…"). The
+  prompt field itself has no pre-filled text (a placeholder
+  instead), so it is the only field that needs it.
+- The Code tab info label showed the color count twice for
+  palette assets ("3 colors" in the header and again as the
+  detail line). The duplicate line is dropped; every other
+  detail ("int rows, …") stays.
+- Exporting frames into a folder that already holds
+  frame_001.png etc. asks first (Yes/No, default No) instead
+  of overwriting silently; declining leaves the files
+  untouched. The CLI `frames` command keeps its current
+  behavior — no prompt on the command line.
+- Drag-and-drop: drag-enter rejects files Pixel Forge cannot
+  import (a .zip no longer gets a drop cursor and then a
+  warning box), and a multi-file drop imports every supported
+  file instead of only the first — code files all go to the
+  Code tab; the Image and Video tabs take the first of their
+  kind and report the rest. Nothing is silently ignored: the
+  status bar says what was imported and what was skipped.
+- `find_model` picks up ANY .gguf in a model home, so a wrong
+  model was used without a word. The Prompt status line now
+  names the model file in use and flags it when it is not the
+  pinned LCM file ("Model: found at … — not the pinned LCM
+  file"), and the CLI `prompt` command prints the model it
+  uses on stderr before generating. A renamed or newer LCM
+  build still works — this is visibility, not a refusal.
+- The installer log view is capped at 5000 lines
+  (`setMaximumBlockCount`): a 30-minute cmake build used to
+  append tens of thousands of lines, slowing the window and
+  growing memory.
+- Engine discovery agrees across languages: imagegen.py
+  checked `~/sd.cpp/build/sd-cli`, a path the build never
+  produces — it now checks `~/sd.cpp/build/bin/sd-cli`, the
+  path install.sh already used and the real binary's home.
+  The other lookup steps are unchanged.
+- install.sh checks pip as well as venv, with the same plain
+  failure message style.
+- `have_pyside6` (the GUI installer launcher) catches OSError
+  as well as ImportError, so a PySide6 whose shared library
+  cannot be loaded reads as "not usable" instead of crashing
+  the check.
+- The launcher's pip fallback path runs `apt-get update`
+  before installing python3-pip: on a stale cache the install
+  could fail for a package that is right there.
+- When pkexec is missing, the installer used to fail step by
+  step. It now checks up front, before the first step that
+  needs it: one plain message names pkexec and the fix, and
+  when the system step needs admin (venv/pip missing) the
+  install fails fast instead of running steps that cannot
+  work. Optional steps still warn as designed, without
+  repeating the pkexec message after each one.
+
 ## 0.29 — 2026-11-13
 
 `median_cut` now validates `max_colors` before the empty-list early

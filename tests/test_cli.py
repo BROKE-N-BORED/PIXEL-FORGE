@@ -197,6 +197,21 @@ class CliTests(unittest.TestCase):
         finally:
             os.chdir(cwd)
 
+    def test_prompt_names_the_model_on_stderr(self):
+        # B15: find_model picks up ANY .gguf, so a wrong model was
+        # used without a word. The CLI names the model it uses on
+        # stderr before generating — and flags it when it is not
+        # the pinned LCM file (the stub model here is dummy.gguf).
+        out_dir = os.path.join(self.tmp, "model-named-out")
+        with stub_env(self.stub, self.model):
+            code, _out, err = self._run(
+                ["prompt", "a knight", "--out", out_dir,
+                 "--size", "32", "--colors", "16"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("using model:", err)
+        self.assertIn("dummy.gguf", err)
+        self.assertIn("not the pinned LCM file", err)
+
     def test_prompt_missing_engine_fails_cleanly(self):
         from unittest import mock
         from pixel_forge import imagegen as imagegen_mod

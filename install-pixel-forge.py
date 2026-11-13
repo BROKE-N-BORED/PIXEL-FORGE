@@ -25,7 +25,11 @@ def have_pyside6():
     try:
         import PySide6  # noqa: F401
         return True
-    except ImportError:
+    except (ImportError, OSError):
+        # ImportError: not installed, or a native library it needs
+        # is missing. OSError: a shared library exists but cannot
+        # be loaded (bad file, wrong architecture). Either way the
+        # answer is the same — PySide6 is not usable (review B15).
         return False
 
 
@@ -83,6 +87,10 @@ def _install_pyside6_pip():
         if shutil.which("pkexec"):
             _run_quiet(["pkexec", "bash", "-c",
                         "export DEBIAN_FRONTEND=noninteractive; "
+                        # Update first: on a stale cache the
+                        # install below can fail for a package
+                        # that is right there (review B15).
+                        "apt-get update && "
                         "apt-get install -y python3-pip"],
                        timeout=600)
     ok = _run_quiet([sys.executable, "-m", "pip", "install", "--user",

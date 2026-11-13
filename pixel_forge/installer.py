@@ -56,6 +56,10 @@ class InstallContext:
         self._log = log
         self.dryrun = dryrun
         self.cancelled = False
+        # Set by the worker's up-front pkexec check: when it has
+        # already said pkexec is missing, run_admin stays quiet
+        # instead of repeating the message after every step.
+        self.pkexec_warned = False
         # Nothing selected by default, ever: ffmpeg is an optional
         # install (needs sudo + a download), so a bare context does
         # not install it — the window passes the checkbox state in.
@@ -118,7 +122,13 @@ class InstallContext:
         if self.dryrun:
             return 0
         if not shutil.which("pkexec"):
-            self.log("  !! pkexec not found — cannot run admin steps")
+            # Said once, not once per step: the worker's up-front
+            # check covers this when it knew an admin step was
+            # coming (review B15).
+            if not self.pkexec_warned:
+                self.log("  !! pkexec not found — cannot run admin "
+                         "steps")
+                self.pkexec_warned = True
             return 127
         return self.run(["pkexec", "bash", "-c", script],
                         timeout=timeout)
@@ -587,6 +597,29 @@ STEPS = [
 ]
 
 
+def _admin_needed_steps(ctx):
+    """Step keys that will need pkexec, in step order. Mirrors
+    the steps' own conditions: system when venv or pip is
+    missing, ffmpeg when requested and missing, image-engine
+    when requested and (build tools missing or the engine
+    itself missing — the built engine installs to /opt)."""
+    from .imagegen import find_engine
+
+    needed = []
+    venv_rc, _ = ctx.run_output([sys.executable, "-m", "venv", "--help"])
+    pip_rc, _ = ctx.run_output([sys.executable, "-m", "pip", "--version"])
+    if venv_rc != 0 or pip_rc != 0:
+        needed.append("system")
+    if getattr(ctx, "install_ffmpeg", False) and not ctx.which("ffmpeg"):
+        needed.append("ffmpeg")
+    if getattr(ctx, "install_image_engine", False):
+        tools_missing = any(not ctx.which(t)
+                            for t in ("git", "cmake", "g++"))
+        if tools_missing or find_engine() is None:
+            needed.append("image-engine")
+    return needed
+
+
 # ---------------------------------------------------------------- worker
 
 class InstallWorker(QThread):
@@ -615,6 +648,41 @@ class InstallWorker(QThread):
         results = []
         total = len(STEPS)
         packages_failed = False
+        # pkexec up front (review B15): when the steps that need
+        # your password cannot run, say so once before any step
+        # fails — not once per step, after each one has already
+        # failed. When the system step needs admin, the install
+        # cannot continue without venv/pip, so it fails fast
+        # here; when only optional steps need it, the loop below
+        # runs and they warn as designed, with run_admin staying
+        # quiet about pkexec (ctx.pkexec_warned).
+        if not ctx.dryrun:
+            admin_steps = _admin_needed_steps(ctx)
+            if admin_steps and not shutil.which("pkexec"):
+                ctx.log("pkexec is not installed, so the steps "
+                        "that need your password cannot run (%s). "
+                        "Install it with sudo apt install pkexec, "
+                        "or install the missing pieces by hand, "
+                        "then press Install again."
+                        % ", ".join(admin_steps))
+                ctx.pkexec_warned = True
+                if "system" in admin_steps:
+                    for index, (key, _title, _func) in enumerate(
+                            STEPS):
+                        if key == "system":
+                            result = StepResult(
+                                StepResult.FAIL,
+                                "pkexec missing — python3-venv or "
+                                "pip cannot be installed")
+                        else:
+                            result = StepResult(
+                                StepResult.SKIPPED, "pkexec missing")
+                        results.append(result)
+                        self.step_status.emit(index, result.status)
+                        self.progress.emit(
+                            int((index + 1) * 100 / total))
+                    self.finished.emit(results)
+                    return
         for index, (key, title, func) in enumerate(STEPS):
             if ctx.cancelled:
                 ctx.log("Cancelled — stopping after %d of %d steps"
@@ -737,6 +805,11 @@ class InstallerWindow(QMainWindow):
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
+        # Cap the log: a 30-minute cmake build appends tens of
+        # thousands of lines, slowing the window and growing
+        # memory (review B15). 5000 lines keeps the recent
+        # history readable; older lines scroll off the top.
+        self.log_view.setMaximumBlockCount(5000)
         layout.addWidget(self.log_view, 1)
 
         row = QHBoxLayout()

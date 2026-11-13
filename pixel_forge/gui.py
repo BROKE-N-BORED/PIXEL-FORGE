@@ -51,7 +51,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
 
 from .codeinput import CODE_EXTENSIONS, parse_paths
 from .imagegen import (DEFAULT_COUNT, DEFAULT_NEGATIVE,
-                       GenerationCancelled, engine_status, generate,
+                       GenerationCancelled, MODEL_FILENAME,
+                       engine_status, generate,
                        load_batch, new_batch, require_engine,
                        require_model, set_keeper, validate_prompt)
 from .library import Library
@@ -103,6 +104,20 @@ QListWidget::item:selected { background-color: #3a3a42; }
 QSplitter::handle { background-color: #3a3a42; }
 QStatusBar { background-color: #1a1a1f; color: #b8b5b0; }
 """
+
+
+_IMAGE_EXTENSIONS = None
+
+
+def image_extensions():
+    """Extensions QImage can read, as lowercase .ext strings —
+    the same set supported_filter() offers, for drag-and-drop."""
+    global _IMAGE_EXTENSIONS
+    if _IMAGE_EXTENSIONS is None:
+        _IMAGE_EXTENSIONS = {
+            ".%s" % fmt.data().decode("ascii").lower()
+            for fmt in QImageReader.supportedImageFormats()}
+    return _IMAGE_EXTENSIONS
 
 
 def supported_filter():
@@ -535,6 +550,9 @@ class MainWindow(QMainWindow):
         # slider runs once, with the settled settings.
         self.video_worker = None
         self._video_orphans = set()
+        # A multi-file drop's summary, kept so the video run's
+        # completion message does not erase it (review B15).
+        self._drop_summary = None
         self._video_pending_reload = False
         self._video_debounce_timer = QTimer(self)
         self._video_debounce_timer.setSingleShot(True)
@@ -822,24 +840,89 @@ class MainWindow(QMainWindow):
         if path:
             self.load_image(path)
 
+    def _classify_drop(self, path):
+        """'video', 'code', 'image', or None for a dropped path."""
+        suffix = Path(path).suffix.lower()
+        if suffix in VIDEO_EXTENSIONS:
+            return "video"
+        if suffix in CODE_EXTENSIONS:
+            return "code"
+        if suffix in image_extensions():
+            return "image"
+        return None
+
     def dragEnterEvent(self, event):
         urls = event.mimeData().urls()
-        if urls and urls[0].isLocalFile():
+        paths = [u.toLocalFile() for u in urls if u.isLocalFile()]
+        # Accept only when at least one file is something Pixel
+        # Forge can import — a .zip used to be accepted and then
+        # warned about after the drop (review B15). No supported
+        # file, no drop cursor, no warning box.
+        if paths and any(self._classify_drop(p) for p in paths):
             event.acceptProposedAction()
 
     def dropEvent(self, event):
         urls = event.mimeData().urls()
-        if urls and urls[0].isLocalFile():
-            path = urls[0].toLocalFile()
-            if Path(path).suffix.lower() in VIDEO_EXTENSIONS:
-                self.tabs.setCurrentIndex(1)
-                self.load_video(path)
-            elif Path(path).suffix.lower() in CODE_EXTENSIONS:
-                self.tabs.setCurrentIndex(3)
-                self.load_code(path)
-            else:
-                self.tabs.setCurrentIndex(0)
-                self.load_image(path)
+        paths = [u.toLocalFile() for u in urls if u.isLocalFile()]
+        if not paths:
+            return
+        event.acceptProposedAction()
+        videos = [p for p in paths
+                  if self._classify_drop(p) == "video"]
+        code = [p for p in paths
+                if self._classify_drop(p) == "code"]
+        images = [p for p in paths
+                  if self._classify_drop(p) == "image"]
+        unsupported = [p for p in paths
+                       if self._classify_drop(p) is None]
+        # A multi-file drop used to import only the first file and
+        # silently ignore the rest (review B15). Every supported
+        # file is imported now — code files all go to the Code
+        # tab; the Image and Video tabs hold one thing at a time,
+        # so they take the first and the rest are reported, not
+        # dropped quietly. The last tab switched to stays visible.
+        imported = []
+        skipped = []
+        video_started = False
+        if images:
+            self.tabs.setCurrentIndex(0)
+            if self.load_image(images[0]):
+                imported.append("%s (image)" % Path(images[0]).name)
+            for extra in images[1:]:
+                skipped.append("%s (only the first image was loaded)"
+                               % Path(extra).name)
+        if videos:
+            self.tabs.setCurrentIndex(1)
+            if self.load_video(videos[0]):
+                imported.append("%s (video)" % Path(videos[0]).name)
+                video_started = True
+            for extra in videos[1:]:
+                skipped.append("%s (only the first video was loaded)"
+                               % Path(extra).name)
+        if code:
+            self.tabs.setCurrentIndex(3)
+            if self.load_code(code):
+                imported.append("%d code file(s)" % len(code))
+        for path in unsupported:
+            skipped.append("%s (unsupported file)" % Path(path).name)
+        if not imported:
+            # Nothing landed. A failed load already showed its own
+            # warning; only the unsupported files need one here.
+            if skipped:
+                QMessageBox.warning(
+                    self, "Pixel Forge",
+                    "nothing to import: %s" % "; ".join(skipped))
+            return
+        message = "Imported " + "; ".join(imported)
+        if skipped:
+            message += " — skipped: " + "; ".join(skipped)
+        self.statusBar().showMessage(message)
+        if video_started:
+            # The dropped video lands on a worker thread, and its
+            # completion message overwrites this summary after
+            # this method returns — keep it so the completion
+            # handler can put it back (review B15).
+            self._drop_summary = message
 
     # -------------------------------------------------------- controls
 
@@ -1391,6 +1474,23 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage(
                 "Pixelized %d frames" % len(result["frames"]))
+        self._show_drop_summary()
+
+    def _show_drop_summary(self):
+        """Put a multi-file drop's summary back after a video
+        run's own message overwrote it (review B15). A dropped
+        video lands asynchronously; without this, the report of
+        what the drop did to each file would be lost the moment
+        the frames arrived."""
+        if self._drop_summary is None:
+            return
+        current = self.statusBar().currentMessage()
+        if current:
+            self.statusBar().showMessage(
+                "%s — %s" % (current, self._drop_summary))
+        else:
+            self.statusBar().showMessage(self._drop_summary)
+        self._drop_summary = None
 
     def _on_video_run_failed(self, message):
         worker = self.sender()
@@ -1403,10 +1503,14 @@ class MainWindow(QMainWindow):
             # Same as the old synchronous path: a pixelize
             # failure is a status message, old frames stay.
             self.statusBar().showMessage(message)
+            self._show_drop_summary()
             return
         # A failed re-extract shows the dialog, exactly as the
         # old synchronous _reload_video_frames did; the old
-        # frames stay in place.
+        # frames stay in place. The dialog leaves the status bar
+        # alone, so a drop summary is still showing — drop the
+        # flag without re-showing it.
+        self._drop_summary = None
         QMessageBox.warning(self, "Pixel Forge", message)
         if settings.get("fresh"):
             self.video_path = None
@@ -1626,6 +1730,11 @@ class MainWindow(QMainWindow):
             "Exported %d frames to %s" % (len(kept), out.name))
         return True
 
+    def _frames_export_targets(self, directory):
+        """The frame_001.png, ... paths export_frames would write."""
+        return [Path(directory) / ("frame_%03d.png" % number)
+                for number in range(1, len(self._kept_indices()) + 1)]
+
     def _on_export_frames(self):
         if not self._kept_indices():
             return
@@ -1635,8 +1744,28 @@ class MainWindow(QMainWindow):
             start_dir = str(src.parent)
         directory = QFileDialog.getExistingDirectory(
             self, "Export frames to folder", start_dir)
-        if directory:
-            self.export_frames(directory)
+        if not directory:
+            return
+        existing = [p for p in self._frames_export_targets(directory)
+                    if p.exists()]
+        if existing:
+            # Never silently overwrite: a folder that already holds
+            # frame_001.png etc. asks first (review B15).
+            # Default No — declining leaves the files untouched.
+            names = ", ".join(p.name for p in existing[:3])
+            if len(existing) > 3:
+                names += ", …"
+            answer = QMessageBox.question(
+                self, "Pixel Forge",
+                "%d frame file(s) already exist in %s (%s). "
+                "Overwrite them?"
+                % (len(existing), Path(directory).name, names),
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.export_frames(directory)
 
     # ---------------------------------------------------- spritesheet
 
@@ -1737,6 +1866,12 @@ class MainWindow(QMainWindow):
         form.addWidget(QLabel("Negative prompt"))
         self.prompt_negative_edit = QLineEdit()
         self.prompt_negative_edit.setText(DEFAULT_NEGATIVE)
+        # Show the START of the default: a QLineEdit scrolls a long
+        # setText to the end, so the field used to read "eformed,
+        # distorted…" — like a typo (review B15). The prompt field
+        # above has no pre-filled text (a placeholder instead), so
+        # this is the only field that needs it.
+        self.prompt_negative_edit.setCursorPosition(0)
         self.prompt_negative_edit.setToolTip(
             "Things the picture should avoid")
         form.addWidget(self.prompt_negative_edit)
@@ -1926,7 +2061,17 @@ class MainWindow(QMainWindow):
                            "engine in the installer, or run "
                            "./install.sh --with-image-engine")
         if status["model"] is not None:
-            model_line = "Model: found at %s" % status["model"]
+            model = status["model"]
+            if model.name == MODEL_FILENAME:
+                model_line = "Model: found at %s" % model
+            else:
+                # find_model picks up ANY .gguf in a model home —
+                # a renamed or newer LCM build still works, but a
+                # wrong model used to be used without a word
+                # (review B15). Name the file and flag it when it
+                # is not the pinned one.
+                model_line = ("Model: found at %s — not the pinned "
+                              "LCM file (%s)" % (model, MODEL_FILENAME))
         else:
             # Both model homes, shared home first: find_model checks
             # ~/design-shell-models/ first, so a user following a
@@ -2649,13 +2794,21 @@ class MainWindow(QMainWindow):
         self.code_image = asset["image"]
         self._refresh_code_pixmap()
         colors = asset["colors"]
-        self.code_info_label.setText(
-            "%s — %s, %d x %d, %d color%s\n%s\n%s"
-            % (asset["name"], asset["kind"],
-               asset["width"], asset["height"], colors,
-               "" if colors == 1 else "s",
-               asset["detail"],
-               Path(asset["source_file"]).name))
+        count_text = "%d color%s" % (colors,
+                                     "" if colors == 1 else "s")
+        # A palette asset's detail IS the color count ("3 colors")
+        # — showing it under a header that already says "3 colors"
+        # reads as a stutter (review B15). Drop the duplicate line;
+        # every other detail ("int rows, …") stays.
+        detail = asset["detail"]
+        lines = ["%s — %s, %d x %d, %s"
+                 % (asset["name"], asset["kind"],
+                    asset["width"], asset["height"], count_text)]
+        if detail and detail != count_text \
+                and detail != "%d colors" % colors:
+            lines.append(detail)
+        lines.append(Path(asset["source_file"]).name)
+        self.code_info_label.setText("\n".join(lines))
         self._fit_code_info_label()
         self.code_export_btn.setEnabled(True)
         self.code_save_library_btn.setEnabled(True)

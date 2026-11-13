@@ -50,6 +50,12 @@ if ! python3 -m venv --help >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! python3 -m pip --help >/dev/null 2>&1; then
+  echo "python3-pip is missing. Run this once, then re-run the installer:"
+  echo "  sudo apt install python3-pip"
+  exit 1
+fi
+
 # ffmpeg (optional — only needed for video import; image import
 # works without it). Warn-never-refuse: a failed install just means
 # video import stays unavailable until ffmpeg is installed.

@@ -90,7 +90,11 @@ def find_engine() -> Path | None:
     for candidate in (Path("/opt/sd.cpp/bin/sd-cli"),
                       Path("/opt/sd.cpp/sd-cli"),
                       home / ".local" / "bin" / "sd-cli",
-                      home / "sd.cpp" / "build" / "sd-cli"):
+                      # The sd.cpp build puts sd-cli in build/bin —
+                      # install.sh already checks that path, and
+                      # this used to check build/sd-cli, which the
+                      # build never produces (review B15).
+                      home / "sd.cpp" / "build" / "bin" / "sd-cli"):
         if _is_executable(candidate):
             return candidate
     return None
@@ -131,7 +135,7 @@ def engine_status() -> dict:
         "PIXELFORGE_SD_CLI", "PATH (sd-cli, sd)",
         "/opt/sd.cpp/bin/sd-cli", "/opt/sd.cpp/sd-cli",
         str(home / ".local" / "bin" / "sd-cli"),
-        str(home / "sd.cpp" / "build" / "sd-cli"),
+        str(home / "sd.cpp" / "build" / "bin" / "sd-cli"),
     ]
     model_checked = ["PIXELFORGE_SD_MODEL"] + [
         str(h / MODEL_FILENAME) for h in model_homes()]

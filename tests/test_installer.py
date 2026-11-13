@@ -76,6 +76,16 @@ class InstallerTests(unittest.TestCase):
             self.assertNotIn("&", btn.text())
         win.close()
 
+    def test_log_view_is_capped(self):
+        # B15: the log view was unbounded — a 30-minute cmake
+        # build appends tens of thousands of lines, slowing the
+        # window and growing memory.
+        from pixel_forge.installer import InstallerWindow
+
+        win = InstallerWindow(dryrun=True)
+        self.assertEqual(win.log_view.maximumBlockCount(), 5000)
+        win.close()
+
     def test_worker_dry_run_completes(self):
         from PySide6.QtCore import QEventLoop, QTimer
         from pixel_forge.installer import InstallWorker, STEPS, StepResult
@@ -689,6 +699,139 @@ class InstallerGatingTests(unittest.TestCase):
         self.assertFalse(gui_link.exists())
         win.close()
 
+    def _stub_ctx(self, venv_rc=0, pip_rc=0, which=None,
+                  install_ffmpeg=False, install_image_engine=False):
+        """A minimal InstallContext-shaped stub for
+        _admin_needed_steps: run_output answers the venv/pip
+        checks, which answers tool lookups."""
+        class StubCtx:
+            def __init__(self):
+                self.install_ffmpeg = install_ffmpeg
+                self.install_image_engine = install_image_engine
+                self._which = which or {}
+
+            def run_output(self, cmd, timeout=60):
+                if "-m" in cmd and "venv" in cmd:
+                    return venv_rc, ""
+                if "-m" in cmd and "pip" in cmd:
+                    return pip_rc, ""
+                return 0, ""
+
+            def which(self, name):
+                return self._which.get(name)
+
+        return StubCtx()
+
+    def test_admin_needed_steps(self):
+        # B15: the up-front pkexec check mirrors the steps' own
+        # conditions — system when venv or pip is missing, ffmpeg
+        # when requested and missing, image-engine when requested
+        # and (build tools missing or the engine missing).
+        from pixel_forge import imagegen as imagegen_mod
+        from pixel_forge.installer import _admin_needed_steps
+
+        self.assertEqual(_admin_needed_steps(self._stub_ctx()), [])
+        self.assertEqual(
+            _admin_needed_steps(self._stub_ctx(pip_rc=1)),
+            ["system"])
+        self.assertEqual(
+            _admin_needed_steps(self._stub_ctx(venv_rc=1)),
+            ["system"])
+        self.assertEqual(
+            _admin_needed_steps(self._stub_ctx(
+                install_ffmpeg=True, which={})),
+            ["ffmpeg"])
+        self.assertEqual(
+            _admin_needed_steps(self._stub_ctx(
+                install_ffmpeg=True,
+                which={"ffmpeg": "/usr/bin/ffmpeg"})),
+            [])
+        with mock.patch.object(imagegen_mod, "find_engine",
+                               return_value=None):
+            self.assertEqual(
+                _admin_needed_steps(self._stub_ctx(
+                    install_image_engine=True,
+                    which={"git": "g", "cmake": "c", "g++": "x"})),
+                ["image-engine"])
+            self.assertEqual(
+                _admin_needed_steps(self._stub_ctx(
+                    install_image_engine=True, which={})),
+                ["image-engine"])
+        with mock.patch.object(imagegen_mod, "find_engine",
+                               return_value=Path("/opt/sd.cpp/bin/"
+                                                 "sd-cli")):
+            self.assertEqual(
+                _admin_needed_steps(self._stub_ctx(
+                    install_image_engine=True,
+                    which={"git": "g", "cmake": "c", "g++": "x"})),
+                [])
+
+    def test_worker_fails_fast_when_pkexec_missing(self):
+        # B15: pkexec missing used to fail step by step. With the
+        # system step needing admin, the worker says so once and
+        # stops — no step runs.
+        import pixel_forge.installer as installer_mod
+        from pixel_forge.installer import (
+            InstallContext, STEPS, StepResult)
+
+        calls = []
+        steps = self._fake_steps(StepResult.DONE, calls)
+        real_which = shutil.which
+
+        def _no_pkexec(name):
+            if name == "pkexec":
+                return None
+            return real_which(name)
+
+        def _no_venv_or_pip(self, cmd, timeout=60):
+            return 1, ""
+
+        with mock.patch.object(installer_mod.shutil, "which",
+                               side_effect=_no_pkexec), \
+                mock.patch.object(InstallContext, "run_output",
+                                  _no_venv_or_pip):
+            results, lines = self._run_worker(steps)
+        log = "\n".join(lines)
+        self.assertEqual(log.count("pkexec is not installed"), 1,
+                         "the pkexec message must appear once: %r"
+                         % log)
+        self.assertEqual(calls, [], "a step ran after the fail-fast")
+        self.assertEqual(len(results), len(STEPS))
+        self.assertEqual(results[0].status, StepResult.FAIL)
+        self.assertIn("pkexec", results[0].detail)
+        for result in results[1:]:
+            self.assertEqual(result.status, StepResult.SKIPPED)
+
+    def test_run_admin_stays_quiet_after_upfront_warning(self):
+        # B15: once the worker's up-front check has said pkexec
+        # is missing, run_admin does not repeat it after every
+        # step — and without the up-front check it still says so
+        # exactly once.
+        import pixel_forge.installer as installer_mod
+        from pixel_forge.installer import InstallContext
+
+        real_which = shutil.which
+
+        def _no_pkexec(name):
+            if name == "pkexec":
+                return None
+            return real_which(name)
+
+        with mock.patch.object(installer_mod.shutil, "which",
+                               side_effect=_no_pkexec):
+            lines = []
+            ctx = InstallContext(lines.append, dryrun=False)
+            ctx.pkexec_warned = True
+            self.assertEqual(ctx.run_admin("true"), 127)
+            self.assertNotIn("pkexec", "\n".join(lines),
+                             "run_admin repeated the pkexec line")
+            lines2 = []
+            ctx2 = InstallContext(lines2.append, dryrun=False)
+            self.assertEqual(ctx2.run_admin("true"), 127)
+            self.assertEqual(ctx2.run_admin("true"), 127)
+            joined = "\n".join(lines2)
+            self.assertEqual(joined.count("pkexec not found"), 1)
+
 
 @unittest.skipUnless(HAS_QT, "PySide6 not available")
 class InstallerDefaultsTests(unittest.TestCase):
@@ -870,6 +1013,36 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("Skipped ffmpeg", proc.stdout)
         self.assertNotIn("SUDO-CALLED", proc.stdout)
 
+    def _pip_check_block(self):
+        """The exact pip-availability lines from install.sh,
+        verbatim — from the `if` through its closing `fi`."""
+        text = _install_sh_text()
+        start = text.index("if ! python3 -m pip --help")
+        end = text.index("\nfi", start) + len("\nfi")
+        return text[start:end]
+
+    def _run_pip_block(self, pip_ok):
+        # A stubbed `python3`: -m pip fails when pip_ok is False.
+        stub = ("python3() { case \"$*\" in *\"-m pip\"*) "
+                "return %d;; *) return 0;; esac; }\n"
+                % (0 if pip_ok else 1))
+        return subprocess.run(["bash", "-c",
+                               stub + self._pip_check_block()],
+                              capture_output=True, text=True,
+                              timeout=30)
+
+    def test_pip_check_fails_plainly_when_pip_missing(self):
+        # B15: install.sh checked venv but not pip.
+        proc = self._run_pip_block(pip_ok=False)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("python3-pip is missing", proc.stdout)
+        self.assertIn("sudo apt install python3-pip", proc.stdout)
+
+    def test_pip_check_passes_when_pip_present(self):
+        proc = self._run_pip_block(pip_ok=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "")
+
 
 def _install_sh_text():
     path = os.path.join(ROOT, "install.sh")
@@ -980,6 +1153,94 @@ class InstallScriptPinTests(unittest.TestCase):
         self.assertTrue(os.path.exists(path))
         with open(path) as fh:
             self.assertEqual(fh.read(), content)
+
+
+def _load_launcher():
+    """install-pixel-forge.py as a module — it lives at the tree
+    root, not in the package."""
+    import importlib.util
+
+    path = os.path.join(ROOT, "install-pixel-forge.py")
+    spec = importlib.util.spec_from_file_location(
+        "install_pixel_forge", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 not available")
+class LauncherTests(unittest.TestCase):
+    """install-pixel-forge.py (the GUI installer launcher):
+    have_pyside6's exception set and the pip path's apt update."""
+
+    def test_have_pyside6_true_when_importable(self):
+        launcher = _load_launcher()
+        self.assertTrue(launcher.have_pyside6())
+
+    def test_have_pyside6_false_when_import_raises_oserror(self):
+        # B15: have_pyside6 caught ImportError only — a PySide6
+        # whose shared library cannot be loaded escaped the
+        # check instead of reading as "not usable".
+        import builtins
+
+        launcher = _load_launcher()
+        real_import = builtins.__import__
+
+        def _raising_import(name, *args, **kwargs):
+            if name == "PySide6":
+                raise OSError("cannot load shared library")
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch.object(builtins, "__import__",
+                               side_effect=_raising_import):
+            self.assertFalse(launcher.have_pyside6())
+
+    def test_have_pyside6_false_when_import_raises_importerror(self):
+        import builtins
+
+        launcher = _load_launcher()
+        real_import = builtins.__import__
+
+        def _raising_import(name, *args, **kwargs):
+            if name == "PySide6":
+                raise ImportError("No module named 'PySide6'")
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch.object(builtins, "__import__",
+                               side_effect=_raising_import):
+            self.assertFalse(launcher.have_pyside6())
+
+    def test_pip_path_updates_before_installing_python3_pip(self):
+        # B15: the pip fallback ran `apt-get install -y
+        # python3-pip` with no `apt-get update` first, so it
+        # could fail on a stale cache.
+        launcher = _load_launcher()
+        calls = []
+        real_which = shutil.which
+
+        def _fake_run(cmd, timeout=900):
+            calls.append(cmd)
+            if cmd[:4] == [sys.executable, "-m", "pip", "--version"]:
+                return False  # no pip at all — take the apt path
+            return True
+
+        def _with_pkexec(name):
+            if name == "pkexec":
+                return "/usr/bin/pkexec"
+            return real_which(name)
+
+        with mock.patch.object(launcher, "_run_quiet",
+                               side_effect=_fake_run), \
+                mock.patch.object(launcher.shutil, "which",
+                                  side_effect=_with_pkexec):
+            self.assertTrue(launcher._install_pyside6_pip())
+        apt_cmds = [c for c in calls if c and c[0] == "pkexec"]
+        self.assertEqual(len(apt_cmds), 1)
+        script = apt_cmds[0][-1]
+        self.assertIn("apt-get install -y python3-pip", script)
+        self.assertLess(script.index("apt-get update"),
+                        script.index("apt-get install -y python3-pip"),
+                        "update must run before the install")
 
 
 if __name__ == "__main__":

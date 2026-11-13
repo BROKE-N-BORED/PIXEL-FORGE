@@ -2278,5 +2278,218 @@ class CodeTabTests(unittest.TestCase):
         self.assertGreater(label.height(), 10)
 
 
+class B15MinorGroupTests(unittest.TestCase):
+    """Task 19 (B15 minor group): the GUI items — negative-prompt
+    scroll, Code info duplication, frame-export overwrite confirm,
+    drag-and-drop, and the non-pinned-model flag."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        cls.image = write_image(make_solid_image(64, 64, 10, 200, 30),
+                                os.path.join(cls.tmp, "sprite.png"))
+        cls.clip = os.path.join(cls.tmp, "clip.mp4")
+        make_test_video(cls.clip)
+        cls.game = os.path.join(cls.tmp, "game.py")
+        with open(cls.game, "w") as handle:
+            handle.write('PALETTE = ["#ff0000", "#00ff00"]\n'
+                         "HERO = [[0, 1], [1, 0]]\n")
+        cls.gem = os.path.join(cls.tmp, "gem.py")
+        with open(cls.gem, "w") as handle:
+            handle.write("GEM = [[1, 2], [2, 1]]\n")
+        cls.zip = os.path.join(cls.tmp, "archive.zip")
+        with open(cls.zip, "wb") as handle:
+            handle.write(b"PK\x03\x04not a real zip")
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.win = MainWindow()
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _wait_for_video(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.video_worker is None
+                    and not self.win._video_debounce_timer.isActive()):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _drag_enter(self, paths):
+        from PySide6.QtCore import QMimeData, QPoint, Qt, QUrl
+        from PySide6.QtGui import QDragEnterEvent
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
+        event = QDragEnterEvent(
+            QPoint(10, 10), Qt.DropAction.CopyAction, mime,
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+        self.win.dragEnterEvent(event)
+        return event.isAccepted()
+
+    def _drop(self, paths):
+        from PySide6.QtCore import QMimeData, QPoint, Qt, QUrl
+        from PySide6.QtGui import QDropEvent
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
+        event = QDropEvent(
+            QPoint(10, 10), Qt.DropAction.CopyAction, mime,
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+        self.win.dropEvent(event)
+
+    def test_negative_prompt_shows_the_start(self):
+        # B15: the pre-filled default used to show scrolled to the
+        # end ("eformed, distorted…"), reading as a typo.
+        from pixel_forge.imagegen import DEFAULT_NEGATIVE
+        edit = self.win.prompt_negative_edit
+        self.assertEqual(edit.text(), DEFAULT_NEGATIVE)
+        self.assertEqual(edit.cursorPosition(), 0)
+        # The prompt field itself has no pre-filled text — a
+        # placeholder instead — so it needs no such fix.
+        self.assertEqual(self.win.prompt_edit.text(), "")
+        self.assertTrue(self.win.prompt_edit.placeholderText())
+
+    def test_palette_info_shows_color_count_once(self):
+        # B15: the info label showed "2 colors" twice for palette
+        # assets — once in the header, once as the detail line.
+        self.assertTrue(self.win.load_code(self.game))
+        # PALETTE is first in file order, so it is selected.
+        text = self.win.code_info_label.text()
+        self.assertIn("PALETTE", text)
+        self.assertEqual(text.count("2 colors"), 1,
+                         "color count duplicated: %r" % text)
+        # A map asset keeps its (non-duplicating) detail line.
+        item = self.win.code_list.item(1)  # HERO
+        self.win.code_list.setCurrentItem(item)
+        self.win._on_code_item_clicked(item)
+        self.assertIn("int rows",
+                      self.win.code_info_label.text())
+
+    def test_export_frames_asks_before_overwriting(self):
+        # B15: exporting into a folder that already holds
+        # frame_001.png used to overwrite silently.
+        from unittest import mock
+        from PySide6.QtWidgets import QMessageBox
+        from pixel_forge import gui as gui_mod
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        out_dir = os.path.join(self.tmp, "overwrite")
+        os.mkdir(out_dir)
+        sentinel = os.path.join(out_dir, "frame_001.png")
+        with open(sentinel, "wb") as handle:
+            handle.write(b"do not touch")
+        with mock.patch.object(
+                QFileDialog, "getExistingDirectory",
+                return_value=out_dir), \
+                mock.patch.object(
+                    gui_mod.QMessageBox, "question",
+                    return_value=QMessageBox.StandardButton.No) \
+                as ask:
+            self.win._on_export_frames()
+        ask.assert_called_once()
+        with open(sentinel, "rb") as handle:
+            self.assertEqual(handle.read(), b"do not touch",
+                             "declining still overwrote the file")
+        with mock.patch.object(
+                QFileDialog, "getExistingDirectory",
+                return_value=out_dir), \
+                mock.patch.object(
+                    gui_mod.QMessageBox, "question",
+                    return_value=QMessageBox.StandardButton.Yes):
+            self.win._on_export_frames()
+        with open(sentinel, "rb") as handle:
+            self.assertTrue(handle.read().startswith(b"\x89PNG"),
+                            "accepting did not overwrite with a PNG")
+
+    def test_export_frames_without_existing_files_does_not_ask(self):
+        from unittest import mock
+        from pixel_forge import gui as gui_mod
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        out_dir = os.path.join(self.tmp, "fresh-export")
+        with mock.patch.object(
+                QFileDialog, "getExistingDirectory",
+                return_value=out_dir), \
+                mock.patch.object(
+                    gui_mod.QMessageBox, "question") as ask:
+            self.win._on_export_frames()
+        ask.assert_not_called()
+        self.assertTrue(os.path.isfile(
+            os.path.join(out_dir, "frame_001.png")))
+
+    def test_drag_enter_rejects_unsupported_file(self):
+        # B15: a .zip used to get a drop cursor and then a warning
+        # box after the drop.
+        self.assertFalse(self._drag_enter([self.zip]))
+        self.assertTrue(self._drag_enter([self.image]))
+        self.assertTrue(self._drag_enter([self.zip, self.image]))
+
+    def test_multi_file_drop_imports_everything(self):
+        # B15: a multi-file drop used to import only the first
+        # file and silently ignore the rest.
+        self._drop([self.image, self.clip, self.game, self.gem,
+                    self.zip])
+        self.assertTrue(self._wait_for_video())
+        self.assertEqual(self.win.source_path, self.image)
+        self.assertIn(len(self.win.video_frames), (15, 16))
+        names = [self.win.code_list.item(i).text()
+                 for i in range(self.win.code_list.count())]
+        self.assertTrue(any(n.startswith("HERO") for n in names))
+        self.assertTrue(any(n.startswith("GEM") for n in names))
+        # Code was the last tab switched to, so it stays visible.
+        self.assertEqual(self.win.tabs.currentIndex(), 3)
+        message = self.win.statusBar().currentMessage()
+        self.assertIn("Imported", message)
+        self.assertIn("archive.zip", message)
+        self.assertIn("skipped", message)
+
+    def test_drop_only_unsupported_file_warns(self):
+        from unittest import mock
+        from pixel_forge import gui as gui_mod
+        with mock.patch.object(gui_mod.QMessageBox, "warning") \
+                as warn:
+            self._drop([self.zip])
+        warn.assert_called_once()
+        self.assertIn("archive.zip", warn.call_args[0][2])
+        self.assertIsNone(self.win.source_image)
+
+    def test_status_line_flags_non_pinned_model(self):
+        # B15: find_model picks up ANY .gguf, so a wrong model was
+        # used without a word. The status line names the file and
+        # flags it when it is not the pinned LCM file.
+        from unittest import mock
+        from pathlib import Path
+        from pixel_forge import imagegen as imagegen_mod
+        from pixel_forge.imagegen import MODEL_FILENAME
+        engine = Path(self.tmp) / "sd-cli"
+        engine.write_bytes(b"fake")
+        other = Path(self.tmp) / "other-model.gguf"
+        other.write_bytes(b"gguf")
+        with mock.patch.object(imagegen_mod, "find_engine",
+                               return_value=engine), \
+                mock.patch.object(imagegen_mod, "find_model",
+                                  return_value=other):
+            self.win._refresh_prompt_status()
+        text = self.win.prompt_status_label.text()
+        self.assertIn("other-model.gguf", text)
+        self.assertIn("not the pinned LCM file", text)
+        pinned = Path(self.tmp) / MODEL_FILENAME
+        pinned.write_bytes(b"gguf")
+        with mock.patch.object(imagegen_mod, "find_engine",
+                               return_value=engine), \
+                mock.patch.object(imagegen_mod, "find_model",
+                                  return_value=pinned):
+            self.win._refresh_prompt_status()
+        text = self.win.prompt_status_label.text()
+        self.assertIn("found at", text)
+        self.assertNotIn("not the pinned LCM file", text)
+
+
 if __name__ == "__main__":
     unittest.main()

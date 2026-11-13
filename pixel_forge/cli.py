@@ -28,7 +28,8 @@ from pathlib import Path
 
 from . import __version__
 from .codeinput import parse_paths
-from .imagegen import (DEFAULT_NEGATIVE, prompt_to_sprites, slugify)
+from .imagegen import (DEFAULT_NEGATIVE, MODEL_FILENAME, find_engine,
+                       find_model, prompt_to_sprites, slugify)
 from .library import Library, normalize_tags
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
                        load_image, pixelize_file)
@@ -269,6 +270,20 @@ def cmd_prompt(args):
         if status == "failed" and record.get("error"):
             line += " — %s" % record["error"]
         print(line)
+
+    # Name the model file in use, on stderr before generating
+    # (review B15): find_model picks up ANY .gguf in a model
+    # home, so a wrong model was used without a word. Only when
+    # both resolve — otherwise prompt_to_sprites raises the
+    # proper missing-engine/model error below.
+    engine = find_engine()
+    model = find_model()
+    if engine is not None and model is not None:
+        if model.name == MODEL_FILENAME:
+            print("using model: %s" % model, file=sys.stderr)
+        else:
+            print("using model: %s (not the pinned LCM file %s)"
+                  % (model, MODEL_FILENAME), file=sys.stderr)
 
     batch, bdir = prompt_to_sprites(
         args.prompt, out, negative=args.negative, count=args.count,

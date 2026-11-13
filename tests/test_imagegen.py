@@ -87,6 +87,30 @@ class FindTests(ImageGenBase):
             self.assertEqual(find_engine(),
                              Path(bindir) / "sd-cli")
 
+    def test_find_engine_checks_build_bin(self):
+        # B15: imagegen checked ~/sd.cpp/build/sd-cli, a path the
+        # build never produces — the real binary lives in
+        # build/bin, the path install.sh already used.
+        home = Path(self.work) / "home"
+        bindir = home / "sd.cpp" / "build" / "bin"
+        bindir.mkdir(parents=True)
+        write_stub_engine(str(bindir))
+        env = {"PATH": self.work, "HOME": str(home)}
+        with mock.patch.dict(os.environ, env, clear=True):
+            os.environ.pop("PIXELFORGE_SD_CLI", None)
+            self.assertEqual(find_engine(), bindir / "sd-cli")
+
+    def test_engine_checked_lists_build_bin(self):
+        # The checked-places list must agree with find_engine.
+        with mock.patch.dict(os.environ, {"HOME": self.tmp},
+                             clear=False):
+            status = engine_status()
+        checked = status["engine_checked"]
+        self.assertIn(str(Path(self.tmp) / "sd.cpp" / "build"
+                          / "bin" / "sd-cli"), checked)
+        self.assertNotIn(str(Path(self.tmp) / "sd.cpp" / "build"
+                             / "sd-cli"), checked)
+
     def test_find_model_env_override(self):
         with stub_env(self.stub, self.model):
             self.assertEqual(find_model(), Path(self.model))
