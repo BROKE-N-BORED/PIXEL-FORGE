@@ -10,6 +10,12 @@ Warn-never-refuse, like install.sh: a failed step is logged and the
 install carries on; the window says plainly what worked and what did
 not. Safe to run again — it redoes the failed steps.
 
+One exception: the shortcuts/menu-launcher step is skipped when the
+packages step failed — writing a launcher then would point at a
+broken install (a dangling symlink plus a Launch button that cannot
+work). And Launch enables only when the installed venv's GUI
+actually imports, never on the strength of a symlink.
+
 Dry run (smoke tests only): PIXEL_FORGE_INSTALLER_DRYRUN=1 makes every
 step log what it would do without running anything privileged or
 writing anything. The shipped installer always does the real steps.
@@ -169,6 +175,9 @@ class StepResult:
     DONE = "done"
     WARN = "warning"
     FAIL = "failed"
+    # The step was deliberately not run (the files step, when the
+    # packages step failed) — not a failure of the step itself.
+    SKIPPED = "skipped"
 
     def __init__(self, status, detail=""):
         self.status = status
@@ -488,6 +497,37 @@ def step_files(ctx):
     return StepResult(StepResult.DONE)
 
 
+def venv_gui_imports(home):
+    """True when the venv installed under home has a GUI that imports.
+
+    Runs the venv's own Python with `import pixel_forge.gui` — the
+    module the menu launcher runs. A missing venv, a missing venv
+    Python, a failed import, or a hang all count as False. This is
+    what the Launch button trusts: never a symlink, which stays
+    "present" when it dangles.
+
+    The check runs from a fresh empty directory: `python -c`
+    puts the working directory first on sys.path, and the
+    installer runs from the extracted tree — which contains a
+    pixel_forge package — so without this the import could pass
+    from the installer's own folder even on a venv whose pip
+    install failed.
+    """
+    venv_python = (Path(home) / ".local" / "share" / "pixel-forge"
+                   / "venv" / "bin" / "python")
+    if not venv_python.is_file():
+        return False
+    try:
+        with tempfile.TemporaryDirectory(
+                prefix="pf-import-check-") as tmpd:
+            proc = subprocess.run(
+                [str(venv_python), "-c", "import pixel_forge.gui"],
+                capture_output=True, text=True, timeout=120, cwd=tmpd)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
 STEPS = [
     ("system", "System packages (python3-venv and pip)", step_system),
     ("ffmpeg", "ffmpeg for video import (optional)", step_ffmpeg),
@@ -526,11 +566,33 @@ class InstallWorker(QThread):
         self._ctx = ctx
         results = []
         total = len(STEPS)
-        for index, (_key, title, func) in enumerate(STEPS):
+        packages_failed = False
+        for index, (key, title, func) in enumerate(STEPS):
             if ctx.cancelled:
                 ctx.log("Cancelled — stopping after %d of %d steps"
                         % (index, total))
                 break
+            if key == "files" and packages_failed:
+                # No launcher on a broken install: step_files would
+                # symlink pixel-forge-gui at a venv whose pip install
+                # failed, leaving a dangling launcher and a Launch
+                # button that pops "Launch failed" (W5). Skip it and
+                # say so plainly; a re-run writes the launcher once
+                # the packages step passes.
+                ctx.log("")
+                ctx.log("=== Step %d of %d: %s ===" % (index + 1, total,
+                                                       title))
+                ctx.log("Skipped: the packages step failed, so no "
+                        "shortcuts or menu launcher are written — a "
+                        "launcher would point at a broken install. "
+                        "Press Install again once the packages step "
+                        "passes.")
+                result = StepResult(StepResult.SKIPPED,
+                                    "packages step failed")
+                results.append(result)
+                self.step_status.emit(index, result.status)
+                self.progress.emit(int((index + 1) * 100 / total))
+                continue
             self.step_status.emit(index, "running…")
             ctx.log("")
             ctx.log("=== Step %d of %d: %s ===" % (index + 1, total,
@@ -540,6 +602,8 @@ class InstallWorker(QThread):
             except Exception as exc:  # noqa: BLE001 - warn, carry on
                 ctx.log("WARNING: step failed with an error: %s" % exc)
                 result = StepResult(StepResult.FAIL, str(exc))
+            if key == "packages" and result.status == StepResult.FAIL:
+                packages_failed = True
             results.append(result)
             self.step_status.emit(index, result.status)
             self.progress.emit(int((index + 1) * 100 / total))
@@ -554,6 +618,7 @@ STATUS_LABEL = {
     StepResult.DONE: "done",
     StepResult.WARN: "warning",
     StepResult.FAIL: "failed",
+    StepResult.SKIPPED: "skipped",
 }
 
 
@@ -705,19 +770,38 @@ class InstallerWindow(QMainWindow):
         failed = [r for r in results if r.status == StepResult.FAIL]
         warned = [r for r in results if r.status == StepResult.WARN]
         self.progress_bar.setValue(100)
+        # Launch trusts only a real import check: the venv's own
+        # Python importing pixel_forge.gui. A symlink check is not
+        # enough — a dangling symlink passes is_symlink() (W5). In
+        # dry-run nothing was installed, so there is no venv to
+        # check; Launch follows the step results instead (dry-run
+        # is a smoke test of the window flow, not of an install).
+        if self._dryrun:
+            can_launch = not failed
+        else:
+            can_launch = venv_gui_imports(os.path.expanduser("~"))
         if not failed:
-            if warned:
-                self.statusBar().showMessage(
-                    "Installed with %d warning(s) — see the log"
-                    % len(warned))
+            if can_launch:
+                if warned:
+                    self.statusBar().showMessage(
+                        "Installed with %d warning(s) — see the log"
+                        % len(warned))
+                else:
+                    self.statusBar().showMessage("Installed!")
+                self.launch_btn.setEnabled(True)
+                self._log("")
+                self._log("Done! Open Pixel Forge from your app menu, or "
+                          "run pixel-forge-gui in a terminal.")
+                self._log("Command line: pixel-forge convert photo.png "
+                          "--size 32 --colors 16")
             else:
-                self.statusBar().showMessage("Installed!")
-            self.launch_btn.setEnabled(True)
-            self._log("")
-            self._log("Done! Open Pixel Forge from your app menu, or "
-                      "run pixel-forge-gui in a terminal.")
-            self._log("Command line: pixel-forge convert photo.png "
-                      "--size 32 --colors 16")
+                self.statusBar().showMessage(
+                    "Installed, but Pixel Forge does not start — "
+                    "see the log")
+                self._log("")
+                self._log("Every step passed, but the installed GUI "
+                          "does not import — Launch is unavailable. "
+                          "Press Install again to redo the install.")
         else:
             self.statusBar().showMessage(
                 "Finished with %d failed step(s) — see the log"
@@ -726,10 +810,13 @@ class InstallerWindow(QMainWindow):
             self._log("Some steps failed. You can press Install again "
                       "— it redoes the failed steps and leaves the "
                       "rest alone.")
-            gui = (Path(os.path.expanduser("~")) / ".local" / "bin"
-                   / "pixel-forge-gui")
-            if gui.is_file() or gui.is_symlink():
+            if can_launch:
                 self.launch_btn.setEnabled(True)
+                self._log("A previous install still works — Launch "
+                          "is available.")
+            else:
+                self._log("Launch is unavailable: the installed GUI "
+                          "does not import yet.")
 
     # -- launch ---------------------------------------------------------
 

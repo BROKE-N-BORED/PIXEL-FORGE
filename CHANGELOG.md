@@ -1,5 +1,31 @@
 # Pixel Forge changelog
 
+## 0.11 — 2026-11-12
+
+A failed install no longer leaves a dangling launcher and an
+enabled Launch button — task-list item #5, weakness W5 of the
+v0.6 internal review. The file step used to run regardless of
+whether the packages step failed, so a broken install still
+wrote a menu launcher pointing at a venv that could not start,
+and the Launch button trusted the launcher's existence instead
+of checking the GUI actually imports.
+
+- The file step is now gated on the packages step: when
+  packages fails, the launcher, .desktop file, and menu entry
+  are not written at all, and the step list shows the file
+  step as "skipped" with the reason in the log. The installer
+  ends in a clear failure state naming the failed step.
+- Launch is now gated on a real check: the installer runs the
+  venv's own Python with `import pixel_forge.gui` (from a
+  fresh empty directory, so the import cannot pass from the
+  installer's own folder) and enables Launch only when that
+  import succeeds. When it fails, Launch stays disabled and
+  the installer says why. A previous install that still works
+  keeps Launch available even when a re-run fails partway.
+- No other installer behavior changed: per-step results,
+  warn-never-refuse on optional steps, the PySide6 core
+  verification, and re-runnability are all as before.
+
 ## 0.10 — 2026-11-12
 
 One malformed library entry no longer bricks startup — task-list
