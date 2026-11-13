@@ -1,5 +1,57 @@
 # Pixel Forge changelog
 
+## 0.50 — 2026-11-13
+
+Spritesheet / GIF import + splitter — task-list item #40:
+
+- New "Split spritesheet" button on the Video tab, opening a
+  splitter dialog: pick a sheet PNG and it comes back as frames
+  in the strip, ready for the sheet, animation, and export flow.
+  When a metadata JSON sits next to the sheet (same stem), it is
+  filled in automatically and the split honors it — the frames
+  come back pixel-identical with their per-frame durations and
+  animation tags. Clearing the metadata switches to the grid
+  form, for bare-grid sheets (Kenney / itch.io / OpenGameArt
+  style, no metadata): give the frame size or the number of
+  columns and rows, plus spacing and margin when the sheet has
+  them, and a live frame-count estimate shows before you split.
+  Nothing is picked or pre-filled by default — the dialog opens
+  with no sheet, no metadata, and every grid number unset, and
+  Split stays disabled until the numbers describe a whole grid.
+  A grid that does not divide the sheet evenly names the problem
+  instead of splitting a partial grid, and a PNG whose size does
+  not match its metadata refuses as "not a pair" instead of
+  cutting wrong frames. Errors show in the dialog's info line —
+  no message boxes.
+- New stdlib functions in pixel_forge/spritesheet.py: grid_layout
+  (grid geometry from a frame size or from column/row counts,
+  both forms must agree when both are given), frames_from_grid,
+  find_sibling_metadata, and split_with_metadata (frames,
+  durations, and tags from a loaded metadata dict; a frame with
+  no duration or a 0 duration falls back to the metadata fps).
+- New `pixel-forge split-sheet` command mirroring the dialog:
+  sheet PNG + optional --meta (default: the sibling JSON),
+  or --grid WxH / --cols + --rows with --spacing and --margin;
+  --json reports the mode, frame count, durations, and tags.
+  Metadata and grid flags cannot be combined, and spacing and
+  margin only apply to a grid split — both refuse plainly, never
+  silently ignored. All failures are plain one-line errors, no
+  tracebacks.
+- Split frames land as finished pixel art: there is no raw set
+  to re-pixelize and no video to re-extract, so the size and
+  palette controls leave them alone, and a video run in flight
+  is orphaned so its late result cannot overwrite the split.
+- GIF import (v0.36) verified end to end: a GIF imported through
+  the Video tab lands its frames in the strip, playable and
+  exportable. Its per-frame delays are not preserved — durations
+  follow the Sheet fps default, the same as every video import;
+  preserving native GIF delays needs native-rate extraction and
+  is a separate task, not a defect in this one.
+- Fixed in place: undoing a keep/drop step recorded against
+  frames that a later import or split replaced used to index
+  out of range in _apply_keep. A keep list that does not match
+  the current frame count is now ignored instead of applied.
+
 ## 0.49 — 2026-11-13
 
 Palette import + custom palettes — task-list item #39:

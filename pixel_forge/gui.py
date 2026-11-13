@@ -94,8 +94,10 @@ from .session import (load_session, record_recent, save_session,
 from .skins import (detect_skin, extract_skin, pixelize_texture,
                     skin_figure, skin_parts, texture_target_size)
 from .spritesheet import (build_metadata, duration_for_fps,
-                          extract_frame, frames_from_sheet,
-                          load_metadata, pack_frames, validate_tags,
+                          extract_frame, find_sibling_metadata,
+                          frames_from_grid, frames_from_sheet,
+                          grid_layout, load_metadata, pack_frames,
+                          split_with_metadata, validate_tags,
                           write_sheet)
 from .tileset import (MODE_NAMES, TILESET_MODES, blob_tiles,
                       export_tileset, wang_tiles)
@@ -761,6 +763,360 @@ class SpritesheetDialog(QDialog):
             # folder, like every other export (task 22).
             if hasattr(parent, "_remember_export_dir"):
                 parent._remember_export_dir(png_path.parent)
+        self.accept()
+
+
+class SheetSplitDialog(QDialog):
+    """Split a spritesheet PNG back into frames (task 40) — the
+    round-trip path: a sheet exported by Pixel Forge (or any
+    sheet with a matching metadata JSON) comes back as its own
+    frames, with its durations and tags; a bare-grid sheet
+    (Kenney / itch.io / OpenGameArt style, no metadata) splits
+    on a grid the user describes.
+
+    Nothing is picked by default: the dialog opens with no
+    sheet, no metadata, and every grid number unset (0 means
+    "not given" — Split stays disabled until the numbers
+    describe a whole grid). Picking a sheet fills the metadata
+    in automatically when a JSON with the same stem sits next
+    to it; clearing the metadata switches to the grid form.
+    The frame-count estimate updates live as the grid numbers
+    change, and a grid that does not divide the sheet evenly
+    names the problem instead of splitting a partial grid.
+
+    On Split, the frames are cut here (fast, in memory) and
+    exposed as .frames / .durations / .tags / .source_name for
+    the caller to land. Errors never open a message box — they
+    show in the info line, and Split stays disabled until the
+    dialog is in a splittable state.
+    """
+
+    def __init__(self, parent, default_duration):
+        super().__init__(parent)
+        self.setWindowTitle("Split spritesheet")
+        self.resize(500, 470)
+        self.default_duration = default_duration
+        self.sheet = None
+        self.sheet_path = None
+        self.metadata = None
+        self.frames = []
+        self.durations = []
+        self.tags = []
+        self.source_name = ""
+        self._sheet_error = None
+
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(self._section("Sheet"))
+        sheet_row = QHBoxLayout()
+        self.sheet_edit = QLineEdit()
+        self.sheet_edit.setToolTip(
+            "The spritesheet PNG to split back into frames")
+        self.sheet_edit.editingFinished.connect(
+            self._on_sheet_typed)
+        sheet_row.addWidget(self.sheet_edit, 1)
+        self.sheet_browse_btn = QPushButton("Browse")
+        self.sheet_browse_btn.setToolTip(
+            "Pick the spritesheet PNG to split")
+        self.sheet_browse_btn.clicked.connect(
+            self._on_browse_sheet)
+        sheet_row.addWidget(self.sheet_browse_btn)
+        layout.addLayout(sheet_row)
+
+        layout.addWidget(self._section("Metadata"))
+        meta_row = QHBoxLayout()
+        self.meta_edit = QLineEdit()
+        self.meta_edit.setToolTip(
+            "The sheet's metadata JSON — filled in automatically "
+            "when one sits next to the sheet; clear it to split "
+            "as a grid instead")
+        self.meta_edit.editingFinished.connect(self._refresh)
+        meta_row.addWidget(self.meta_edit, 1)
+        self.meta_browse_btn = QPushButton("Browse")
+        self.meta_browse_btn.setToolTip(
+            "Pick the metadata JSON for this sheet")
+        self.meta_browse_btn.clicked.connect(
+            self._on_browse_meta)
+        meta_row.addWidget(self.meta_browse_btn)
+        self.meta_clear_btn = QPushButton("Clear")
+        self.meta_clear_btn.setToolTip(
+            "Forget the metadata and split as a grid instead")
+        self.meta_clear_btn.clicked.connect(self._on_clear_meta)
+        meta_row.addWidget(self.meta_clear_btn)
+        layout.addLayout(meta_row)
+
+        self.info_label = QLabel(
+            "Pick a spritesheet PNG to split it back into frames.")
+        self.info_label.setWordWrap(True)
+        layout.addWidget(self.info_label)
+
+        layout.addWidget(self._section("Grid"))
+        grid_note = QLabel(
+            "For a sheet with no metadata: give the frame size, "
+            "or the number of columns and rows — either pair "
+            "splits the grid.")
+        grid_note.setWordWrap(True)
+        layout.addWidget(grid_note)
+        frame_row = QHBoxLayout()
+        frame_row.addWidget(QLabel("Frame width"))
+        self.frame_w_spin = QSpinBox()
+        self.frame_w_spin.setRange(0, 4096)
+        self.frame_w_spin.setSuffix(" px")
+        self.frame_w_spin.setSpecialValueText("not set")
+        self.frame_w_spin.setToolTip(
+            "Width of one frame in pixels — 0 means not given")
+        self.frame_w_spin.valueChanged.connect(self._refresh)
+        frame_row.addWidget(self.frame_w_spin)
+        frame_row.addWidget(QLabel("Frame height"))
+        self.frame_h_spin = QSpinBox()
+        self.frame_h_spin.setRange(0, 4096)
+        self.frame_h_spin.setSuffix(" px")
+        self.frame_h_spin.setSpecialValueText("not set")
+        self.frame_h_spin.setToolTip(
+            "Height of one frame in pixels — 0 means not given")
+        self.frame_h_spin.valueChanged.connect(self._refresh)
+        frame_row.addWidget(self.frame_h_spin)
+        layout.addLayout(frame_row)
+        count_row = QHBoxLayout()
+        count_row.addWidget(QLabel("Columns"))
+        self.cols_spin = QSpinBox()
+        self.cols_spin.setRange(0, 4096)
+        self.cols_spin.setSpecialValueText("not set")
+        self.cols_spin.setToolTip(
+            "Columns in the grid — 0 means not given")
+        self.cols_spin.valueChanged.connect(self._refresh)
+        count_row.addWidget(self.cols_spin)
+        count_row.addWidget(QLabel("Rows"))
+        self.rows_spin = QSpinBox()
+        self.rows_spin.setRange(0, 4096)
+        self.rows_spin.setSpecialValueText("not set")
+        self.rows_spin.setToolTip(
+            "Rows in the grid — 0 means not given")
+        self.rows_spin.valueChanged.connect(self._refresh)
+        count_row.addWidget(self.rows_spin)
+        layout.addLayout(count_row)
+        gap_row = QHBoxLayout()
+        gap_row.addWidget(QLabel("Spacing"))
+        self.spacing_spin = QSpinBox()
+        self.spacing_spin.setRange(0, 64)
+        self.spacing_spin.setSuffix(" px")
+        self.spacing_spin.setToolTip(
+            "Blank pixels between frames in the grid")
+        self.spacing_spin.valueChanged.connect(self._refresh)
+        gap_row.addWidget(self.spacing_spin)
+        gap_row.addWidget(QLabel("Margin"))
+        self.margin_spin = QSpinBox()
+        self.margin_spin.setRange(0, 64)
+        self.margin_spin.setSuffix(" px")
+        self.margin_spin.setToolTip(
+            "Blank border around the whole grid")
+        self.margin_spin.valueChanged.connect(self._refresh)
+        gap_row.addWidget(self.margin_spin)
+        layout.addLayout(gap_row)
+
+        self.estimate_label = QLabel("")
+        self.estimate_label.setWordWrap(True)
+        layout.addWidget(self.estimate_label)
+
+        layout.addStretch(1)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self.split_btn = QPushButton("Split")
+        self.split_btn.setObjectName("export")
+        self.split_btn.setToolTip(
+            "Split the sheet and load its frames into the Video "
+            "tab")
+        self.split_btn.setEnabled(False)
+        self.split_btn.clicked.connect(self._on_split)
+        btn_row.addWidget(self.split_btn)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setToolTip("Close without splitting")
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(self.cancel_btn)
+        layout.addLayout(btn_row)
+        self._refresh()
+
+    @staticmethod
+    def _section(text):
+        label = QLabel(text)
+        label.setObjectName("heading")
+        return label
+
+    def _set_grid_enabled(self, enabled):
+        for widget in (self.frame_w_spin, self.frame_h_spin,
+                       self.cols_spin, self.rows_spin,
+                       self.spacing_spin, self.margin_spin):
+            widget.setEnabled(enabled)
+
+    def _on_browse_sheet(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Pick a spritesheet", "", "PNG images (*.png)")
+        if path:
+            self._set_sheet(path)
+
+    def _on_sheet_typed(self):
+        path = self.sheet_edit.text().strip()
+        if path and path != self.sheet_path:
+            self._set_sheet(path)
+        elif not path:
+            self.sheet = None
+            self.sheet_path = None
+            self._sheet_error = None
+            self.meta_edit.clear()
+            self._refresh()
+
+    def _set_sheet(self, path):
+        """Load a sheet PNG and auto-fill its sibling metadata
+        (same stem, .json) when one exists. A bad file leaves
+        the error in the info line — never a message box."""
+        self.sheet_path = path
+        self.sheet_edit.setText(path)
+        try:
+            self.sheet = load_image(path)
+            self._sheet_error = None
+        except PixelForgeError as exc:
+            self.sheet = None
+            self._sheet_error = str(exc)
+        sibling = find_sibling_metadata(path)
+        self.meta_edit.setText(str(sibling) if sibling else "")
+        self._refresh()
+
+    def _on_browse_meta(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Pick the metadata JSON", "",
+            "JSON files (*.json)")
+        if path:
+            self.meta_edit.setText(path)
+            self._refresh()
+
+    def _on_clear_meta(self):
+        self.meta_edit.clear()
+        self._refresh()
+
+    def _grid_values(self):
+        """The grid numbers as grid_layout takes them — 0 means
+        not given, so it becomes None."""
+        def given(spin):
+            value = spin.value()
+            return value if value >= 1 else None
+        return {
+            "frame_w": given(self.frame_w_spin),
+            "frame_h": given(self.frame_h_spin),
+            "cols": given(self.cols_spin),
+            "rows": given(self.rows_spin),
+            "spacing": self.spacing_spin.value(),
+            "margin": self.margin_spin.value(),
+        }
+
+    def _refresh(self):
+        """Recompute the dialog's state from the widgets: the
+        info line, the live estimate, and whether Split is
+        allowed. The metadata file is re-read here (it is a
+        small JSON), the sheet image is not."""
+        self.metadata = None
+        if self._sheet_error is not None:
+            self.info_label.setText(self._sheet_error)
+            self.estimate_label.setText("")
+            self._set_grid_enabled(False)
+            self.split_btn.setEnabled(False)
+            return
+        if self.sheet is None:
+            self.info_label.setText(
+                "Pick a spritesheet PNG to split it back into "
+                "frames.")
+            self.estimate_label.setText("")
+            self._set_grid_enabled(False)
+            self.split_btn.setEnabled(False)
+            return
+        sheet = self.sheet
+        meta_path = self.meta_edit.text().strip()
+        if meta_path:
+            try:
+                metadata = load_metadata(meta_path)
+            except PixelForgeError as exc:
+                self.info_label.setText(str(exc))
+                self.estimate_label.setText("")
+                self._set_grid_enabled(False)
+                self.split_btn.setEnabled(False)
+                return
+            if (sheet.width() != metadata["sheet_width"]
+                    or sheet.height() != metadata["sheet_height"]):
+                self.info_label.setText(
+                    "The sheet image is %d x %d but its metadata "
+                    "says %d x %d — this PNG and JSON are not a "
+                    "pair" % (sheet.width(), sheet.height(),
+                              metadata["sheet_width"],
+                              metadata["sheet_height"]))
+                self.estimate_label.setText("")
+                self._set_grid_enabled(False)
+                self.split_btn.setEnabled(False)
+                return
+            self.metadata = metadata
+            info = ("Metadata: %s, %d x %d each"
+                    % (plural(len(metadata["frames"]), "frame"),
+                       metadata["frame_width"],
+                       metadata["frame_height"]))
+            tags = metadata.get("tags") or []
+            if tags:
+                info += ", tags: %s" % ", ".join(
+                    tag["name"] for tag in tags)
+            self.info_label.setText(info)
+            self.estimate_label.setText("")
+            self._set_grid_enabled(False)
+            self.split_btn.setEnabled(True)
+            return
+        # No metadata — the grid form. The estimate is live:
+        # blank until a pair of numbers is given, the problem
+        # named when the grid does not divide the sheet.
+        self.info_label.setText(
+            "Sheet: %d x %d, no metadata — split as a grid."
+            % (sheet.width(), sheet.height()))
+        self._set_grid_enabled(True)
+        values = self._grid_values()
+        size_given = (values["frame_w"] is not None
+                      and values["frame_h"] is not None)
+        count_given = (values["cols"] is not None
+                       and values["rows"] is not None)
+        if not size_given and not count_given:
+            self.estimate_label.setText("")
+            self.split_btn.setEnabled(False)
+            return
+        try:
+            layout = grid_layout(sheet.width(), sheet.height(),
+                                 **values)
+        except PixelForgeError as exc:
+            self.estimate_label.setText(str(exc))
+            self.split_btn.setEnabled(False)
+            return
+        self.estimate_label.setText(
+            "%s (%d columns x %d rows), each %d x %d"
+            % (plural(len(layout["positions"]), "frame"),
+               layout["columns"], layout["rows"],
+               layout["frame_width"], layout["frame_height"]))
+        self.split_btn.setEnabled(True)
+
+    def _on_split(self):
+        """Cut the frames and accept. The dialog was already
+        validated by _refresh, so a failure here is belt and
+        braces — it lands in the info line and the dialog stays
+        open."""
+        try:
+            if self.metadata is not None:
+                frames, durations, tags = split_with_metadata(
+                    self.sheet, self.metadata)
+            else:
+                values = self._grid_values()
+                frames = frames_from_grid(self.sheet, **values)
+                durations = [self.default_duration] * len(frames)
+                tags = []
+        except PixelForgeError as exc:
+            self.info_label.setText(str(exc))
+            self.split_btn.setEnabled(False)
+            return
+        self.frames = frames
+        self.durations = durations
+        self.tags = tags
+        self.source_name = Path(self.sheet_path).name
         self.accept()
 
 
@@ -2379,7 +2735,15 @@ class MainWindow(QMainWindow):
     def _apply_keep(self, kept):
         """Set the Video strip's kept set from a recorded list of
         booleans (undo/redo): the check states, the dimming, the
-        buttons, the counter, and the preview all come back."""
+        buttons, the counter, and the preview all come back.
+
+        A list that does not match the current frame count names
+        frames that no longer exist — a new import or a split
+        replaced them — so it is ignored instead of applied:
+        applying it indexed out of range and crashed the undo
+        (found while landing split frames, task 40)."""
+        if len(kept) != len(self.video_frames):
+            return
         self.video_keep = list(kept)
         self.video_strip.blockSignals(True)
         try:
@@ -3874,6 +4238,14 @@ class MainWindow(QMainWindow):
         self.video_import_btn.clicked.connect(self._on_video_import)
         form.addWidget(self.video_import_btn)
 
+        self.video_split_btn = QPushButton("Split spritesheet")
+        self.video_split_btn.setToolTip(
+            "Split a spritesheet PNG back into frames — with "
+            "its metadata, or as a grid")
+        self.video_split_btn.clicked.connect(
+            self._on_split_spritesheet)
+        form.addWidget(self.video_split_btn)
+
         form.addWidget(self._section("Frames"))
         fps_row = QHBoxLayout()
         fps_row.addWidget(QLabel("Extract fps"))
@@ -4411,6 +4783,58 @@ class MainWindow(QMainWindow):
             self, "Import video", "", video_filter())
         if path:
             self.load_video(path)
+
+    def _on_split_spritesheet(self):
+        """Open the sheet splitter (task 40) and land its frames
+        in the strip when the user splits."""
+        dialog = SheetSplitDialog(
+            self, self._video_default_duration())
+        if dialog.exec():
+            self._load_split_frames(
+                dialog.frames, dialog.durations, dialog.tags,
+                dialog.source_name)
+
+    def _load_split_frames(self, frames, durations, tags,
+                           source_name):
+        """Land split sheet frames in the Video tab, the way a
+        fresh extraction lands — keep/drop, order, durations,
+        and tags all start from the split, and the strip,
+        preview, and buttons refresh. The frames are finished
+        pixel art, so there is no raw set to re-pixelize and no
+        video to re-extract: the pixelize controls do not apply
+        to them, and a run in flight is orphaned so its late
+        result cannot overwrite the split (the stale guard in
+        _on_video_run_done drops it)."""
+        self._stop_playback()
+        self._video_debounce_timer.stop()
+        self._video_pending_reload = False
+        if self.video_worker is not None:
+            old = self.video_worker
+            self._video_orphans.add(old)
+            old.finished.connect(
+                lambda old=old: self._video_orphans.discard(old))
+            self.video_worker = None
+        self._cleanup_video_raw()
+        self.video_path = None
+        self.video_duration = None
+        self._refresh_video_estimate()
+        self.video_frames = list(frames)
+        self.video_keep = [True] * len(frames)
+        self.video_order = list(range(len(frames)))
+        self.video_durations = list(durations)
+        self.video_tags = [dict(tag) for tag in tags]
+        self.video_play_tag = None
+        self._refresh_video_tag_list()
+        kept = self._kept_indices()
+        self.video_current = kept[0] if kept else 0
+        self._rebuild_strip()
+        self._refresh_video_preview()
+        self._on_fit_video_zoom()
+        self._update_video_info()
+        self._update_video_buttons()
+        self.statusBar().showMessage(
+            "Split %s (%s)"
+            % (source_name, plural(len(frames), "frame")))
 
     def _cleanup_video_raw(self):
         if self.video_raw_dir is not None:

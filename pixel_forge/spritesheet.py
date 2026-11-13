@@ -444,3 +444,170 @@ def frames_from_sheet(sheet, metadata):
     path: pack once, then play from the sheet, not the sources."""
     return [extract_frame(sheet, metadata, i)
             for i in range(len(metadata["frames"]))]
+
+
+def grid_layout(sheet_w, sheet_h, frame_w=None, frame_h=None,
+                cols=None, rows=None, spacing=0, margin=0):
+    """Grid geometry for cutting a sheet WITHOUT metadata
+    (task 40) — the bare-grid sheets Kenney, itch.io, and
+    OpenGameArt ship, which are a PNG grid and nothing else.
+
+    Two input forms: the frame size (frame_w + frame_h) or the
+    cell counts (cols + rows). Either pair alone is enough; both
+    pairs given must agree, or the call refuses naming both.
+    spacing is the gap between cells, margin the border around
+    the whole grid — both 0 when the sheet has neither. A value
+    of None (or 0) means "not given" for that input.
+
+    Returns a dict with columns, rows, frame_width, frame_height,
+    and positions — the (x, y) of each cell in row-major order.
+    Raises PixelForgeError naming the numbers whenever the sheet
+    is not a whole number of frames at the given size, the cells
+    would come out under 1 pixel, or neither pair was given —
+    never a silent partial grid.
+    """
+    if sheet_w < 1 or sheet_h < 1:
+        raise PixelForgeError(
+            "sheet is %d x %d — it must be at least 1 pixel in "
+            "each direction" % (sheet_w, sheet_h))
+    if spacing < 0:
+        raise PixelForgeError(
+            "spacing cannot be negative (got %d)" % spacing)
+    if margin < 0:
+        raise PixelForgeError(
+            "margin cannot be negative (got %d)" % margin)
+    size_given = (frame_w or 0) >= 1 and (frame_h or 0) >= 1
+    count_given = (cols or 0) >= 1 and (rows or 0) >= 1
+    if not size_given and not count_given:
+        raise PixelForgeError(
+            "give the frame size or the number of columns and "
+            "rows to split the grid")
+    if frame_w is not None and frame_w < 0:
+        raise PixelForgeError(
+            "frame width cannot be negative (got %d)" % frame_w)
+    if frame_h is not None and frame_h < 0:
+        raise PixelForgeError(
+            "frame height cannot be negative (got %d)" % frame_h)
+    if cols is not None and cols < 0:
+        raise PixelForgeError(
+            "columns cannot be negative (got %d)" % cols)
+    if rows is not None and rows < 0:
+        raise PixelForgeError(
+            "rows cannot be negative (got %d)" % rows)
+    usable_w = sheet_w - 2 * margin
+    usable_h = sheet_h - 2 * margin
+    if usable_w < 1 or usable_h < 1:
+        raise PixelForgeError(
+            "margin %d leaves no sheet to split (%d x %d sheet)"
+            % (margin, sheet_w, sheet_h))
+    if size_given:
+        # Whole cells only: the usable span must hold an exact
+        # number of (frame + spacing) steps, with no trailing
+        # gap after the last cell.
+        if (usable_w + spacing) % (frame_w + spacing) != 0:
+            raise PixelForgeError(
+                "sheet is %d px wide but %d px frames with %d px "
+                "spacing do not divide it evenly (margin %d)"
+                % (sheet_w, frame_w, spacing, margin))
+        if (usable_h + spacing) % (frame_h + spacing) != 0:
+            raise PixelForgeError(
+                "sheet is %d px tall but %d px frames with %d px "
+                "spacing do not divide it evenly (margin %d)"
+                % (sheet_h, frame_h, spacing, margin))
+        grid_cols = (usable_w + spacing) // (frame_w + spacing)
+        grid_rows = (usable_h + spacing) // (frame_h + spacing)
+    if count_given:
+        # The cells the counts imply must come out whole and at
+        # least 1 pixel each.
+        span_w = usable_w - (cols - 1) * spacing
+        span_h = usable_h - (rows - 1) * spacing
+        if span_w < cols or span_h < rows:
+            raise PixelForgeError(
+                "%d columns x %d rows do not fit a %d x %d sheet "
+                "with %d px spacing and margin %d — the cells "
+                "would be under 1 pixel"
+                % (cols, rows, sheet_w, sheet_h, spacing, margin))
+        if span_w % cols != 0 or span_h % rows != 0:
+            raise PixelForgeError(
+                "%d columns x %d rows do not divide a %d x %d "
+                "sheet evenly with %d px spacing and margin %d"
+                % (cols, rows, sheet_w, sheet_h, spacing, margin))
+        cell_w = span_w // cols
+        cell_h = span_h // rows
+        if size_given and (cell_w != frame_w or cell_h != frame_h):
+            raise PixelForgeError(
+                "%d columns x %d rows on a %d x %d sheet means "
+                "%d x %d frames, not the %d x %d given"
+                % (cols, rows, sheet_w, sheet_h, cell_w, cell_h,
+                   frame_w, frame_h))
+        if not size_given:
+            frame_w, frame_h = cell_w, cell_h
+            grid_cols, grid_rows = cols, rows
+    positions = []
+    for row in range(grid_rows):
+        for col in range(grid_cols):
+            positions.append((margin + col * (frame_w + spacing),
+                              margin + row * (frame_h + spacing)))
+    return {"columns": grid_cols, "rows": grid_rows,
+            "frame_width": frame_w, "frame_height": frame_h,
+            "positions": positions}
+
+
+def frames_from_grid(sheet, frame_w=None, frame_h=None,
+                     cols=None, rows=None, spacing=0, margin=0):
+    """Cut a sheet into frames on a bare grid (task 40) — no
+    metadata, just the geometry from grid_layout. Returns the
+    frames in row-major order."""
+    layout = grid_layout(sheet.width(), sheet.height(),
+                         frame_w=frame_w, frame_h=frame_h,
+                         cols=cols, rows=rows,
+                         spacing=spacing, margin=margin)
+    width = layout["frame_width"]
+    height = layout["frame_height"]
+    return [sheet.copy(x, y, width, height)
+            for (x, y) in layout["positions"]]
+
+
+def find_sibling_metadata(sheet_path):
+    """The metadata JSON next to a sheet PNG (same stem), or
+    None when there is none — Pixel Forge exports the pair
+    side by side, so a round-trip re-import finds it without
+    the user picking it twice."""
+    candidate = Path(sheet_path).with_suffix(".json")
+    return candidate if candidate.is_file() else None
+
+
+def split_with_metadata(sheet, metadata):
+    """Cut frames per a loaded metadata dict (task 40) — the
+    round-trip path: a sheet exported by Pixel Forge (or any
+    sheet with a matching JSON) comes back as its own frames.
+
+    Returns (frames, durations, tags): durations are each
+    frame's duration_ms, or the metadata fps default when a
+    frame carries none or a 0 (a 0 ms frame cannot play);
+    tags are the metadata's animation tags, or [].
+
+    Raises PixelForgeError when the PNG's size does not match
+    the metadata's declared sheet size — without that check a
+    mismatched pair would cut wrong frames, or raise ValueError
+    from Image.copy instead of a readable message.
+    """
+    if (sheet.width() != metadata["sheet_width"]
+            or sheet.height() != metadata["sheet_height"]):
+        raise PixelForgeError(
+            "the sheet image is %d x %d but its metadata says "
+            "%d x %d — this PNG and JSON are not a pair"
+            % (sheet.width(), sheet.height(),
+               metadata["sheet_width"], metadata["sheet_height"]))
+    frames = frames_from_sheet(sheet, metadata)
+    default = duration_for_fps(metadata["fps"])
+    durations = []
+    for frame in metadata["frames"]:
+        duration = frame.get("duration_ms")
+        durations.append(duration if (isinstance(duration, int)
+                                      and not isinstance(
+                                          duration, bool)
+                                      and duration >= 1)
+                         else default)
+    tags = [dict(tag) for tag in metadata.get("tags", [])]
+    return frames, durations, tags

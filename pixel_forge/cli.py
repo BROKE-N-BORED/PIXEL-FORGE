@@ -5,6 +5,9 @@
     pixel-forge frames VIDEO --fps 8 --out DIR
     pixel-forge prompt "a knight" --out DIR
     pixel-forge sheet DIR --out sheet.png --meta sheet.json
+    pixel-forge split-sheet SHEET.png [--meta sheet.json] [--out DIR]
+    pixel-forge split-sheet SHEET.png --grid 32x32 [--out DIR]
+    pixel-forge split-sheet SHEET.png --cols 4 --rows 3 [--out DIR]
     pixel-forge library list [--tag TAG]
     pixel-forge library add FILE --name NAME [--tags a,b]
     pixel-forge library remove NAME
@@ -45,6 +48,7 @@ needs the image engine and model (see pixel-forge prompt --help).
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -64,7 +68,9 @@ from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
                        load_image, pixelize_file, plural)
 from .presets import PresetStore
 from .skins import extract_skin
-from .spritesheet import load_frame_dir, write_sheet
+from .spritesheet import (find_sibling_metadata, frames_from_grid,
+                          load_frame_dir, load_metadata,
+                          split_with_metadata, write_sheet)
 from .tileset import (DEMO_MAP_SIZE, TILESET_EXPORTS, blob_tiles,
                       export_tileset, wang_tiles)
 from .video import DEFAULT_FPS, video_to_frames
@@ -394,6 +400,38 @@ def build_parser():
                        "file + a PNG, and gamemaker writes one "
                        "horizontal strip named _stripN.")
     _add_output_args(sheet)
+
+    split_sheet = sub.add_parser(
+        "split-sheet", help="split a spritesheet PNG back into "
+        "frame PNGs — with its metadata JSON, or as a grid")
+    split_sheet.add_argument("sheet", help="spritesheet PNG")
+    split_sheet.add_argument("--meta", default=None,
+                             help="metadata JSON (default: the "
+                             "JSON next to the sheet with the "
+                             "same stem, when one exists)")
+    split_sheet.add_argument("--out", default=None,
+                             help="output folder for the frames "
+                             "(default: <sheet-stem>-frames next "
+                             "to the sheet)")
+    split_sheet.add_argument("--grid", default=None,
+                             help="frame size as WxH, e.g. 32x32 "
+                             "(grid split — cannot be combined "
+                             "with --meta)")
+    split_sheet.add_argument("--cols", type=int, default=0,
+                             help="columns in the grid, 0 = not "
+                             "given (grid split — cannot be "
+                             "combined with --meta)")
+    split_sheet.add_argument("--rows", type=int, default=0,
+                             help="rows in the grid, 0 = not given "
+                             "(grid split — cannot be combined "
+                             "with --meta)")
+    split_sheet.add_argument("--spacing", type=int, default=0,
+                             help="blank pixels between frames in "
+                             "the grid (grid split only)")
+    split_sheet.add_argument("--margin", type=int, default=0,
+                             help="blank border around the whole "
+                             "grid (grid split only)")
+    _add_output_args(split_sheet)
 
     library = sub.add_parser(
         "library", help="manage the saved sprite library "
@@ -883,6 +921,91 @@ def cmd_sheet(args):
           % (len(frames), metadata["columns"], metadata["rows"],
              metadata["sheet_width"], metadata["sheet_height"],
              args.fps, out, meta))
+    return 0
+
+
+def _parse_grid_size(text):
+    """A --grid value ("32x32", "64x48") as (width, height), or a
+    plain refusal — never a ValueError traceback."""
+    match = re.fullmatch(r"(\d+)x(\d+)", str(text).strip())
+    if match is None:
+        raise PixelForgeError(
+            "--grid takes WIDTHxHEIGHT like 32x32 (got %r)" % text)
+    width, height = int(match.group(1)), int(match.group(2))
+    if width < 1 or height < 1:
+        raise PixelForgeError(
+            "--grid takes WIDTHxHEIGHT with both over 0 (got %r)"
+            % text)
+    return width, height
+
+
+def cmd_split_sheet(args):
+    sheet_path = Path(args.sheet)
+    sheet = load_image(sheet_path)
+    grid_given = (args.grid is not None or args.cols != 0
+                  or args.rows != 0)
+    if args.spacing < 0:
+        raise PixelForgeError("--spacing cannot be negative")
+    if args.margin < 0:
+        raise PixelForgeError("--margin cannot be negative")
+    if args.cols < 0:
+        raise PixelForgeError("--cols cannot be negative")
+    if args.rows < 0:
+        raise PixelForgeError("--rows cannot be negative")
+    if grid_given and args.meta is not None:
+        raise PixelForgeError(
+            "--meta and the grid flags cannot be combined — "
+            "split with the metadata or as a grid, not both")
+    if not grid_given and (args.spacing or args.margin):
+        raise PixelForgeError(
+            "--spacing and --margin only apply to a grid split "
+            "(--grid or --cols and --rows)")
+    out = args.out
+    if out is None:
+        out = str(sheet_path.parent
+                  / (sheet_path.stem + "-frames"))
+    out_dir = Path(out)
+    if grid_given:
+        frame_w = frame_h = None
+        if args.grid is not None:
+            frame_w, frame_h = _parse_grid_size(args.grid)
+        frames = frames_from_grid(
+            sheet, frame_w=frame_w, frame_h=frame_h,
+            cols=args.cols or None, rows=args.rows or None,
+            spacing=args.spacing, margin=args.margin)
+        durations = []
+        tags = []
+        mode = "grid"
+    else:
+        meta_path = args.meta
+        if meta_path is None:
+            sibling = find_sibling_metadata(sheet_path)
+            if sibling is None:
+                raise PixelForgeError(
+                    "no metadata found next to %s — pass --meta, "
+                    "or split as a grid with --grid or --cols "
+                    "and --rows" % sheet_path.name)
+            meta_path = str(sibling)
+        metadata = load_metadata(meta_path)
+        frames, durations, tags = split_with_metadata(
+            sheet, metadata)
+        mode = "metadata"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    for index, frame in enumerate(frames, start=1):
+        dest = out_dir / ("frame_%03d.png" % index)
+        if not frame.save(str(dest), "PNG"):
+            raise PixelForgeError("could not write: %s" % dest)
+        written.append(dest)
+    _emit_json(args, {"sheet": str(sheet_path),
+                      "mode": mode,
+                      "frames": len(frames),
+                      "out": str(out_dir),
+                      "durations": durations,
+                      "tags": tags})
+    _info(args, "Split %s — %s to %s"
+          % (sheet_path.name, plural(len(frames), "frame"),
+             out_dir))
     return 0
 
 
@@ -1415,6 +1538,8 @@ def main(argv=None):
             return cmd_prompt(args)
         if args.command == "sheet":
             return cmd_sheet(args)
+        if args.command == "split-sheet":
+            return cmd_split_sheet(args)
         if args.command == "library":
             if args.library_command == "list":
                 return cmd_library_list(args)

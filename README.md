@@ -157,7 +157,14 @@ it keeps them and prints the way to remove them by hand.
   between frames, and the playback fps, then Preview spritesheet
   to see the sheet and play the animation from it — at the
   frames' own durations — before you export, or Export
-  spritesheet to write the pair straight away. The Packing
+  spritesheet to write the pair straight away. Split spritesheet
+  goes the other way: pick a sheet PNG and it comes back as
+  frames in the strip — with its metadata JSON (durations and
+  tags included) when one sits next to the sheet, or as a grid
+  you describe with the frame size or the column and row counts,
+  with a live frame count before you split. Split frames are
+  finished pixel art, so the size and palette controls do not
+  re-pixelize them. The Packing
   combo switches the packer: Grid is the default (same-size
   frames in rows), MaxRects packs mixed sizes tight into an
   atlas, with Trim (cut transparent borders), Atlas padding,
@@ -306,6 +313,9 @@ pixel-forge prompt "a knight with a red shield" --out knight/
 pixel-forge prompt "a slime" --count 3 --size 32 --colors 16 --palette pico8
 pixel-forge sheet walk-frames/ --out walk-sheet.png --meta walk-sheet.json
 pixel-forge sheet walk-frames/ --cols 4 --padding 2 --fps 12
+pixel-forge split-sheet walk-sheet.png --out walk-frames/
+pixel-forge split-sheet bare-grid.png --grid 32x32 --out frames/
+pixel-forge split-sheet bare-grid.png --cols 4 --rows 3 --out frames/
 pixel-forge library list
 pixel-forge library list --tag hero
 pixel-forge library add sprite.png --name "Red Knight" --tags hero,red
@@ -504,7 +514,14 @@ has animation tags: each tag is a name plus `from`/`to`, 0-based
 positions into the frames list in playback order, naming a set
 (walk/idle/attack) inside the one sheet. Names are unique, and
 `from` never comes after `to`. Older metadata without `tags`
-loads unchanged.
+loads unchanged. A sheet + JSON pair loads back into the Video
+tab with Split spritesheet (or `pixel-forge split-sheet` on
+the command line) — the frames come back pixel-identical with
+their durations and tags. A sheet with no metadata splits as a
+grid instead: give the frame size or the column and row counts,
+plus spacing and margin when the sheet has them, and the split
+refuses plainly when the numbers do not divide the sheet
+evenly.
 
 ## Atlas packing
 
