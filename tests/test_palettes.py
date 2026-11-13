@@ -32,7 +32,8 @@ class NamedPaletteTests(unittest.TestCase):
 
     def test_named_palettes_registry(self):
         self.assertEqual(set(NAMED_PALETTES),
-                         {"pico8", "gameboy", "grayscale"})
+                         {"pico8", "gameboy", "grayscale",
+                          "resurrect64", "endesga32", "sweetie16"})
 
 
 class SelectTests(unittest.TestCase):
@@ -105,6 +106,34 @@ class NearestColorTests(unittest.TestCase):
         first = nearest_color((10, 20, 30), PICO8, cache)
         second = nearest_color((10, 20, 30), PICO8, cache)
         self.assertEqual(first, second)
+
+    def test_redmean_disagrees_with_euclidean(self):
+        # The target (31, 203, 25) sits between two entries where
+        # squared Euclidean and redmean pick DIFFERENT winners —
+        # this pins the perceptual weighting (task 39).
+        #
+        #   A = (0, 148, 36):  Euclid 4107, redmean 14435.4
+        #   B = (80, 160, 2):  Euclid 4779, redmean 14188.8
+        #
+        # Euclidean picks A (4107 < 4779): A is closer in raw
+        # channel distance. Redmean picks B: A's difference is
+        # mostly green (203 -> 148, a 55-step gap), which redmean
+        # weights x4, while B's difference is mostly red
+        # (31 -> 80) at a low red mean, where red counts least.
+        # The green gap is the one the eye actually sees, so B
+        # is the perceptually closer color.
+        target = (31, 203, 25)
+        palette = [(0, 148, 36), (80, 160, 2)]
+        self.assertEqual(nearest_color(target, palette),
+                         (80, 160, 2))
+
+    def test_tie_goes_to_earliest_entry(self):
+        # A true redmean tie: (0, 127, 0) sits exactly 127 green
+        # steps from both entries, with red and blue identical —
+        # the first entry wins, as before.
+        palette = [(0, 0, 0), (0, 254, 0)]
+        self.assertEqual(nearest_color((0, 127, 0), palette),
+                         (0, 0, 0))
 
 
 class PaletteValidationTests(unittest.TestCase):

@@ -1,5 +1,87 @@
 # Pixel Forge changelog
 
+## 0.49 — 2026-11-13
+
+Palette import + custom palettes — task-list item #39:
+
+- New stdlib-only module pixel_forge/palette_io.py: importers
+  for Lospec `.hex` (one hex color per line, with or without
+  `#`, CRLF or LF), GIMP `.gpl` (header lines, then
+  `R G B [name]`), JASC-PAL `.pal` (count must match the data
+  lines), Adobe `.ase` (binary, parsed with struct — RGB
+  entries only, CMYK/LAB/GRAY entries ignored, and a palette
+  of only non-RGB entries refuses saying no RGB colors were
+  found), and Lospec `.txt` (one RRGGBB per line, optionally
+  followed by a name). Every parser refuses plainly naming
+  the file and what was wrong, instead of silently dropping
+  colors; 0 colors refuses, more than 256 refuses naming the
+  count, and duplicate colors are kept as-is (the file is
+  the authority — dedupe is the editor's job). Exporters for
+  `.hex` and `.gpl`.
+- Three popular palettes bundled as built-ins, copied exactly
+  from Lospec's own files: Resurrect 64 (64 colors), Endesga
+  32 (32), Sweetie 16 (16). Counts and first colors are
+  pinned by tests against the .hex files.
+- User palettes, saved like presets: a PaletteStore keeps
+  them in `palettes.json` inside the library folder, atomic
+  writes (tmp + fsync + os.replace), one bad entry skipped
+  with a warning naming it (the v0.21 rule — never drop all
+  user palettes for one bad one), a wholly unparseable file
+  still raises. A user palette is {name, colors:
+  ["#rrggbb", ...]}; names must not collide with a built-in
+  key or label, and saving over an existing user name
+  replaces it. The four palette pickers (Image, Video,
+  Prompt, Code) list built-ins then user palettes, separated;
+  a picker whose saved palette is gone falls back to "From
+  image" with a plain note, never a crash — and a preset
+  naming a missing palette does the same.
+- Palette editor dialog (the audit's addition): "Palettes..."
+  on the Image tab, next to the palette combo. It lists all
+  palettes with a swatch strip each, opens with no palette
+  picked, and lets the user create a palette (from empty or
+  from an existing palette), edit a user palette (add a color
+  via the color picker, remove, move up/down, edit a hex by
+  typing it), rename, delete (Yes/No, default No), import a
+  palette file in any of the five formats, export a palette
+  to .hex/.gpl, and duplicate. Built-ins are read-only —
+  duplicate one to edit it. The four pickers refresh after
+  any change.
+- "Extract palette..." on the Image tab: runs the existing
+  median-cut at 16 colors on the current image and opens the
+  editor's create flow pre-filled with those colors and a
+  suggested name (the image's stem + " palette"). Disabled
+  with no image loaded.
+- Perceptually weighted nearest-color: nearest_color now uses
+  the redmean approximation instead of squared Euclidean
+  distance — rmean = (r1+r2)/2, red weighted by
+  (2 + rmean/256), green by 4, blue by (2 + (255-rmean)/256).
+  Ties still go to the earliest palette entry and the cache
+  still works. This moves pixelize output wherever two
+  palette entries were near-tied: 48 reference hashes moved,
+  and every one was verified by hand — each changed pixel is
+  redmean-closer to its (dither-shifted) source color than
+  the color v0.48 picked, and the two cases where the
+  median-cut subset itself changed are 5.5% and 2.5% better
+  in total redmean error. The clearest sample: pure green on
+  grayscale used to map to mid-gray (85,85,85) and now maps
+  to light gray (119,119,119), which is the closer match in
+  brightness — the point of the perceptual metric.
+- CLI: `pixel-forge palettes list` (built-ins + user, with
+  counts), `import FILE [--name NAME]` (default: the file's
+  stem; a clash refuses), `export NAME --out FILE` (.hex or
+  .gpl by extension), `delete NAME` (refuses a built-in),
+  `extract IMAGE [--colors N] [--name NAME]` (median-cut N
+  colors, default 16; a clash refuses rather than silently
+  clobbering a hand-edited palette). All with --json/--quiet
+  like the other commands. `--palette` on convert/frames/
+  prompt/presets save now accepts any palette key, built-in
+  or saved, by name.
+- A .gitignore at the tree root (from Joshua's secrets rule):
+  .env, providers.json, local config, private key files, and
+  Python/build noise. No secrets were in the code — the audit
+  of the tree and the full repo history found none — but
+  there was no .gitignore to keep them out.
+
 ## 0.48 — 2026-11-13
 
 Proper atlas packing — task-list item #38:

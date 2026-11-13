@@ -27,6 +27,54 @@ except ImportError:
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 
 
+class GitignoreTests(unittest.TestCase):
+    """The secrets rule (Joshua, 2026-11-13, immutable):
+    sensitive information and APIs are never in code — they live
+    in files covered by .gitignore. The tree was audited clean
+    (no hardcoded keys, tokens, passwords, or credentialed
+    URLs); this pins the .gitignore that keeps it that way, and
+    that the zip builder ships it."""
+
+    def _gitignore_text(self):
+        path = os.path.join(ROOT, ".gitignore")
+        self.assertTrue(os.path.exists(path),
+                        "no .gitignore at the tree root")
+        with open(path) as fh:
+            return fh.read()
+
+    def test_gitignore_covers_secrets(self):
+        text = self._gitignore_text()
+        lines = {line.strip() for line in text.splitlines()
+                 if line.strip() and not line.strip().startswith("#")}
+        for pattern in (".env", ".env.*", "providers.json",
+                        "config.local.json", "*.local.json",
+                        "credentials*.json", "*.pem", "*.key",
+                        "id_rsa*"):
+            self.assertIn(pattern, lines,
+                          ".gitignore does not cover %s" % pattern)
+
+    def test_gitignore_covers_python_and_noise(self):
+        text = self._gitignore_text()
+        lines = {line.strip() for line in text.splitlines()
+                 if line.strip() and not line.strip().startswith("#")}
+        for pattern in ("__pycache__/", "*.py[cod]", ".venv/",
+                        "venv/", "*.zip", ".DS_Store", "Thumbs.db"):
+            self.assertIn(pattern, lines,
+                          ".gitignore does not cover %s" % pattern)
+
+    def test_zip_builder_ships_gitignore(self):
+        # build_zip.py lists root files explicitly — .gitignore
+        # must be on the list, or the zip ships without it.
+        import importlib.util
+
+        path = os.path.join(ROOT, "tools", "build_zip.py")
+        spec = importlib.util.spec_from_file_location(
+            "build_zip", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertIn(".gitignore", module.INCLUDE_FILES)
+
+
 @unittest.skipUnless(HAS_QT, "PySide6 not available")
 class InstallerTests(unittest.TestCase):
     @classmethod

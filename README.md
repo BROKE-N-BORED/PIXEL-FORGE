@@ -377,7 +377,9 @@ Options for `convert` (and the pixelize half of `frames` and
 - `--keep-aspect` — fit inside the size box instead of stretching to it.
 - `--colors` — max colors, 2–256 (default 16).
 - `--palette` — `image` (built from the picture), `pico8` (16 colors),
-  `gameboy` (4 shades), `grayscale` (default: `image`).
+  `gameboy` (4 shades), `grayscale` (16 shades), `resurrect64`
+  (64 colors), `endesga32` (32), `sweetie16` (16), or the name
+  of a palette you saved (default: `image`).
 - `--dither` / `--no-dither` — ordered (Bayer) dithering (default on).
 - `--out` — output PNG (default: `<input-stem>-pixel.png` next to the
   input).
@@ -734,6 +736,75 @@ masks) plus a bracket-balance check. No Tiled or Godot runs in
 the build sandbox, so opening the exports in the real editors
 is a real-PC check, not something proven here.
 
+## Palettes
+
+Every palette picker — Image, Video, Prompt, and the Code tab's
+texture section — lists the same palettes: "From image" (built
+from the picture by median-cut), then the built-ins, then your
+saved palettes after a separator. The built-ins are PICO-8 (16
+colors), Game Boy (4 shades), Grayscale (16 shades), and three
+popular palettes bundled from Lospec: Resurrect 64 (64 colors),
+Endesga 32 (32), Sweetie 16 (16).
+
+**Import.** "Palettes..." on the Image tab, next to the palette
+picker, opens the palette editor; its Import button reads five
+formats:
+
+- `.hex` — Lospec: one hex color per line, with or without a
+  leading `#` (blank lines skipped).
+- `.gpl` — GIMP: header lines (`GIMP Palette`, `Name:`, ...),
+  then `R G B [name]` lines.
+- `.pal` — JASC-PAL: `JASC-PAL` + version + count lines, then
+  `R G B` lines.
+- `.ase` — Adobe Swatch Exchange, binary: RGB entries are
+  imported; CMYK, LAB, and GRAY entries are skipped, and a
+  file with no RGB colors refuses plainly.
+- `.txt` — Lospec text: one `RRGGBB` per line, optionally
+  followed by a name.
+
+A malformed file refuses with a plain message naming the file
+and what was wrong, instead of silently dropping colors. A
+palette needs at least 1 color and at most 256 (the pixelizer's
+max). Duplicate colors in a file are kept as-is — the file is
+the authority.
+
+**Editor.** The dialog lists every palette with a swatch strip
+each, opens with no palette picked, and from it you can create
+a palette (from empty or from an existing palette), edit a
+saved palette (add a color via the color picker, remove a
+color, move a color up or down, edit a hex value by typing
+it), rename it, delete it (Yes/No, default No), export it to
+`.hex` or `.gpl`, and duplicate it. Built-ins are read-only —
+duplicate one to edit it. Saved palettes live in
+`palettes.json` in the library folder, like presets; one bad
+entry is skipped with a warning instead of dropping them all,
+and a name that collides with a built-in refuses plainly.
+
+**Extract palette.** "Extract palette..." on the Image tab
+runs the median-cut at 16 colors on the current image and
+opens the editor's create flow pre-filled with those colors
+and a suggested name (the image's stem + " palette"). It works
+from the loaded image only — disabled with no image.
+
+**Perceptual matching.** When a pixel is matched to its
+nearest palette color, the distance is the redmean
+approximation, not plain Euclidean distance: with
+rmean = (r1+r2)/2, red is weighted by (2 + rmean/256), green
+by 4, and blue by (2 + (255-rmean)/256) — so a bright green
+maps to a light gray rather than a mid gray, which is the
+closer match in brightness. Pixelize output may shift slightly
+from v0.48 where two palette entries were near-tied; that is
+the point of the change, and every moved case was verified by
+hand to be the perceptually closer color.
+
+The CLI mirrors the editor: `pixel-forge palettes list`,
+`import FILE [--name NAME]`, `export NAME --out FILE` (.hex or
+.gpl by extension), `delete NAME` (refuses a built-in), and
+`extract IMAGE [--colors N] [--name NAME]` (median-cut N
+colors, default 16) — all with `--json`/`--quiet` like the
+other commands. `convert`, `frames`, `prompt`, and
+`presets save` accept any palette by name, built-in or saved.
+
 ## Library folder and preset format
 
 The library is plain files in `~/pixel-forge-library/` (set
@@ -744,6 +815,7 @@ there until the first save:
 ~/pixel-forge-library/
   library.json     the index
   presets.json     your saved presets
+  palettes.json    your saved palettes
   session.json     recent files + the last-loaded image, video, code
   knight.png       one sprite entry
   walk-sheet.png   one spritesheet entry (the PNG half)
@@ -804,8 +876,9 @@ there, they ship in the program:
 ```
 
 A preset needs all six keys: `width` and `height` (1–512),
-`keep_aspect` (true/false), `palette` (`image`, `pico8`,
-`gameboy`, `grayscale`), `max_colors` (2–256), `dither`
+`keep_aspect` (true/false), `palette` (a built-in key —
+`image`, `pico8`, `gameboy`, `grayscale`, `resurrect64`,
+`endesga32`, `sweetie16` — or the name of a saved palette),
 (true/false). A hand-edited file with a bad preset fails loudly
 instead of applying nonsense. A preset may also carry five
 optional video fields — `extract_fps` (2, 4, 8, 12, or 24),

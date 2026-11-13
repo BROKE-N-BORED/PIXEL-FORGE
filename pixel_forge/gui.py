@@ -49,7 +49,7 @@ from PySide6.QtGui import (QAction, QColor, QDesktopServices, QIcon,
                            QImage, QImageReader, QKeySequence, QPainter,
                            QPixmap, QShortcut)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup,
-                               QCheckBox, QComboBox, QDialog,
+                               QCheckBox, QColorDialog, QComboBox, QDialog,
                                QDoubleSpinBox, QFileDialog, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMainWindow, QMessageBox,
@@ -81,7 +81,8 @@ from .imagegen import (DEFAULT_COUNT, DEFAULT_NEGATIVE, DEFAULT_SIZE,
                        validate_prompt)
 from .layers import Layer, composite_layers, has_content
 from .library import SOURCE_LABELS, Library
-from .palettes import PALETTE_LABELS
+from .palette_io import (PaletteStore, extract_palette_from_image)
+from .palettes import NAMED_PALETTES, PALETTE_LABELS
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
                        count_opaque_colors, load_image, pixelize_image,
                        plural)
@@ -495,7 +496,8 @@ class VideoWorker(QThread):
                 keep_aspect=settings["keep_aspect"],
                 palette=settings["palette"],
                 max_colors=settings["max_colors"],
-                dither=settings["dither"])
+                dither=settings["dither"],
+                palettes=settings.get("palettes"))
                 for raw_path in raw]
         except PixelForgeError as exc:
             if tmp is not None:
@@ -1324,6 +1326,622 @@ class _LayerStackCommand(UndoCommand):
                                       self.after_active)
 
 
+def _parse_hex_color(text):
+    """A typed hex color ("#rrggbb" or "rrggbb") as an (r, g, b)
+    tuple, or None when it is not one."""
+    text = text.strip().lstrip("#")
+    if len(text) != 6:
+        return None
+    try:
+        return (int(text[0:2], 16), int(text[2:4], 16),
+                int(text[4:6], 16))
+    except ValueError:
+        return None
+
+
+class PaletteEditorDialog(QDialog):
+    """Create, edit, import, and export palettes (task 39).
+
+    The left list holds every palette — built-ins first, then
+    saved palettes — with a swatch strip under it showing the
+    picked palette's colors. The right side edits the picked
+    palette: its name, and its colors (add via the color picker,
+    remove, move up/down, or edit a hex value by typing it).
+    Built-ins are read-only here — they can be duplicated and
+    the copy edited, or exported, but not changed or deleted.
+
+    Nothing is picked by default: the dialog opens with no
+    palette picked, and the right side stays disabled until the
+    user picks one or starts a new palette. `changed` is True
+    when anything was saved, renamed, deleted, or imported, so
+    the window knows to refresh its palette pickers.
+    """
+
+    def __init__(self, parent, store, prefill_colors=None,
+                 prefill_name=None):
+        super().__init__(parent)
+        self.setWindowTitle("Palettes")
+        self.resize(640, 420)
+        self.store = store
+        self.changed = False
+        # The picked palette: None, or ("builtin", key) /
+        # ("user", name). The working copy being edited: None,
+        # or {"name": str, "colors": [(r, g, b)], "original":
+        # name-or-None (None for a brand-new palette),
+        # "builtin": bool}.
+        self._picked = None
+        self._editing = None
+        # Qt moves the list's current row to 0 when the dialog
+        # is first shown — that is not a pick (see
+        # SheetFrameDialog for the same guard).
+        self._row_change_seen = False
+
+        layout = QHBoxLayout(self)
+
+        left = QVBoxLayout()
+        left.addWidget(QLabel("Palettes"))
+        self.palette_list = QListWidget()
+        self.palette_list.setToolTip(
+            "Built-in palettes, then your saved palettes")
+        self.palette_list.currentRowChanged.connect(
+            self._on_row_changed)
+        self.palette_list.itemClicked.connect(
+            self._on_palette_clicked)
+        left.addWidget(self.palette_list, 1)
+        self.swatch_label = QLabel()
+        self.swatch_label.setFixedHeight(28)
+        self.swatch_label.setToolTip(
+            "The picked palette's colors")
+        left.addWidget(self.swatch_label)
+        left_buttons = QHBoxLayout()
+        self.new_btn = QPushButton("New")
+        self.new_btn.setToolTip("Create a new palette")
+        self.new_btn.clicked.connect(self._on_new)
+        left_buttons.addWidget(self.new_btn)
+        self.duplicate_btn = QPushButton("Duplicate")
+        self.duplicate_btn.setToolTip(
+            "Copy the picked palette into a new one")
+        self.duplicate_btn.clicked.connect(self._on_duplicate)
+        left_buttons.addWidget(self.duplicate_btn)
+        self.import_btn = QPushButton("Import")
+        self.import_btn.setToolTip(
+            "Import a palette file (.hex, .gpl, .pal, .ase, .txt)")
+        self.import_btn.clicked.connect(self._on_import)
+        left_buttons.addWidget(self.import_btn)
+        self.export_btn = QPushButton("Export")
+        self.export_btn.setToolTip(
+            "Export the picked palette to .hex or .gpl")
+        self.export_btn.clicked.connect(self._on_export)
+        left_buttons.addWidget(self.export_btn)
+        self.delete_btn = QPushButton("Delete")
+        self.delete_btn.setToolTip("Delete the picked palette")
+        self.delete_btn.clicked.connect(self._on_delete)
+        left_buttons.addWidget(self.delete_btn)
+        left.addLayout(left_buttons)
+        layout.addLayout(left, 1)
+
+        right = QVBoxLayout()
+        right.addWidget(QLabel("Name"))
+        self.name_edit = QLineEdit()
+        self.name_edit.setToolTip("The palette's name")
+        self.name_edit.textChanged.connect(self._update_buttons)
+        right.addWidget(self.name_edit)
+        self.start_from_label = QLabel("Start from")
+        right.addWidget(self.start_from_label)
+        self.start_from_combo = QComboBox()
+        self.start_from_combo.setToolTip(
+            "Copy the colors of an existing palette, or start "
+            "empty")
+        self.start_from_combo.currentIndexChanged.connect(
+            self._on_start_from)
+        right.addWidget(self.start_from_combo)
+        right.addWidget(QLabel("Colors"))
+        self.color_list = QListWidget()
+        self.color_list.setToolTip(
+            "The palette's colors, in order")
+        self.color_list.currentRowChanged.connect(
+            self._on_color_row_changed)
+        right.addWidget(self.color_list, 1)
+        color_btn_row = QHBoxLayout()
+        self.add_btn = QPushButton("Add")
+        self.add_btn.setToolTip("Add a color with the color picker")
+        self.add_btn.clicked.connect(self._on_add_color)
+        color_btn_row.addWidget(self.add_btn)
+        self.remove_btn = QPushButton("Remove")
+        self.remove_btn.setToolTip("Remove the picked color")
+        self.remove_btn.clicked.connect(self._on_remove_color)
+        color_btn_row.addWidget(self.remove_btn)
+        self.up_btn = QPushButton("Move up")
+        self.up_btn.setToolTip("Move the picked color up one place")
+        self.up_btn.clicked.connect(lambda: self._on_move_color(-1))
+        color_btn_row.addWidget(self.up_btn)
+        self.down_btn = QPushButton("Move down")
+        self.down_btn.setToolTip(
+            "Move the picked color down one place")
+        self.down_btn.clicked.connect(lambda: self._on_move_color(1))
+        color_btn_row.addWidget(self.down_btn)
+        right.addLayout(color_btn_row)
+        hex_row = QHBoxLayout()
+        hex_row.addWidget(QLabel("Hex"))
+        self.hex_edit = QLineEdit()
+        self.hex_edit.setToolTip(
+            "The picked color as a hex value — type a new one "
+            "and press Set")
+        self.hex_edit.setPlaceholderText("#rrggbb")
+        hex_row.addWidget(self.hex_edit, 1)
+        self.set_hex_btn = QPushButton("Set")
+        self.set_hex_btn.setToolTip(
+            "Set the picked color to the typed hex value")
+        self.set_hex_btn.clicked.connect(self._on_set_hex)
+        hex_row.addWidget(self.set_hex_btn)
+        right.addLayout(hex_row)
+        self.save_btn = QPushButton("Save")
+        self.save_btn.setObjectName("export")
+        self.save_btn.setToolTip("Save this palette")
+        self.save_btn.clicked.connect(self._on_save)
+        right.addWidget(self.save_btn)
+        layout.addLayout(right, 1)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        close_row.addWidget(close_btn)
+        right.addLayout(close_row)
+
+        self._refresh_palette_list()
+        self._update_buttons()
+        if prefill_colors is not None:
+            # The extract flow: open straight in the create flow
+            # with the extracted colors and suggested name.
+            self._on_new()
+            self.name_edit.setText(prefill_name or "")
+            self._editing["colors"] = list(prefill_colors)
+            self._refresh_color_list()
+            self._update_buttons()
+
+    # ---------------------------------------------------------- list
+
+    def _refresh_palette_list(self):
+        """Rebuild the palette list from the store, keeping the
+        pick when the palette still exists."""
+        picked = self._picked
+        self.palette_list.blockSignals(True)
+        try:
+            self.palette_list.clear()
+            try:
+                palettes = self.store.all_palettes()
+            except PixelForgeError as exc:
+                warn_dialog(self, "Could not list palettes",
+                            str(exc))
+                palettes = []
+            for name, colors, builtin in palettes:
+                label = PALETTE_LABELS.get(name, name) if builtin \
+                    else name
+                item = QListWidgetItem(
+                    "%s — %d %s" % (
+                        label, len(colors),
+                        "color" if len(colors) == 1 else "colors"))
+                item.setData(Qt.ItemDataRole.UserRole,
+                             ("builtin" if builtin else "user", name))
+                self.palette_list.addItem(item)
+        finally:
+            self.palette_list.blockSignals(False)
+        if picked is not None:
+            for row in range(self.palette_list.count()):
+                item = self.palette_list.item(row)
+                if item.data(Qt.ItemDataRole.UserRole) == picked:
+                    self._select_palette(picked)
+                    break
+            else:
+                # The picked palette is gone (renamed or
+                # deleted) — clear the pick and the editor.
+                self._picked = None
+                self._editing = None
+                self.name_edit.clear()
+                self._paint_swatches([])
+                self._refresh_color_list()
+                self._update_buttons()
+        else:
+            self.palette_list.setCurrentRow(-1)
+            self._paint_swatches([])
+
+    def _select_palette(self, picked):
+        """Pick a palette by ("builtin"/"user", name) — the
+        programmatic pick used after a save or import. Moves
+        the list row and fills the right side."""
+        for row in range(self.palette_list.count()):
+            item = self.palette_list.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == picked:
+                self.palette_list.blockSignals(True)
+                self.palette_list.setCurrentRow(row)
+                self.palette_list.blockSignals(False)
+                break
+        self._picked = picked
+        self._row_change_seen = True
+        self._load_editing()
+
+    def _on_row_changed(self, row):
+        if row < 0:
+            return
+        if self.isVisible() and not self._row_change_seen:
+            # The auto-set to row 0 on first show — not a pick.
+            self._row_change_seen = True
+            return
+        self._row_change_seen = True
+        item = self.palette_list.item(row)
+        if item is not None:
+            self._picked = item.data(Qt.ItemDataRole.UserRole)
+            self._load_editing()
+
+    def _on_palette_clicked(self, item):
+        # A click on the already-current row fires no
+        # currentRowChanged — but it is still a pick.
+        self._picked = item.data(Qt.ItemDataRole.UserRole)
+        self._row_change_seen = True
+        self._load_editing()
+
+    def _load_editing(self):
+        """Fill the right side from the picked palette — a
+        working copy for a user palette, a read-only view for a
+        built-in."""
+        if self._picked is None:
+            self._editing = None
+            self.name_edit.clear()
+            self._refresh_color_list()
+            self._update_buttons()
+            return
+        kind, name = self._picked
+        builtin = kind == "builtin"
+        colors = self.store.get(name, builtin=builtin)
+        if colors is None:
+            self._picked = None
+            self._editing = None
+            self._refresh_color_list()
+            self._update_buttons()
+            return
+        self._editing = {"name": PALETTE_LABELS.get(name, name)
+                         if builtin else name,
+                         "colors": list(colors),
+                         "original": None if builtin else name,
+                         "builtin": builtin}
+        self.name_edit.blockSignals(True)
+        self.name_edit.setText(self._editing["name"])
+        self.name_edit.blockSignals(False)
+        self._paint_swatches(colors)
+        self._refresh_color_list()
+        self._update_buttons()
+
+    def _paint_swatches(self, colors):
+        """The swatch strip: the palette's colors side by side,
+        or blank when nothing is picked."""
+        width = max(1, self.swatch_label.width())
+        height = self.swatch_label.height() or 28
+        pixmap = QPixmap(width, height)
+        pixmap.fill(QColor(0, 0, 0, 0))
+        if colors:
+            painter = QPainter(pixmap)
+            try:
+                step = width / len(colors)
+                for i, (r, g, b) in enumerate(colors):
+                    painter.fillRect(int(i * step), 0,
+                                     max(1, int(step) + 1), height,
+                                     QColor(r, g, b))
+            finally:
+                painter.end()
+        self.swatch_label.setPixmap(pixmap)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._editing is not None:
+            self._paint_swatches(self._editing["colors"])
+
+    # -------------------------------------------------------- editing
+
+    def _refresh_color_list(self):
+        """Rebuild the color rows from the working copy."""
+        self.color_list.blockSignals(True)
+        try:
+            self.color_list.clear()
+            if self._editing is None:
+                return
+            for rgb in self._editing["colors"]:
+                pixmap = QPixmap(16, 16)
+                pixmap.fill(QColor(*rgb))
+                item = QListWidgetItem(
+                    QIcon(pixmap), "#%02x%02x%02x" % rgb)
+                item.setData(Qt.ItemDataRole.UserRole, rgb)
+                self.color_list.addItem(item)
+        finally:
+            self.color_list.blockSignals(False)
+        self._on_color_row_changed(self.color_list.currentRow())
+
+    def _on_color_row_changed(self, row):
+        if row >= 0 and self._editing is not None:
+            rgb = self._editing["colors"][row]
+            self.hex_edit.setText("#%02x%02x%02x" % rgb)
+        else:
+            self.hex_edit.clear()
+        self._update_buttons()
+
+    def _update_buttons(self):
+        """Enable what the current state allows. Nothing picked:
+        only New, Import, and Close. A built-in picked: Duplicate
+        and Export, nothing that changes it. A user palette or a
+        new one: the full editor, with Save needing a name and
+        at least one color."""
+        editing = self._editing
+        picked = self._picked
+        is_new = editing is not None \
+            and editing["original"] is None \
+            and not editing["builtin"]
+        self.start_from_label.setVisible(is_new)
+        self.start_from_combo.setVisible(is_new)
+        self.name_edit.setEnabled(editing is not None
+                                  and not editing["builtin"])
+        self.color_list.setEnabled(editing is not None)
+        row = self.color_list.currentRow()
+        has_row = editing is not None and row >= 0
+        editable = editing is not None and not editing["builtin"]
+        self.add_btn.setEnabled(editable
+                                and len(editing["colors"]) < 256)
+        self.remove_btn.setEnabled(editable and has_row)
+        self.up_btn.setEnabled(editable and row > 0)
+        self.down_btn.setEnabled(
+            editable and has_row
+            and row < len(editing["colors"]) - 1)
+        self.set_hex_btn.setEnabled(editable and has_row)
+        self.hex_edit.setEnabled(editable and has_row)
+        self.save_btn.setEnabled(
+            editable and bool(self.name_edit.text().strip())
+            and len(editing["colors"]) >= 1)
+        self.duplicate_btn.setEnabled(picked is not None)
+        self.export_btn.setEnabled(picked is not None)
+        self.delete_btn.setEnabled(
+            picked is not None and picked[0] == "user")
+
+    def _on_new(self):
+        """Start a new palette — empty, or copied from the
+        "Start from" picker."""
+        self._picked = None
+        self.palette_list.blockSignals(True)
+        self.palette_list.setCurrentRow(-1)
+        self.palette_list.blockSignals(False)
+        self._editing = {"name": "", "colors": [],
+                         "original": None, "builtin": False}
+        self.name_edit.blockSignals(True)
+        self.name_edit.clear()
+        self.name_edit.blockSignals(False)
+        self.start_from_combo.blockSignals(True)
+        self.start_from_combo.clear()
+        self.start_from_combo.addItem("Empty", None)
+        try:
+            palettes = self.store.all_palettes()
+        except PixelForgeError:
+            palettes = []
+        for name, colors, builtin in palettes:
+            label = PALETTE_LABELS.get(name, name) if builtin \
+                else name
+            self.start_from_combo.addItem(
+                "%s — %d %s" % (
+                    label, len(colors),
+                    "color" if len(colors) == 1 else "colors"),
+                ("builtin" if builtin else "user", name))
+        self.start_from_combo.blockSignals(False)
+        self._paint_swatches([])
+        self._refresh_color_list()
+        self._update_buttons()
+        self.name_edit.setFocus()
+
+    def _on_start_from(self, index):
+        if self._editing is None or index < 0:
+            return
+        picked = self.start_from_combo.itemData(index)
+        if picked is None:
+            self._editing["colors"] = []
+        else:
+            kind, name = picked
+            colors = self.store.get(name, builtin=(kind == "builtin"))
+            if colors is not None:
+                self._editing["colors"] = list(colors)
+        self._paint_swatches(self._editing["colors"])
+        self._refresh_color_list()
+        self._update_buttons()
+
+    def _on_duplicate(self):
+        """Copy the picked palette into a new palette — the name
+        gets " copy" (numbered when that is taken), and the copy
+        is what gets edited."""
+        if self._picked is None or self._editing is None:
+            return
+        base = self._editing["name"]
+        taken = {name.casefold() for name, _c, _b
+                 in self.store.all_palettes()}
+        taken.add("image")
+        name = "%s copy" % base
+        number = 2
+        while name.casefold() in taken:
+            name = "%s copy %d" % (base, number)
+            number += 1
+        colors = list(self._editing["colors"])
+        self._on_new()
+        self.name_edit.setText(name)
+        self._editing["colors"] = colors
+        self._paint_swatches(colors)
+        self._refresh_color_list()
+        self._update_buttons()
+
+    def _on_add_color(self):
+        if self._editing is None or self._editing["builtin"]:
+            return
+        color = QColorDialog.getColor(QColor(0, 0, 0), self,
+                                      "Pick a color")
+        if not color.isValid():
+            return
+        self._editing["colors"].append(
+            (color.red(), color.green(), color.blue()))
+        self._paint_swatches(self._editing["colors"])
+        self._refresh_color_list()
+        self.color_list.setCurrentRow(
+            len(self._editing["colors"]) - 1)
+        self._update_buttons()
+
+    def _on_remove_color(self):
+        if self._editing is None or self._editing["builtin"]:
+            return
+        row = self.color_list.currentRow()
+        if row < 0:
+            return
+        del self._editing["colors"][row]
+        self._paint_swatches(self._editing["colors"])
+        self._refresh_color_list()
+        self._update_buttons()
+
+    def _on_move_color(self, step):
+        if self._editing is None or self._editing["builtin"]:
+            return
+        row = self.color_list.currentRow()
+        colors = self._editing["colors"]
+        if row < 0 or row + step < 0 or row + step >= len(colors):
+            return
+        colors[row], colors[row + step] = colors[row + step], \
+            colors[row]
+        self._paint_swatches(colors)
+        self._refresh_color_list()
+        self.color_list.setCurrentRow(row + step)
+        self._update_buttons()
+
+    def _on_set_hex(self):
+        if self._editing is None or self._editing["builtin"]:
+            return
+        row = self.color_list.currentRow()
+        if row < 0:
+            return
+        rgb = _parse_hex_color(self.hex_edit.text())
+        if rgb is None:
+            warn_dialog(self, "Not a color",
+                        "%r is not a hex color — use #rrggbb"
+                        % self.hex_edit.text().strip())
+            return
+        self._editing["colors"][row] = rgb
+        self._paint_swatches(self._editing["colors"])
+        self._refresh_color_list()
+        self.color_list.setCurrentRow(row)
+        self._update_buttons()
+
+    def _on_save(self):
+        """Commit the working copy — a new palette, or an edit
+        (and possible rename) of a user palette. Saving over
+        another palette's name asks first."""
+        if self._editing is None or self._editing["builtin"]:
+            return
+        name = self.name_edit.text().strip()
+        colors = self._editing["colors"]
+        original = self._editing["original"]
+        if original is None:
+            existing = self.store.find(name)
+            if existing is not None:
+                answer = QMessageBox.question(
+                    self, "Replace palette?",
+                    "A palette named %r already exists. Replace "
+                    "it?" % existing,
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+        try:
+            if original is not None and name != original:
+                self.store.rename(original, name)
+            self.store.save(name, colors)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not save palette", str(exc))
+            return
+        self.changed = True
+        self._refresh_palette_list()
+        self._select_palette(("user", name))
+
+    def _on_delete(self):
+        """Delete the picked user palette — Yes/No, default No."""
+        if self._picked is None or self._picked[0] != "user":
+            return
+        name = self._picked[1]
+        answer = QMessageBox.question(
+            self, "Delete palette?",
+            "Delete the palette %r?" % name,
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.store.delete(name)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not delete palette", str(exc))
+            return
+        self.changed = True
+        self._picked = None
+        self._editing = None
+        self.name_edit.clear()
+        self._refresh_palette_list()
+        self._refresh_color_list()
+        self._update_buttons()
+
+    def _on_import(self):
+        """Import a palette file — the five formats — into a
+        saved palette. A name clash asks Yes/No to replace."""
+        from .palette_io import read_palette_file
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import palette", "",
+            "Palette files (*.hex *.gpl *.pal *.ase *.txt)")
+        if not path:
+            return
+        try:
+            file_name, _colors = read_palette_file(path)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not import palette", str(exc))
+            return
+        overwrite = False
+        existing = self.store.find(file_name)
+        if existing is not None:
+            answer = QMessageBox.question(
+                self, "Replace palette?",
+                "A palette named %r already exists. Replace it?"
+                % existing,
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            overwrite = True
+        try:
+            name = self.store.import_file(path, overwrite=overwrite)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not import palette", str(exc))
+            return
+        self.changed = True
+        self._refresh_palette_list()
+        self._select_palette(("user", name))
+
+    def _on_export(self):
+        """Export the picked palette to .hex or .gpl."""
+        if self._picked is None:
+            return
+        kind, name = self._picked
+        builtin = kind == "builtin"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export palette", "%s.hex" % name,
+            "Lospec hex (*.hex);;GIMP palette (*.gpl)")
+        if not path:
+            return
+        try:
+            self.store.export_palette(name, path, builtin=builtin)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not export palette", str(exc))
+            return
+
+
 class MainWindow(QMainWindow):
     def __init__(self, library_dir=None, restore=True):
         super().__init__()
@@ -1338,6 +1956,7 @@ class MainWindow(QMainWindow):
         # session), and tests turn it off to drive restore by hand.
         self.library = Library(library_dir)
         self.preset_store = PresetStore(self.library.directory)
+        self.palette_store = PaletteStore(self.library.directory)
         self._applying_preset = False
         # Session (task 29): recent files + the last-loaded image,
         # video, and code, from session.json in the library folder.
@@ -2097,11 +2716,27 @@ class MainWindow(QMainWindow):
         self.palette_combo = QComboBox()
         self.palette_combo.setToolTip(
             "Colors the sprite may use")
-        for key in ("image", "pico8", "gameboy", "grayscale"):
-            self.palette_combo.addItem(PALETTE_LABELS[key], key)
+        self._fill_palette_combo(self.palette_combo)
         self.palette_combo.currentIndexChanged.connect(
             self._on_control_changed)
         form.addWidget(self.palette_combo)
+
+        palette_btn_row = QHBoxLayout()
+        self.palettes_btn = QPushButton("Palettes…")
+        self.palettes_btn.setToolTip(
+            "Create, edit, import, and export palettes")
+        self.palettes_btn.clicked.connect(
+            lambda: self._open_palette_editor())
+        palette_btn_row.addWidget(self.palettes_btn)
+        self.extract_palette_btn = QPushButton("Extract palette…")
+        self.extract_palette_btn.setToolTip(
+            "Extract a palette from the loaded image and save it")
+        self.extract_palette_btn.setEnabled(False)
+        self.extract_palette_btn.clicked.connect(
+            self._extract_palette)
+        palette_btn_row.addWidget(self.extract_palette_btn)
+        palette_btn_row.addStretch(1)
+        form.addLayout(palette_btn_row)
 
         colors_row = QHBoxLayout()
         colors_row.addWidget(QLabel("Max colors"))
@@ -2591,6 +3226,10 @@ class MainWindow(QMainWindow):
         """Re-run the pixelizer with the current controls."""
         if self.source_image is None:
             return
+        # Extract works from the source image, not the result —
+        # it is available whenever an image is loaded, even if
+        # the pixelize below fails.
+        self.extract_palette_btn.setEnabled(True)
         try:
             result = pixelize_image(
                 self.source_image,
@@ -2599,7 +3238,8 @@ class MainWindow(QMainWindow):
                 keep_aspect=self.aspect_check.isChecked(),
                 palette=self.palette_combo.currentData(),
                 max_colors=self.colors_spin.value(),
-                dither=self.dither_check.isChecked())
+                dither=self.dither_check.isChecked(),
+                palettes=self.palette_store.user_palettes())
         except PixelForgeError as exc:
             self.statusBar().showMessage(str(exc))
             return
@@ -3335,8 +3975,7 @@ class MainWindow(QMainWindow):
         self.video_palette_combo = QComboBox()
         self.video_palette_combo.setToolTip(
             "Colors the frames may use")
-        for key in ("image", "pico8", "gameboy", "grayscale"):
-            self.video_palette_combo.addItem(PALETTE_LABELS[key], key)
+        self._fill_palette_combo(self.video_palette_combo)
         self.video_palette_combo.currentIndexChanged.connect(
             self._on_video_control_changed)
         form.addWidget(self.video_palette_combo)
@@ -3789,6 +4428,7 @@ class MainWindow(QMainWindow):
             "palette": self.video_palette_combo.currentData(),
             "max_colors": self.video_colors_spin.value(),
             "dither": self.video_dither_check.isChecked(),
+            "palettes": self.palette_store.user_palettes(),
         }
 
     def _video_estimate(self):
@@ -5162,8 +5802,7 @@ class MainWindow(QMainWindow):
         self.prompt_palette_combo = QComboBox()
         self.prompt_palette_combo.setToolTip(
             "Colors the sprite may use")
-        for key in ("image", "pico8", "gameboy", "grayscale"):
-            self.prompt_palette_combo.addItem(PALETTE_LABELS[key], key)
+        self._fill_palette_combo(self.prompt_palette_combo)
         self.prompt_palette_combo.currentIndexChanged.connect(
             self._on_prompt_control_changed)
         form.addWidget(self.prompt_palette_combo)
@@ -6253,7 +6892,8 @@ class MainWindow(QMainWindow):
                 keep_aspect=self.prompt_aspect_check.isChecked(),
                 palette=self.prompt_palette_combo.currentData(),
                 max_colors=self.prompt_colors_spin.value(),
-                dither=self.prompt_dither_check.isChecked())
+                dither=self.prompt_dither_check.isChecked(),
+                palettes=self.palette_store.user_palettes())
         except PixelForgeError as exc:
             # Same as the keeper load above (task 27): the failure
             # goes in the info label, not just the status bar, so
@@ -6430,9 +7070,7 @@ class MainWindow(QMainWindow):
         self.code_texture_palette_combo = QComboBox()
         self.code_texture_palette_combo.setToolTip(
             "Colors the texture may use")
-        for key in ("image", "pico8", "gameboy", "grayscale"):
-            self.code_texture_palette_combo.addItem(
-                PALETTE_LABELS[key], key)
+        self._fill_palette_combo(self.code_texture_palette_combo)
         self.code_texture_palette_combo.currentIndexChanged.connect(
             self._on_code_texture_control_changed)
         texture_form.addWidget(self.code_texture_palette_combo)
@@ -6780,7 +7418,7 @@ class MainWindow(QMainWindow):
                                      settings["height"]))
         palette = settings.get("palette", "image")
         if palette != "image":
-            parts.append(PALETTE_LABELS[palette])
+            parts.append(self._palette_label(palette))
         if settings.get("max_colors", MAX_COLORS) != MAX_COLORS:
             parts.append("%d colors" % settings["max_colors"])
         if settings.get("dither"):
@@ -6811,6 +7449,7 @@ class MainWindow(QMainWindow):
             "palette": self.code_texture_palette_combo.currentData(),
             "max_colors": self.code_texture_colors_spin.value(),
             "dither": self.code_texture_dither_check.isChecked(),
+            "palettes": self.palette_store.user_palettes(),
         }
 
     def _start_texture_worker(self):
@@ -7196,6 +7835,18 @@ class MainWindow(QMainWindow):
             index = controls["palette"].findData(settings["palette"])
             if index >= 0:
                 controls["palette"].setCurrentIndex(index)
+            else:
+                # The preset names a palette that is gone (a
+                # user palette deleted since the preset was
+                # saved) — fall back to "From image" with a note,
+                # never crash and never leave the picker pointing
+                # at nothing.
+                index = controls["palette"].findData("image")
+                if index >= 0:
+                    controls["palette"].setCurrentIndex(index)
+                self.statusBar().showMessage(
+                    "Preset palette %r is gone — using From image"
+                    % settings["palette"])
             controls["colors"].setValue(settings["max_colors"])
             controls["dither"].setChecked(settings["dither"])
             if tab == "video":
@@ -7287,6 +7938,100 @@ class MainWindow(QMainWindow):
             # record a phantom picker-only step (task 30).
             if self._tab_settings is not None:
                 self._sync_tab_settings()
+
+    def _palette_combos(self):
+        """The four palette pickers, in tab order."""
+        return (self.palette_combo, self.video_palette_combo,
+                self.prompt_palette_combo,
+                self.code_texture_palette_combo)
+
+    def _palette_label(self, key):
+        """The display label for a palette key — a built-in label,
+        or the user palette's name as-is."""
+        return PALETTE_LABELS.get(key, key)
+
+    def _fill_palette_combo(self, combo, user=None):
+        """Rebuild one palette picker: "From image" first, the
+        built-ins in shipped order, a separator, then the saved
+        palettes sorted by name. Keeps the picker's current
+        palette when it still exists. A wholly unreadable
+        palettes file leaves the picker with the built-ins only
+        (the refresh reports it; the build sites stay silent so
+        a bad file never kills the window)."""
+        if user is None:
+            try:
+                user = self.palette_store.user_palettes()
+            except PixelForgeError:
+                user = {}
+        current = combo.currentData()
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            for key in ("image",) + tuple(NAMED_PALETTES):
+                combo.addItem(PALETTE_LABELS[key], key)
+            if user:
+                combo.insertSeparator(combo.count())
+                for name in sorted(user):
+                    combo.addItem(name, name)
+            if current is not None:
+                index = combo.findData(current)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+        finally:
+            combo.blockSignals(False)
+
+    def _refresh_palette_combos(self):
+        """Rebuild all four palette pickers after a palette
+        change. A picker whose palette is gone (deleted while
+        picked) falls back to "From image" with a note in the
+        status bar — it never crashes and never keeps pointing
+        at a palette that no longer exists."""
+        try:
+            user = self.palette_store.user_palettes()
+        except PixelForgeError as exc:
+            self.statusBar().showMessage(str(exc))
+            user = {}
+        for combo in self._palette_combos():
+            current = combo.currentData()
+            self._fill_palette_combo(combo, user)
+            if current is not None and current != "image" \
+                    and combo.findData(current) < 0:
+                index = combo.findData("image")
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+                self.statusBar().showMessage(
+                    "Palette %r is gone — using From image" % current)
+
+    def _open_palette_editor(self, prefill=None, prefill_name=None):
+        """Open the palette editor dialog (task 39). prefill is
+        an optional (colors, name) pair from Extract palette —
+        the dialog opens in its create flow with those colors.
+        The four palette pickers refresh when anything changed.
+        """
+        dialog = PaletteEditorDialog(self, self.palette_store,
+                                     prefill_colors=prefill,
+                                     prefill_name=prefill_name)
+        dialog.exec()
+        if dialog.changed:
+            self._refresh_palette_combos()
+
+    def _extract_palette(self):
+        """Extract a palette from the loaded image (median-cut,
+        16 colors — the same code "From image" uses) and open
+        the editor's create flow with it, named after the
+        image."""
+        if self.source_image is None:
+            return
+        try:
+            colors = extract_palette_from_image(self.source_image,
+                                                16)
+        except PixelForgeError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        stem = Path(self.source_path).stem \
+            if self.source_path else "Image"
+        self._open_palette_editor(prefill=colors,
+                                  prefill_name="%s palette" % stem)
 
     def _refresh_preset_combos(self):
         """Rebuild all three preset pickers from the store,

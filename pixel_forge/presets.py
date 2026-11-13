@@ -48,7 +48,6 @@ import os
 from pathlib import Path
 
 from .library import default_library_dir
-from .palettes import PALETTE_LABELS
 from .pixelize import MAX_COLORS, MIN_COLORS, PixelForgeError
 from .video import FPS_PRESETS
 
@@ -159,10 +158,16 @@ def validate_settings(settings):
         raise PixelForgeError(
             "preset size must be whole numbers from 1 to %d"
             % MAX_PRESET_SIZE)
-    if settings["palette"] not in PALETTE_LABELS:
+    if not isinstance(settings["palette"], str) \
+            or not settings["palette"].strip():
         raise PixelForgeError(
-            "preset palette must be one of: %s"
-            % ", ".join(sorted(PALETTE_LABELS)))
+            "preset palette must be a palette name")
+    # Any non-empty string is a valid palette name here — a
+    # preset may name a user palette (task 39), and this module
+    # does not know which user palettes exist. Existence is
+    # checked where it is used: the CLI validates at save time,
+    # and the window falls back to "From image" with a note when
+    # a preset names a palette that is gone.
     colors = settings["max_colors"]
     if not isinstance(colors, int) or colors < MIN_COLORS \
             or colors > MAX_COLORS:

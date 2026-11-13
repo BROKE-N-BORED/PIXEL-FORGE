@@ -42,8 +42,17 @@ class ValidateTests(unittest.TestCase):
                 validate_settings(bad)
 
     def test_bad_palette_rejected(self):
-        with self.assertRaises(PixelForgeError):
-            validate_settings(dict(GOOD, palette="sepia"))
+        # A palette must be a non-empty string — but any name is
+        # allowed, since a preset may name a user palette
+        # (task 39). Existence is checked where it is used.
+        for palette in ("", "   ", None, 42):
+            with self.assertRaises(PixelForgeError):
+                validate_settings(dict(GOOD, palette=palette))
+
+    def test_user_palette_name_accepted(self):
+        settings = validate_settings(
+            dict(GOOD, palette="My Sunset"))
+        self.assertEqual(settings["palette"], "My Sunset")
 
     def test_bad_colors_rejected(self):
         for colors in (1, 257, 8.5):
@@ -224,7 +233,7 @@ class PresetStoreTests(unittest.TestCase):
         with self.assertRaises(PixelForgeError):
             self.store.save("   ", GOOD)
         with self.assertRaises(PixelForgeError):
-            self.store.save("Bad", dict(GOOD, palette="sepia"))
+            self.store.save("Bad", dict(GOOD, palette=""))
         self.assertEqual(self.store.user_presets(), {})
 
     def test_delete_user_preset(self):
@@ -299,7 +308,7 @@ class PresetStoreTests(unittest.TestCase):
     def test_all_bad_presets_fall_back_to_builtins(self):
         lib_dir = self._write_presets(
             {"Broken": dict(GOOD, width=0),
-             "Also Broken": dict(GOOD, palette="sepia")})
+             "Also Broken": dict(GOOD, palette="")})
         store = PresetStore(lib_dir)
         self.assertEqual(store.user_presets(), {})
         self.assertEqual([name for name, _r in store.skipped_presets()],

@@ -240,23 +240,55 @@ class PixelizeTests(unittest.TestCase):
     def test_dithered_small_palette_stays_dark(self):
         # Regression: Floyd-Steinberg feedback ran away on tiny
         # palettes — flat red on Game Boy came out 95% lightest.
+        # The guard is about the DARK area: the lightest shade
+        # must never appear in the dark-red three quarters. The
+        # bright-green quarter legitimately uses it under redmean
+        # (task 39): pure green is perceptually bright, so 128 of
+        # the corner's 1024 pixels land on the lightest shade and
+        # the rest on the second-lightest — while the red area
+        # stays on the two darkest shades only.
         image = make_two_color_image()
         result = pixelize_image(image, 64, palette="gameboy",
                                 max_colors=4, dither=True)
         used = Counter(opaque_pixels(result))
-        self.assertEqual(used.get((155, 188, 15), 0), 0)
         self.assertGreater(used[(15, 56, 15)], used[(139, 172, 15)])
+        red_area = set()
+        for y in range(64):
+            for x in range(64):
+                if x < 32 and y < 32:
+                    continue
+                offset = (y * 64 + x) * 4
+                red_area.add(tuple(result.data[offset:offset + 3]))
+        self.assertNotIn((155, 188, 15), red_area)
+        self.assertEqual(red_area, {(15, 56, 15), (48, 98, 48)})
 
     def test_dithered_grayscale_stays_dark(self):
         # Regression: flat red on grayscale dithered to a uniform
-        # mid-grey under Floyd-Steinberg.
+        # mid-grey under Floyd-Steinberg. The guard is about the
+        # DARK area: the dark-red three quarters must stay dark.
+        # Under redmean (task 39) they come out a flat (34,34,34)
+        # — dark, as the test's name requires — while the
+        # bright-green quarter maps to light gray (119,119,119):
+        # green is the brightest channel to the eye, so the
+        # corner is legitimately lighter than the red area. The
+        # old (51,51,51)/(85,85,85) pins were incidental to the
+        # Euclidean mapping, not to the guarded property.
         image = make_two_color_image()
         result = pixelize_image(image, 64, palette="grayscale",
                                 max_colors=4, dither=True)
-        used = set(opaque_pixels(result))
-        self.assertTrue(all(max(rgb) <= 85 for rgb in used))
-        self.assertIn((51, 51, 51), used)
-        self.assertIn((85, 85, 85), used)
+        red_area = set()
+        corner = set()
+        for y in range(64):
+            for x in range(64):
+                offset = (y * 64 + x) * 4
+                rgb = tuple(result.data[offset:offset + 3])
+                if x < 32 and y < 32:
+                    corner.add(rgb)
+                else:
+                    red_area.add(rgb)
+        self.assertTrue(all(max(rgb) <= 85 for rgb in red_area))
+        self.assertEqual(red_area, {(34, 34, 34)})
+        self.assertEqual(corner, {(119, 119, 119)})
 
     def test_transparency_preserved(self):
         image = make_transparent_image(64, 64)

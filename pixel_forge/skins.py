@@ -170,15 +170,16 @@ def texture_target_size(image):
 
 
 def pixelize_texture(image, width=None, height=None, palette="image",
-                     max_colors=256, dither=False):
+                     max_colors=256, dither=False, palettes=None):
     """A non-skin image as a texture: through the Item 1 core.
 
     Defaults are the original behavior — native size, 256-color
     from-image palette, no dithering, so the pixels come through
     unchanged. Pass width/height to render at another size, a
-    named palette (\"pico8\", \"gameboy\", \"grayscale\") or a
-    smaller max_colors to limit the colors, dither=True for
-    ordered dithering. Images bigger than
+    named palette ("pico8", "gameboy", "grayscale", "resurrect64",
+    "endesga32", "sweetie16", or a saved user palette via
+    palettes) or a smaller max_colors to limit the colors,
+    dither=True for ordered dithering. Images bigger than
     TEXTURE_MAX_DIMENSION on the longest side are downscaled to
     fit the cap first (aspect kept), so a big photo import takes
     seconds instead of minutes; smaller textures are untouched.
@@ -196,7 +197,7 @@ def pixelize_texture(image, width=None, height=None, palette="image",
     height = min(height, TEXTURE_MAX_DIMENSION)
     return pixelize_image(image, width=width, height=height,
                           palette=palette, max_colors=max_colors,
-                          dither=dither)
+                          dither=dither, palettes=palettes)
 
 
 def extract_skin(path, out_dir):

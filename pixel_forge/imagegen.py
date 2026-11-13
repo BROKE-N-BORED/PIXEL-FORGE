@@ -647,7 +647,8 @@ def regenerate_candidate(batch_dir: str | Path, filename: str,
 
 def pixelize_candidates(batch_dir: str | Path, width=32, height=None,
                         keep_aspect=False, palette="image",
-                        max_colors=16, dither=True) -> tuple:
+                        max_colors=16, dither=True,
+                        palettes=None) -> tuple:
     """Pixelize every landed candidate through the Item 1 core.
 
     Writes <stem>-pixel.png next to each candidate and records it in
@@ -661,7 +662,9 @@ def pixelize_candidates(batch_dir: str | Path, width=32, height=None,
     drops a stale pixel file from the record. Returns (pairs,
     failures): pairs is the list of (candidate file, pixel file)
     pairs as before, failures is the list of (candidate file,
-    reason) pairs for the ones skipped.
+    reason) pairs for the ones skipped. palettes is an optional
+    dict of user palettes (name -> colors), passed through to
+    resolve_palette.
     """
     batch = load_batch(batch_dir)
     pairs = []
@@ -675,7 +678,8 @@ def pixelize_candidates(batch_dir: str | Path, width=32, height=None,
         try:
             pixelize_file(src, dest, width=width, height=height,
                           keep_aspect=keep_aspect, palette=palette,
-                          max_colors=max_colors, dither=dither)
+                          max_colors=max_colors, dither=dither,
+                          palettes=palettes)
         except (PixelForgeError, OSError) as exc:
             record.pop("pixel_file", None)
             record["pixel_error"] = str(exc)
@@ -695,10 +699,12 @@ def prompt_to_sprites(prompt: str, out_dir: str | Path,
                       palette="image", max_colors=16, dither=True,
                       steps: int = LCM_STEPS, cfg: float = LCM_CFG,
                       size: int = DEFAULT_SIZE,
-                      progress=None) -> tuple:
+                      progress=None, palettes=None) -> tuple:
     """Full CLI pipeline: prompt in, candidates + pixelized versions
     out. Returns (batch, batch_dir). steps/cfg/size are the
-    generation settings (task 20) — the LCM pins by default."""
+    generation settings (task 20) — the LCM pins by default.
+    palettes is an optional dict of user palettes (name -> colors),
+    passed through to resolve_palette."""
     _batch, bdir = new_batch(out_dir, prompt, negative=negative,
                              count=count, size=size, steps=steps,
                              cfg=cfg)
@@ -713,5 +719,6 @@ def prompt_to_sprites(prompt: str, out_dir: str | Path,
                if batch["candidates"] else "no candidates"))
     pixelize_candidates(bdir, width=width, height=height,
                         keep_aspect=keep_aspect, palette=palette,
-                        max_colors=max_colors, dither=dither)
+                        max_colors=max_colors, dither=dither,
+                        palettes=palettes)
     return load_batch(bdir), bdir

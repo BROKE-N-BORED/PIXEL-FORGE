@@ -1,0 +1,31 @@
+# Secrets are never in code (Joshua's immutable rule, 2026-11-13):
+# sensitive information and APIs live in files covered here, never
+# in a committed file. The tree was audited clean — no hardcoded
+# keys, tokens, passwords, or credentialed URLs — and this file
+# keeps it that way.
+
+# Environment files
+.env
+.env.*
+
+# Local config (machine-specific, may hold API keys)
+providers.json
+config.local.json
+*.local.json
+credentials*.json
+
+# Private keys (public keys, *.pub, are fine to commit)
+*.pem
+*.key
+id_rsa*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build and OS noise
+*.zip
+.DS_Store
+Thumbs.db

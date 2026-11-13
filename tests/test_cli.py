@@ -132,11 +132,17 @@ class CliTests(unittest.TestCase):
         self.assertIn("colors must be between", err)
         self.assertNotIn("Traceback", err)
 
-    def test_convert_bad_palette_is_argparse_error(self):
+    def test_convert_bad_palette_refuses_plainly(self):
+        # Task 39: --palette is free-form now (user palettes are
+        # names, not a fixed set), so an unknown name refuses
+        # with a plain PixelForgeError — exit 1, naming the
+        # palettes that exist — instead of argparse's exit 2.
         code, _out, err = self._run(["convert", self.src,
                                      "--palette", "neon"])
-        self.assertEqual(code, 2)
-        self.assertIn("invalid choice", err)
+        self.assertEqual(code, 1)
+        self.assertIn("unknown palette: neon", err)
+        self.assertIn("pico8", err)
+        self.assertNotIn("Traceback", err)
 
     def test_no_command_prints_help_with_error(self):
         code, _out, err = self._run([])
@@ -1764,6 +1770,224 @@ class BatchProcessingCliTests(unittest.TestCase):
         self.assertEqual(code, 130)
         self.assertEqual(out, "")
         self.assertEqual(err, "")
+
+
+class PalettesCliTests(unittest.TestCase):
+    """The palettes subcommand (task 39) — list, import, export,
+    delete, extract — plus --palette accepting user palettes."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.src = write_image(make_gradient_image(),
+                              os.path.join(cls.tmp, "photo.png"))
+
+    def setUp(self):
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self._saved = os.environ.get("PIXELFORGE_LIBRARY")
+        os.environ["PIXELFORGE_LIBRARY"] = self.lib_dir
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("PIXELFORGE_LIBRARY", None)
+        else:
+            os.environ["PIXELFORGE_LIBRARY"] = self._saved
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = main(argv)
+        except SystemExit as exc:
+            code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def _write_hex(self, name, colors="2e222f\n3e3546\n625565\n"):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w") as handle:
+            handle.write(colors)
+        return path
+
+    def test_palettes_list_shows_builtins(self):
+        code, out, _err = self._run(["palettes", "list"])
+        self.assertEqual(code, 0)
+        for label, count in (("PICO-8", "16 colors"),
+                             ("Game Boy", "4 colors"),
+                             ("Grayscale", "16 colors"),
+                             ("Resurrect 64", "64 colors"),
+                             ("Endesga 32", "32 colors"),
+                             ("Sweetie 16", "16 colors")):
+            self.assertIn(label, out)
+            self.assertIn(count, out)
+        self.assertIn("(built-in)", out)
+
+    def test_palettes_list_json(self):
+        code, out, _err = self._run(["palettes", "list", "--json"])
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(len(data), 6)
+        by_name = {entry["name"]: entry for entry in data}
+        self.assertEqual(by_name["resurrect64"]["colors"], 64)
+        self.assertEqual(by_name["resurrect64"]["hex"][0], "#2e222f")
+        self.assertTrue(by_name["pico8"]["builtin"])
+
+    def test_palettes_import_and_list(self):
+        path = self._write_hex("mine.hex")
+        code, out, err = self._run(
+            ["palettes", "import", path, "--name", "Sunset"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Imported palette Sunset — 3 colors", out)
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.lib_dir, "palettes.json")))
+        code, out, _err = self._run(["palettes", "list"])
+        self.assertIn("Sunset — 3 colors", out)
+
+    def test_palettes_import_default_name_is_stem(self):
+        path = self._write_hex("my-palette.hex")
+        code, out, err = self._run(["palettes", "import", path])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Imported palette my-palette", out)
+
+    def test_palettes_import_malformed_refuses(self):
+        path = self._write_hex("bad.hex", "not a color\n")
+        code, _out, err = self._run(["palettes", "import", path])
+        self.assertEqual(code, 1)
+        self.assertIn("line 1 is not a color", err)
+        self.assertNotIn("Traceback", err)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.lib_dir, "palettes.json")))
+
+    def test_palettes_import_clash_refuses(self):
+        path = self._write_hex("mine.hex")
+        self._run(["palettes", "import", path, "--name", "Sunset"])
+        code, _out, err = self._run(
+            ["palettes", "import", path, "--name", "sunset"])
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", err)
+
+    def test_palettes_export_round_trip(self):
+        path = self._write_hex("mine.hex")
+        self._run(["palettes", "import", path, "--name", "Sunset"])
+        out_path = os.path.join(self.tmp, "sunset.gpl")
+        code, out, err = self._run(
+            ["palettes", "export", "Sunset", "--out", out_path])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Exported palette Sunset to", out)
+        with open(out_path) as handle:
+            text = handle.read()
+        self.assertIn("GIMP Palette", text)
+        self.assertIn("Name: Sunset", text)
+        self.assertIn("46 34 47", text)
+
+    def test_palettes_export_builtin(self):
+        out_path = os.path.join(self.tmp, "gb.hex")
+        code, _out, err = self._run(
+            ["palettes", "export", "gameboy", "--out", out_path])
+        self.assertEqual(code, 0, err)
+        with open(out_path) as handle:
+            lines = handle.read().splitlines()
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(lines[0], "0f380f")
+
+    def test_palettes_export_missing_refuses(self):
+        out_path = os.path.join(self.tmp, "nope.hex")
+        code, _out, err = self._run(
+            ["palettes", "export", "Nope", "--out", out_path])
+        self.assertEqual(code, 1)
+        self.assertIn("no palette named", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_palettes_export_bad_extension_refuses(self):
+        out_path = os.path.join(self.tmp, "out.ase")
+        code, _out, err = self._run(
+            ["palettes", "export", "pico8", "--out", out_path])
+        self.assertEqual(code, 1)
+        self.assertIn("use .hex or .gpl", err)
+
+    def test_palettes_delete(self):
+        path = self._write_hex("mine.hex")
+        self._run(["palettes", "import", path, "--name", "Sunset"])
+        # Case-insensitive: "sunset" deletes "Sunset".
+        code, out, err = self._run(["palettes", "delete", "sunset"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Deleted palette Sunset", out)
+        code, out, _err = self._run(["palettes", "list"])
+        self.assertNotIn("Sunset", out)
+
+    def test_palettes_delete_builtin_refuses(self):
+        code, _out, err = self._run(["palettes", "delete", "pico8"])
+        self.assertEqual(code, 1)
+        self.assertIn("cannot be deleted", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_palettes_delete_missing_refuses(self):
+        code, _out, err = self._run(["palettes", "delete", "Nope"])
+        self.assertEqual(code, 1)
+        self.assertIn("no palette named", err)
+
+    def test_palettes_extract(self):
+        code, out, err = self._run(
+            ["palettes", "extract", self.src])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Extracted palette photo from", out)
+        code, out, _err = self._run(["palettes", "list"])
+        self.assertIn("photo — 16 colors", out)
+
+    def test_palettes_extract_with_name_and_colors(self):
+        code, out, err = self._run(
+            ["palettes", "extract", self.src, "--colors", "4",
+             "--name", "Photo 4"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Extracted palette Photo 4", out)
+        code, out, _err = self._run(["palettes", "list"])
+        self.assertIn("Photo 4 — 4 colors", out)
+
+    def test_palettes_extract_clash_refuses(self):
+        self._run(["palettes", "extract", self.src])
+        code, _out, err = self._run(
+            ["palettes", "extract", self.src])
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", err)
+
+    def test_convert_accepts_user_palette(self):
+        path = self._write_hex("mine.hex")
+        self._run(["palettes", "import", path, "--name", "Sunset"])
+        out_path = os.path.join(self.tmp, "sprite.png")
+        # Lowercase on the command line finds "Sunset".
+        code, out, err = self._run(
+            ["convert", self.src, "--size", "32", "--colors", "3",
+             "--palette", "sunset", "--out", out_path])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(out_path))
+        self.assertIn("32 x 32", out)
+
+    def test_convert_accepts_bundled_palette(self):
+        out_path = os.path.join(self.tmp, "sprite2.png")
+        code, _out, err = self._run(
+            ["convert", self.src, "--size", "32", "--colors", "16",
+             "--palette", "resurrect64", "--out", out_path])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(out_path))
+
+    def test_presets_save_accepts_user_palette(self):
+        path = self._write_hex("mine.hex")
+        self._run(["palettes", "import", path, "--name", "Sunset"])
+        code, out, err = self._run(
+            ["presets", "save", "Sunset Look", "--size", "32",
+             "--palette", "sunset", "--colors", "3"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Saved preset Sunset Look", out)
+        code, out, _err = self._run(["presets", "list"])
+        self.assertIn("Sunset Look", out)
+        self.assertIn("Sunset", out)
+
+    def test_presets_save_unknown_palette_refuses(self):
+        code, _out, err = self._run(
+            ["presets", "save", "Bad Look", "--size", "32",
+             "--palette", "nope", "--colors", "3"])
+        self.assertEqual(code, 1)
+        self.assertIn("unknown palette: nope", err)
+        self.assertNotIn("Traceback", err)
 
 
 if __name__ == "__main__":

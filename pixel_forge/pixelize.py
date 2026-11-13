@@ -154,13 +154,15 @@ def count_opaque_colors(image):
     return len(set(opaque_pixels(image)))
 
 
-def resolve_palette(image, palette_name, max_colors):
+def resolve_palette(image, palette_name, max_colors, palettes=None):
     """The working palette for a downscaled image.
 
     "image" builds a median-cut palette from the image's own opaque
     pixels; named palettes keep the max_colors entries the image
     actually uses most (a named palette smaller than max_colors is
-    used whole).
+    used whole). palettes is an optional dict of user palettes
+    (name -> [(r, g, b)]) — looked up after the built-ins, exact
+    match only, so a user palette can never shadow a built-in.
     """
     if max_colors < MIN_COLORS or max_colors > MAX_COLORS:
         raise PixelForgeError(
@@ -170,11 +172,16 @@ def resolve_palette(image, palette_name, max_colors):
         if not colors:
             return [(0, 0, 0)]
         return median_cut(colors, max_colors)
-    if palette_name not in NAMED_PALETTES:
+    named = NAMED_PALETTES.get(palette_name)
+    if named is None and palettes is not None:
+        named = palettes.get(palette_name)
+    if named is None:
+        known = ["image"] + sorted(NAMED_PALETTES)
+        if palettes:
+            known.extend(sorted(palettes))
         raise PixelForgeError(
-            "unknown palette: %s (pick one of: image, %s)"
-            % (palette_name, ", ".join(sorted(NAMED_PALETTES))))
-    named = NAMED_PALETTES[palette_name]
+            "unknown palette: %s (pick one of: %s)"
+            % (palette_name, ", ".join(known)))
     if len(named) <= max_colors:
         return list(named)
     return select_palette_colors(named, opaque_pixels(image), max_colors)
@@ -241,27 +248,33 @@ def quantize(image, palette, dither=True):
 
 
 def pixelize_image(image, width=32, height=None, keep_aspect=False,
-                   palette="image", max_colors=16, dither=True):
-    """Full pipeline on an in-memory image: downscale, then quantize."""
+                   palette="image", max_colors=16, dither=True,
+                   palettes=None):
+    """Full pipeline on an in-memory image: downscale, then quantize.
+    palettes is an optional dict of user palettes (name -> colors),
+    passed through to resolve_palette."""
     if height is None:
         height = width
     small = downscale(image, width, height, keep_aspect)
-    working = resolve_palette(small, palette, max_colors)
+    working = resolve_palette(small, palette, max_colors,
+                              palettes=palettes)
     return quantize(small, working, dither)
 
 
 def pixelize_file(input_path, output_path, width=32, height=None,
                   keep_aspect=False, palette="image", max_colors=16,
-                  dither=True):
+                  dither=True, palettes=None):
     """Full pipeline on files. Returns (width, height, colors_used).
 
     Saves a transparent PNG. Raises PixelForgeError with a readable
-    message on any failure.
+    message on any failure. palettes is an optional dict of user
+    palettes (name -> colors), passed through to resolve_palette.
     """
     image = load_image(input_path)
     result = pixelize_image(image, width=width, height=height,
                             keep_aspect=keep_aspect, palette=palette,
-                            max_colors=max_colors, dither=dither)
+                            max_colors=max_colors, dither=dither,
+                            palettes=palettes)
     if not result.save(str(output_path), "PNG"):
         raise PixelForgeError("could not write: %s" % output_path)
     return result.width(), result.height(), count_opaque_colors(result)

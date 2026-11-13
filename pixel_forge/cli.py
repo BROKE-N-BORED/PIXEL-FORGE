@@ -14,6 +14,11 @@
     pixel-forge presets list
     pixel-forge presets save NAME --size 32 --palette pico8 --colors 16
     pixel-forge presets delete NAME
+    pixel-forge palettes list
+    pixel-forge palettes import FILE [--name NAME]
+    pixel-forge palettes export NAME --out FILE
+    pixel-forge palettes delete NAME
+    pixel-forge palettes extract IMAGE [--colors N] [--name NAME]
     pixel-forge code FILE --list
     pixel-forge code FILE --asset NAME --out OUT.png
     pixel-forge code FILE --all [--out DIR]
@@ -53,6 +58,8 @@ from .imagegen import (DEFAULT_NEGATIVE, DEFAULT_SIZE, LCM_CFG,
                        find_engine, find_model, format_bytes,
                        prompt_to_sprites, slugify)
 from .library import Library, normalize_tags
+from .palette_io import (PaletteStore, extract_palette_from_image)
+from .palettes import NAMED_PALETTES, PALETTE_LABELS
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
                        load_image, pixelize_file, plural)
 from .presets import PresetStore
@@ -62,7 +69,32 @@ from .tileset import (DEMO_MAP_SIZE, TILESET_EXPORTS, blob_tiles,
                       export_tileset, wang_tiles)
 from .video import DEFAULT_FPS, video_to_frames
 
-PALETTE_CHOICES = ["image", "pico8", "gameboy", "grayscale"]
+PALETTE_CHOICES = ["image", "pico8", "gameboy", "grayscale",
+                   "resurrect64", "endesga32", "sweetie16"]
+
+
+def _resolve_palette(args):
+    """(palette key, user palettes dict) for a --palette value.
+
+    "image" and the built-in keys resolve as-is; a saved palette
+    name resolves case-insensitively to its stored spelling (so
+    "sunset" finds "Sunset"); an unknown name refuses naming the
+    palettes that exist. The dict goes to the pixelize calls so
+    they can resolve user palettes by name.
+    """
+    store = PaletteStore()
+    palette = args.palette
+    user = store.user_palettes()
+    if palette == "image" or palette in NAMED_PALETTES:
+        return palette, user
+    stored = store.find(palette)
+    if stored is not None:
+        return stored, user
+    known = ["image"] + sorted(NAMED_PALETTES)
+    known.extend(sorted(user))
+    raise PixelForgeError(
+        "unknown palette: %s (pick one of: %s)"
+        % (palette, ", ".join(known)))
 
 
 def parse_size(text):
@@ -126,10 +158,12 @@ def _add_pixelize_args(parser):
     parser.add_argument("--colors", type=int, default=16,
                         help="max colors, %d-%d. Default: 16"
                         % (MIN_COLORS, MAX_COLORS))
-    parser.add_argument("--palette", choices=PALETTE_CHOICES,
-                        default="image",
-                        help="palette: image (from the picture), pico8, "
-                        "gameboy, grayscale. Default: image")
+    parser.add_argument("--palette", default="image",
+                        help="palette: image (from the picture), "
+                        "pico8, gameboy, grayscale, resurrect64, "
+                        "endesga32, sweetie16, or a saved palette "
+                        "name (see pixel-forge palettes list). "
+                        "Default: image")
     parser.add_argument("--dither", dest="dither", action="store_true",
                         default=True,
                         help="Ordered (Bayer) dithering (default)")
@@ -445,6 +479,52 @@ def build_parser():
                             "import")
     _add_output_args(pre_import)
 
+    palettes = sub.add_parser(
+        "palettes", help="manage palettes (built-in and saved): "
+        "list, import, export, delete, extract")
+    _add_output_args(palettes)
+    pal_sub = palettes.add_subparsers(dest="palettes_command",
+                                      metavar="command")
+    pal_sub.required = True
+    pal_list = pal_sub.add_parser("list", help="list all palettes, "
+                                  "built-in and saved, with counts")
+    _add_output_args(pal_list)
+    pal_import = pal_sub.add_parser(
+        "import", help="import a palette file (.hex, .gpl, .pal, "
+        ".ase, or .txt) as a saved palette")
+    pal_import.add_argument("file", help="palette file to import")
+    pal_import.add_argument("--name", default=None,
+                            help="name for the saved palette "
+                            "(default: the name in the file, or "
+                            "the file stem)")
+    _add_output_args(pal_import)
+    pal_export = pal_sub.add_parser(
+        "export", help="export a palette (built-in or saved) to a "
+        ".hex or .gpl file")
+    pal_export.add_argument("name", help="palette name (a built-in "
+                            "key like pico8, or a saved palette "
+                            "name)")
+    pal_export.add_argument("--out", required=True,
+                            help=".hex or .gpl file to write")
+    _add_output_args(pal_export)
+    pal_delete = pal_sub.add_parser(
+        "delete", help="delete a saved palette (built-ins cannot "
+        "be deleted)")
+    pal_delete.add_argument("name", help="palette name to delete")
+    _add_output_args(pal_delete)
+    pal_extract = pal_sub.add_parser(
+        "extract", help="extract a palette from an image "
+        "(median-cut, the same code \"From image\" uses) and save "
+        "it as a saved palette")
+    pal_extract.add_argument("image", help="image to extract from")
+    pal_extract.add_argument("--colors", type=int, default=16,
+                             help="how many colors to extract "
+                             "(default: 16, 1-%d)" % MAX_COLORS)
+    pal_extract.add_argument("--name", default=None,
+                             help="name for the saved palette "
+                             "(default: the image stem)")
+    _add_output_args(pal_extract)
+
     code = sub.add_parser(
         "code", help="reproduce pixel-art assets from source code "
         "(.py, .js, .ts — parsed statically, never executed)")
@@ -513,16 +593,19 @@ def build_parser():
 
 def cmd_convert(args):
     width, height = _validate_pixelize_args(args)
+    palette, palettes = _resolve_palette(args)
     src = Path(args.input)
     if src.is_dir():
-        return _cmd_convert_folder(args, src, width, height)
+        return _cmd_convert_folder(args, src, width, height,
+                                   palette, palettes)
     out = args.out
     if out is None:
         out = str(src.with_name(src.stem + "-pixel.png"))
     width_out, height_out, colors = pixelize_file(
         args.input, out, width=width, height=height,
-        keep_aspect=args.keep_aspect, palette=args.palette,
-        max_colors=args.colors, dither=args.dither)
+        keep_aspect=args.keep_aspect, palette=palette,
+        max_colors=args.colors, dither=args.dither,
+        palettes=palettes)
     _emit_json(args, {"output": str(out), "width": width_out,
                       "height": height_out, "colors": colors})
     _info(args, "%s: %d x %d, %d colors"
@@ -530,7 +613,8 @@ def cmd_convert(args):
     return 0
 
 
-def _cmd_convert_folder(args, folder, width, height):
+def _cmd_convert_folder(args, folder, width, height, palette,
+                        palettes):
     """Convert every image in a folder (task 28): one bad file
     is reported on stderr and skipped, the rest still convert.
     Exit 1 only when nothing converted at all."""
@@ -556,8 +640,9 @@ def _cmd_convert_folder(args, folder, width, height):
         try:
             width_out, height_out, colors = pixelize_file(
                 str(src), str(out), width=width, height=height,
-                keep_aspect=args.keep_aspect, palette=args.palette,
-                max_colors=args.colors, dither=args.dither)
+                keep_aspect=args.keep_aspect, palette=palette,
+                max_colors=args.colors, dither=args.dither,
+                palettes=palettes)
         except PixelForgeError as exc:
             failed.append({"file": src.name, "reason": str(exc)})
             print("pixel-forge: skipped %s: %s" % (src.name, exc),
@@ -575,6 +660,7 @@ def _cmd_convert_folder(args, folder, width, height):
 
 def cmd_frames(args):
     width, height = _validate_pixelize_args(args)
+    palette, palettes = _resolve_palette(args)
     if args.fps <= 0:
         raise PixelForgeError("fps must be greater than 0")
     if args.every < 1:
@@ -586,8 +672,9 @@ def cmd_frames(args):
     written = video_to_frames(
         args.video, out, fps=args.fps, every=args.every,
         start=args.start, end=args.end, width=width, height=height,
-        keep_aspect=args.keep_aspect, palette=args.palette,
-        max_colors=args.colors, dither=args.dither)
+        keep_aspect=args.keep_aspect, palette=palette,
+        max_colors=args.colors, dither=args.dither,
+        palettes=palettes)
     first = load_image(written[0])
     _emit_json(args, {"frames": len(written),
                       "width": first.width(),
@@ -599,6 +686,7 @@ def cmd_frames(args):
 
 def cmd_prompt(args):
     width, height = _validate_pixelize_args(args)
+    palette, palettes = _resolve_palette(args)
     if args.count < 1:
         raise PixelForgeError("count must be at least 1")
     if args.steps < 1:
@@ -650,9 +738,9 @@ def cmd_prompt(args):
     batch, bdir = prompt_to_sprites(
         args.prompt, out, negative=args.negative, count=args.count,
         width=width, height=height, keep_aspect=args.keep_aspect,
-        palette=args.palette, max_colors=args.colors,
+        palette=palette, max_colors=args.colors,
         dither=args.dither, steps=args.steps, cfg=args.cfg,
-        size=args.gen_size, progress=_progress)
+        size=args.gen_size, progress=_progress, palettes=palettes)
     landed = [c for c in batch["candidates"]
               if c["status"] == "pending"]
     failed = len(batch["candidates"]) - len(landed)
@@ -988,16 +1076,21 @@ def cmd_presets_save(args):
                 "a preset named %r already exists "
                 "(use --force to replace it)" % args.name)
     width, height = _validate_pixelize_args(args)
+    # The palette must exist — a preset naming a palette that is
+    # gone would fall back to "From image" at apply time, but a
+    # save names the palette the user means, so a typo refuses
+    # here instead. The resolved key is the stored spelling.
+    palette, _palettes = _resolve_palette(args)
     settings = {"width": width, "height": height,
                 "keep_aspect": args.keep_aspect,
-                "palette": args.palette,
+                "palette": palette,
                 "max_colors": args.colors,
                 "dither": args.dither}
     store.save(args.name, settings)
     _emit_json(args, {"name": args.name, "settings": settings})
     _info(args, "Saved preset %s — %d x %d, %s, %d colors, "
           "dither %s, keep aspect %s"
-          % (args.name, width, height, args.palette,
+          % (args.name, width, height, palette,
              args.colors,
              "on" if args.dither else "off",
              "on" if args.keep_aspect else "off"))
@@ -1035,6 +1128,105 @@ def cmd_presets_import(args):
     name = store.import_preset(args.file)
     _emit_json(args, {"imported": name})
     _info(args, "Imported preset %s" % name)
+    return 0
+
+
+def _warn_skipped_palettes(store):
+    """Skipped palettes are reported, never swallowed: one line
+    each, name + reason, on stderr — the good palettes still
+    listed above."""
+    for name, reason in store.skipped_palettes():
+        print("pixel-forge: skipped palette %r: %s"
+              % (name, reason), file=sys.stderr)
+
+
+def cmd_palettes_list(args):
+    store = PaletteStore()
+    palettes = store.all_palettes()
+    if _is_json(args):
+        print(json.dumps(
+            [{"name": name,
+              "label": PALETTE_LABELS.get(name, name),
+              "builtin": builtin,
+              "colors": len(colors),
+              "hex": ["#%02x%02x%02x" % rgb for rgb in colors]}
+             for name, colors, builtin in palettes], indent=2))
+        _warn_skipped_palettes(store)
+        return 0
+    for name, colors, builtin in palettes:
+        label = PALETTE_LABELS.get(name, name)
+        _info(args, "%s%s — %s"
+              % (label, " (built-in)" if builtin else "",
+                 plural(len(colors), "color")))
+    _warn_skipped_palettes(store)
+    return 0
+
+
+def cmd_palettes_import(args):
+    store = PaletteStore()
+    # A name clash refuses plainly — no --force; delete the old
+    # palette first. (The window asks Yes/No instead.)
+    name = store.import_file(args.file, name=args.name)
+    colors = store.get(name)
+    _emit_json(args, {"imported": name, "colors": len(colors)})
+    _info(args, "Imported palette %s — %s"
+          % (name, plural(len(colors), "color")))
+    return 0
+
+
+def cmd_palettes_export(args):
+    store = PaletteStore()
+    # Names are unique across built-ins and saved palettes, so
+    # there is no ambiguity — the saved slot is checked first
+    # only because it is the one the user most likely means.
+    if store.get(args.name) is not None:
+        builtin = False
+    elif store.get(args.name, builtin=True) is not None:
+        builtin = True
+    else:
+        raise PixelForgeError("no palette named %r" % args.name)
+    store.export_palette(args.name, args.out, builtin=builtin)
+    _emit_json(args, {"exported": args.name, "out": str(args.out)})
+    _info(args, "Exported palette %s to %s" % (args.name, args.out))
+    return 0
+
+
+def cmd_palettes_delete(args):
+    store = PaletteStore()
+    # Case-insensitive like the rest of the CLI: "sunset"
+    # deletes the palette saved as "Sunset". A built-in name
+    # (or a missing one) raises the store's plain refusal.
+    stored = store.find(args.name)
+    if stored is not None:
+        store.delete(stored)
+        name = stored
+    else:
+        store.delete(args.name)
+        name = args.name
+    _emit_json(args, {"deleted": name})
+    _info(args, "Deleted palette %s" % name)
+    return 0
+
+
+def cmd_palettes_extract(args):
+    store = PaletteStore()
+    name = args.name
+    if name is None:
+        name = Path(args.image).stem
+    # A name clash refuses plainly — re-extracting must not
+    # silently clobber a palette the user edited by hand.
+    # Delete the old palette first, or pick another --name.
+    existing = store.find(name)
+    if existing is not None:
+        raise PixelForgeError(
+            "a palette named %r already exists — delete it first"
+            % existing)
+    image = load_image(args.image)
+    colors = extract_palette_from_image(image, args.colors)
+    store.save(name, colors)
+    _emit_json(args, {"extracted": name, "colors": len(colors)})
+    _info(args, "Extracted palette %s from %s — %s"
+          % (name, args.image, plural(len(colors), "color")))
     return 0
 
 
@@ -1247,6 +1439,17 @@ def main(argv=None):
                 return cmd_presets_export(args)
             if args.presets_command == "import":
                 return cmd_presets_import(args)
+        if args.command == "palettes":
+            if args.palettes_command == "list":
+                return cmd_palettes_list(args)
+            if args.palettes_command == "import":
+                return cmd_palettes_import(args)
+            if args.palettes_command == "export":
+                return cmd_palettes_export(args)
+            if args.palettes_command == "delete":
+                return cmd_palettes_delete(args)
+            if args.palettes_command == "extract":
+                return cmd_palettes_extract(args)
         if args.command == "code":
             return cmd_code(args)
         if args.command == "skin":

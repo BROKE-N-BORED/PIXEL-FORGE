@@ -268,12 +268,14 @@ def extract_frames(video_path, out_dir, fps=DEFAULT_FPS, every=1,
 
 def pixelize_frame_files(frame_paths, out_dir, width=32, height=None,
                          keep_aspect=False, palette="image",
-                         max_colors=16, dither=True):
+                         max_colors=16, dither=True, palettes=None):
     """Pixelize extracted frames into numbered PNGs.
 
     Writes frame_001.png, frame_002.png, ... into out_dir (created if
     needed) and returns the output paths in order. Every frame goes
     through the Item 1 core — same size, palette, and dither.
+    palettes is an optional dict of user palettes (name -> colors),
+    passed through to resolve_palette.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -283,7 +285,8 @@ def pixelize_frame_files(frame_paths, out_dir, width=32, height=None,
         result = pixelize_image(image, width=width, height=height,
                                 keep_aspect=keep_aspect,
                                 palette=palette,
-                                max_colors=max_colors, dither=dither)
+                                max_colors=max_colors, dither=dither,
+                                palettes=palettes)
         dest = out / ("frame_%03d.png" % index)
         if not result.save(str(dest), "PNG"):
             raise PixelForgeError("could not write: %s" % dest)
@@ -294,11 +297,13 @@ def pixelize_frame_files(frame_paths, out_dir, width=32, height=None,
 def video_to_frames(video_path, out_dir, fps=DEFAULT_FPS, every=1,
                     start=None, end=None, width=32, height=None,
                     keep_aspect=False, palette="image", max_colors=16,
-                    dither=True):
+                    dither=True, palettes=None):
     """Full pipeline: video in, numbered pixelized PNGs out.
 
     Raw frames go to a temp dir that is deleted afterwards, so only
     the finished sprites remain. Returns the output paths in order.
+    palettes is an optional dict of user palettes (name -> colors),
+    passed through to resolve_palette.
     """
     tmp = tempfile.mkdtemp(prefix="pixel-forge-frames-")
     try:
@@ -307,7 +312,7 @@ def video_to_frames(video_path, out_dir, fps=DEFAULT_FPS, every=1,
         return pixelize_frame_files(
             raw, out_dir, width=width, height=height,
             keep_aspect=keep_aspect, palette=palette,
-            max_colors=max_colors, dither=dither)
+            max_colors=max_colors, dither=dither, palettes=palettes)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

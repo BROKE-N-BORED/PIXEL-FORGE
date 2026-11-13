@@ -123,7 +123,8 @@ class GuiTests(unittest.TestCase):
         palettes = [self.win.palette_combo.itemData(i)
                     for i in range(self.win.palette_combo.count())]
         self.assertEqual(palettes, ["image", "pico8", "gameboy",
-                                    "grayscale"])
+                                    "grayscale", "resurrect64",
+                                    "endesga32", "sweetie16"])
         self.assertEqual((self.win.colors_spin.minimum(),
                           self.win.colors_spin.maximum()), (2, 256))
         self.assertEqual(self.win.colors_spin.value(), 16)
@@ -1183,7 +1184,8 @@ class PromptGuiTests(unittest.TestCase):
         palettes = [self.win.prompt_palette_combo.itemData(i)
                     for i in range(self.win.prompt_palette_combo.count())]
         self.assertEqual(palettes, ["image", "pico8", "gameboy",
-                                    "grayscale"])
+                                    "grayscale", "resurrect64",
+                                    "endesga32", "sweetie16"])
         self.assertEqual(self.win.prompt_colors_spin.value(), 16)
         self.assertTrue(self.win.prompt_dither_check.isChecked())
 
@@ -2590,7 +2592,10 @@ class PresetGuiTests(unittest.TestCase):
                 "palette": "pico8", "max_colors": 8, "dither": True}
         self._window_with_presets(
             {"Broken": dict(good, width=0),
-             "Also Broken": dict(good, palette="sepia")})
+             # A blank palette is still invalid (v0.49: any
+             # non-empty palette name is accepted, so a preset
+             # may name a saved palette).
+             "Also Broken": dict(good, palette="")})
         for label in self._warning_labels():
             self.assertFalse(label.isHidden())
             self.assertIn("Preset 'Broken' skipped", label.text())
@@ -7294,6 +7299,360 @@ class TilesetGuiTests(unittest.TestCase):
                 if not widget.toolTip().strip():
                     missing.append(widget.__class__.__name__)
         self.assertEqual(missing, [])
+
+
+class PaletteEditorGuiTests(unittest.TestCase):
+    """Task 39: the palette editor dialog, the four palette
+    pickers, and Extract palette."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        cls.src = write_image(make_gradient_image(),
+                              os.path.join(cls.tmp, "photo.png"))
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self.win = MainWindow(library_dir=self.lib_dir)
+        self.win.show()
+        self.app.processEvents()
+        self._dialogs = []
+
+    def tearDown(self):
+        for dialog in self._dialogs:
+            dialog.close()
+            dialog.deleteLater()
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _editor(self, **kwargs):
+        from pixel_forge.gui import PaletteEditorDialog
+        dialog = PaletteEditorDialog(self.win,
+                                     self.win.palette_store,
+                                     **kwargs)
+        self._dialogs.append(dialog)
+        return dialog
+
+    def _pick_row(self, dialog, row):
+        """Pick a palette row the way a real click does:
+        setCurrentRow AND emit itemClicked (emitting alone does
+        not move the current row)."""
+        dialog.palette_list.setCurrentRow(row)
+        item = dialog.palette_list.item(row)
+        dialog.palette_list.itemClicked.emit(item)
+        self.app.processEvents()
+
+    def _row_for(self, dialog, kind, name):
+        for row in range(dialog.palette_list.count()):
+            item = dialog.palette_list.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == (kind, name):
+                return row
+        return -1
+
+    def _combo_data(self, combo):
+        return [combo.itemData(i) for i in range(combo.count())]
+
+    def test_combos_list_builtins(self):
+        for combo in self.win._palette_combos():
+            self.assertEqual(self._combo_data(combo),
+                             ["image", "pico8", "gameboy",
+                              "grayscale", "resurrect64",
+                              "endesga32", "sweetie16"])
+            self.assertEqual(combo.currentData(), "image")
+
+    def test_combos_list_user_palettes_after_separator(self):
+        self.win.palette_store.save("Sunset", [(46, 34, 47)])
+        self.win.palette_store.save("Apple", [(1, 2, 3)])
+        self.win._refresh_palette_combos()
+        for combo in self.win._palette_combos():
+            data = self._combo_data(combo)
+            # Built-ins, then a separator (data None), then the
+            # user palettes sorted by name.
+            self.assertEqual(
+                data[:7],
+                ["image", "pico8", "gameboy", "grayscale",
+                 "resurrect64", "endesga32", "sweetie16"])
+            self.assertIsNone(data[7])
+            self.assertEqual(data[8:], ["Apple", "Sunset"])
+
+    def test_editor_opens_with_nothing_picked(self):
+        dialog = self._editor()
+        # Before show: no row is current.
+        self.assertEqual(dialog.palette_list.currentRow(), -1)
+        dialog.show()
+        self.app.processEvents()
+        self.assertEqual(dialog.palette_list.count(), 6)
+        # Qt moves the list's current row to 0 when the dialog is
+        # shown — that auto-set is not a pick (see
+        # test_sheet_frame_dialog_picks_nothing_on_open): the
+        # dialog still has nothing picked and the editor stays
+        # disabled until the user picks a palette.
+        self.assertIsNone(dialog._picked)
+        self.assertFalse(dialog.name_edit.isEnabled())
+        self.assertFalse(dialog.save_btn.isEnabled())
+        self.assertFalse(dialog.delete_btn.isEnabled())
+        self.assertFalse(dialog.duplicate_btn.isEnabled())
+        self.assertFalse(dialog.export_btn.isEnabled())
+        self.assertTrue(dialog.new_btn.isEnabled())
+        self.assertTrue(dialog.import_btn.isEnabled())
+
+    def test_editor_create_palette(self):
+        dialog = self._editor()
+        dialog.show()
+        self.app.processEvents()
+        dialog.new_btn.click()
+        self.app.processEvents()
+        self.assertTrue(dialog.start_from_combo.isVisible())
+        dialog.name_edit.setText("Fresh")
+        # Start from PICO-8, then save.
+        combo = dialog.start_from_combo
+        for i in range(combo.count()):
+            if combo.itemData(i) == ("builtin", "pico8"):
+                combo.setCurrentIndex(i)
+                break
+        self.app.processEvents()
+        self.assertEqual(len(dialog._editing["colors"]), 16)
+        self.assertTrue(dialog.save_btn.isEnabled())
+        dialog.save_btn.click()
+        self.app.processEvents()
+        self.assertTrue(dialog.changed)
+        self.assertEqual(
+            self.win.palette_store.get("Fresh"),
+            self.win.palette_store.get("pico8", builtin=True))
+
+    def test_editor_create_empty_needs_a_color(self):
+        dialog = self._editor()
+        dialog.new_btn.click()
+        dialog.name_edit.setText("Empty")
+        self.app.processEvents()
+        # A name but no colors — Save stays disabled.
+        self.assertFalse(dialog.save_btn.isEnabled())
+
+    def test_editor_edit_colors(self):
+        from unittest import mock
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QColorDialog
+        self.win.palette_store.save("Mine", [(10, 20, 30),
+                                             (40, 50, 60)])
+        dialog = self._editor()
+        self._pick_row(dialog, self._row_for(dialog, "user", "Mine"))
+        self.assertEqual(dialog.name_edit.text(), "Mine")
+        self.assertEqual(dialog.color_list.count(), 2)
+        # Add a color via the picker (patched to return red).
+        with mock.patch.object(
+                QColorDialog, "getColor",
+                return_value=QColor(255, 0, 0)):
+            dialog.add_btn.click()
+        self.app.processEvents()
+        self.assertEqual(len(dialog._editing["colors"]), 3)
+        self.assertEqual(dialog._editing["colors"][-1], (255, 0, 0))
+        # Move the red one up, then set it by typing a hex.
+        dialog.color_list.setCurrentRow(2)
+        self.app.processEvents()
+        dialog.up_btn.click()
+        self.app.processEvents()
+        self.assertEqual(dialog._editing["colors"][1], (255, 0, 0))
+        dialog.color_list.setCurrentRow(1)
+        dialog.hex_edit.setText("#00ff00")
+        dialog.set_hex_btn.click()
+        self.app.processEvents()
+        self.assertEqual(dialog._editing["colors"][1], (0, 255, 0))
+        # Remove the first color, then save.
+        dialog.color_list.setCurrentRow(0)
+        dialog.remove_btn.click()
+        self.app.processEvents()
+        dialog.save_btn.click()
+        self.app.processEvents()
+        self.assertEqual(self.win.palette_store.get("Mine"),
+                         [(0, 255, 0), (40, 50, 60)])
+
+    def test_editor_rename(self):
+        self.win.palette_store.save("Old", [(1, 2, 3)])
+        dialog = self._editor()
+        self._pick_row(dialog, self._row_for(dialog, "user", "Old"))
+        dialog.name_edit.setText("New")
+        dialog.save_btn.click()
+        self.app.processEvents()
+        self.assertIsNone(self.win.palette_store.get("Old"))
+        self.assertEqual(self.win.palette_store.get("New"),
+                         [(1, 2, 3)])
+
+    def test_editor_delete_asks_and_deletes(self):
+        from unittest import mock
+        self.win.palette_store.save("Doomed", [(1, 2, 3)])
+        dialog = self._editor()
+        self._pick_row(dialog,
+                       self._row_for(dialog, "user", "Doomed"))
+        # Declining keeps it.
+        with mock.patch.object(
+                QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.No):
+            dialog.delete_btn.click()
+        self.app.processEvents()
+        self.assertIsNotNone(self.win.palette_store.get("Doomed"))
+        # Saying Yes deletes it.
+        with mock.patch.object(
+                QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.Yes):
+            dialog.delete_btn.click()
+        self.app.processEvents()
+        self.assertTrue(dialog.changed)
+        self.assertIsNone(self.win.palette_store.get("Doomed"))
+        self.assertEqual(dialog.palette_list.count(), 6)
+
+    def test_editor_builtin_is_read_only(self):
+        dialog = self._editor()
+        self._pick_row(dialog,
+                       self._row_for(dialog, "builtin", "pico8"))
+        self.assertEqual(dialog.name_edit.text(), "PICO-8")
+        self.assertFalse(dialog.name_edit.isEnabled())
+        self.assertFalse(dialog.add_btn.isEnabled())
+        self.assertFalse(dialog.remove_btn.isEnabled())
+        self.assertFalse(dialog.save_btn.isEnabled())
+        self.assertFalse(dialog.delete_btn.isEnabled())
+        self.assertTrue(dialog.duplicate_btn.isEnabled())
+        self.assertTrue(dialog.export_btn.isEnabled())
+
+    def test_editor_duplicate_builtin(self):
+        dialog = self._editor()
+        self._pick_row(dialog,
+                       self._row_for(dialog, "builtin", "gameboy"))
+        dialog.duplicate_btn.click()
+        self.app.processEvents()
+        self.assertEqual(dialog.name_edit.text(), "Game Boy copy")
+        self.assertEqual(len(dialog._editing["colors"]), 4)
+        dialog.save_btn.click()
+        self.app.processEvents()
+        self.assertEqual(
+            self.win.palette_store.get("Game Boy copy"),
+            self.win.palette_store.get("gameboy", builtin=True))
+
+    def test_editor_import_hex_through_picker(self):
+        from unittest import mock
+        path = os.path.join(self.tmp, "imported.hex")
+        with open(path, "w") as handle:
+            handle.write("2e222f\n3e3546\n")
+        dialog = self._editor()
+        with mock.patch.object(
+                QFileDialog, "getOpenFileName",
+                return_value=(path, "")):
+            dialog.import_btn.click()
+        self.app.processEvents()
+        self.assertTrue(dialog.changed)
+        self.assertEqual(self.win.palette_store.get("imported"),
+                         [(46, 34, 47), (62, 53, 70)])
+        self.assertEqual(dialog.palette_list.count(), 7)
+
+    def test_editor_export(self):
+        from unittest import mock
+        self.win.palette_store.save("Mine", [(46, 34, 47)])
+        dialog = self._editor()
+        self._pick_row(dialog, self._row_for(dialog, "user", "Mine"))
+        out_path = os.path.join(self.tmp, "mine.gpl")
+        with mock.patch.object(
+                QFileDialog, "getSaveFileName",
+                return_value=(out_path, "")):
+            dialog.export_btn.click()
+        self.app.processEvents()
+        with open(out_path) as handle:
+            text = handle.read()
+        self.assertIn("GIMP Palette", text)
+        self.assertIn("Name: Mine", text)
+
+    def test_extract_button_disabled_then_enabled(self):
+        self.assertFalse(self.win.extract_palette_btn.isEnabled())
+        self.assertTrue(self.win.load_image(self.src))
+        self.assertTrue(self.win.extract_palette_btn.isEnabled())
+
+    def test_extract_palette_opens_editor_prefilled(self):
+        from unittest import mock
+        from PySide6.QtWidgets import QDialog
+        from pixel_forge.gui import PaletteEditorDialog
+        self.assertTrue(self.win.load_image(self.src))
+        seen = []
+
+        def fake_exec(self):
+            seen.append(self)
+            return QDialog.DialogCode.Accepted
+
+        with mock.patch.object(PaletteEditorDialog, "exec",
+                               fake_exec):
+            self.win.extract_palette_btn.click()
+        self.assertEqual(len(seen), 1)
+        dialog = seen[0]
+        self.assertEqual(dialog.name_edit.text(), "photo palette")
+        self.assertEqual(len(dialog._editing["colors"]), 16)
+
+    def test_combos_refresh_after_editor_save(self):
+        from unittest import mock
+        from PySide6.QtWidgets import QDialog
+        from pixel_forge.gui import PaletteEditorDialog
+
+        def fake_exec(self):
+            self._on_new()
+            self.name_edit.setText("Fresh")
+            self._editing["colors"] = [(1, 2, 3)]
+            self._on_save()
+            return QDialog.DialogCode.Accepted
+
+        with mock.patch.object(PaletteEditorDialog, "exec",
+                               fake_exec):
+            self.win.palettes_btn.click()
+        for combo in self.win._palette_combos():
+            self.assertIn("Fresh", self._combo_data(combo))
+
+    def test_combo_falls_back_when_palette_deleted(self):
+        self.win.palette_store.save("Sunset", [(46, 34, 47)])
+        self.win._refresh_palette_combos()
+        combo = self.win.palette_combo
+        combo.setCurrentIndex(combo.findData("Sunset"))
+        self.assertEqual(combo.currentData(), "Sunset")
+        self.win.palette_store.delete("Sunset")
+        self.win._refresh_palette_combos()
+        self.assertEqual(combo.currentData(), "image")
+        self.assertIn("Sunset",
+                      self.win.statusBar().currentMessage())
+
+    def test_preset_apply_falls_back_when_palette_gone(self):
+        self.win.palette_store.save("Sunset", [(46, 34, 47)])
+        settings = {"width": 32, "height": 32, "keep_aspect": False,
+                    "palette": "Sunset", "max_colors": 16,
+                    "dither": True}
+        self.win.palette_store.delete("Sunset")
+        self.win._refresh_palette_combos()
+        self.win._apply_settings_to_tab("image", settings)
+        self.assertEqual(self.win.palette_combo.currentData(),
+                         "image")
+        self.assertIn("Sunset",
+                      self.win.statusBar().currentMessage())
+
+    def test_pixelize_with_user_palette(self):
+        from pixel_forge.pixelize import opaque_pixels
+        self.win.palette_store.save("Two", [(255, 0, 0),
+                                            (0, 0, 255)])
+        self.win._refresh_palette_combos()
+        self.assertTrue(self.win.load_image(self.src))
+        combo = self.win.palette_combo
+        combo.setCurrentIndex(combo.findData("Two"))
+        self.app.processEvents()
+        self.win.update_preview()
+        result = self.win._layers[0].image
+        used = set(opaque_pixels(result))
+        self.assertTrue(used <= {(255, 0, 0), (0, 0, 255)})
+        self.assertEqual(len(used), 2)
+
+    def test_editor_visible_text_has_no_banned_phrasing(self):
+        dialog = self._editor()
+        for text in visible_texts(dialog):
+            self.assertNotIn("&", text,
+                             "bare & in visible text: %r" % text)
+            self.assertNotIn("(s)", text,
+                             "programmer phrasing in visible text: "
+                             "%r" % text)
 
 
 if __name__ == "__main__":
