@@ -20,6 +20,13 @@ BIN="$HOME/.local/bin"
 SD_REPO="https://github.com/leejet/stable-diffusion.cpp"
 SD_MODEL_FILE="LCM_Dreamshaper_v7-f16.gguf"
 SD_MODEL_URL="https://huggingface.co/Steward/lcm-dreamshaper-v7-gguf/resolve/main/${SD_MODEL_FILE}"
+# Pinned — these MUST match ENGINE_RELEASE / MODEL_SHA256 in
+# pixel_forge/imagegen.py; tests/test_installer.py checks they
+# agree, so the two can never drift silently. The engine is
+# checked out at this release (never master HEAD) and every model
+# download is SHA-256-checked against this hash.
+SD_RELEASE="master-1086-465adf3"
+SD_MODEL_SHA256="0642060766117fdeb8cae0ccdc73ee974ac5779be1112d0a82f2b965bbd00e15"
 # Shared with the Design Shell: one download serves both programs.
 SD_MODEL_HOME="$HOME/design-shell-models"
 WITH_IMAGE=0
@@ -107,7 +114,10 @@ if [ "$WITH_IMAGE" = "1" ]; then
     echo "Building the image engine (stable-diffusion.cpp) from source..."
     echo "(one-time compile — allow up to half an hour on a small machine)"
     TMPD="$(mktemp -d)"
-    git clone --depth 1 --recursive "$SD_REPO" "$TMPD/sd"
+    git clone --depth 1 --branch "$SD_RELEASE" --recursive "$SD_REPO" "$TMPD/sd" \
+      || { echo "ERROR: could not check out the image engine at $SD_RELEASE." >&2
+           echo "       Check your connection and run ./install.sh --with-image-engine again." >&2
+           exit 1; }
     cmake -S "$TMPD/sd" -B "$TMPD/sd/build" -DCMAKE_BUILD_TYPE=Release >/dev/null
     cmake --build "$TMPD/sd/build" -j"$(nproc)" >/dev/null
     sudo rm -rf /opt/sd.cpp
@@ -123,7 +133,18 @@ if [ "$WITH_IMAGE" = "1" ]; then
   if [ -z "$(find_sd_model)" ]; then
     echo "Downloading the image model ($SD_MODEL_FILE, about 2.1 GB)..."
     mkdir -p "$SD_MODEL_HOME"
-    curl -fSL "$SD_MODEL_URL" -o "$SD_MODEL_HOME/$SD_MODEL_FILE"
+    curl -fSL -C - "$SD_MODEL_URL" -o "$SD_MODEL_HOME/$SD_MODEL_FILE"
+    # Prove the download is the pinned model before accepting it:
+    # a mismatched file is deleted, never kept.
+    _actual="$(sha256sum "$SD_MODEL_HOME/$SD_MODEL_FILE" | cut -d' ' -f1)"
+    if [ "$_actual" != "$SD_MODEL_SHA256" ]; then
+      echo "ERROR: the downloaded model failed its SHA-256 check." >&2
+      echo "       expected: $SD_MODEL_SHA256" >&2
+      echo "       got:      $_actual" >&2
+      echo "       The bad file was removed — run ./install.sh --with-image-engine again to retry." >&2
+      rm -f "$SD_MODEL_HOME/$SD_MODEL_FILE"
+      exit 1
+    fi
     echo "Model downloaded to $SD_MODEL_HOME/$SD_MODEL_FILE"
   else
     echo "Image model already downloaded: $(find_sd_model)"

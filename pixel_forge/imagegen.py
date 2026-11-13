@@ -17,7 +17,10 @@ Pins (verified live 2026-11-11 — do not substitute):
   --with-image-engine does (and the GUI installer offers).
   model: LCM_Dreamshaper_v7-f16.gguf (2,135 MB) from Hugging Face
   repo Steward/lcm-dreamshaper-v7-gguf (sole file in the repo).
-  LCM = 4 steps, 512x512, cfg 1.5.
+  LCM = 4 steps, 512x512, cfg 1.5. The installers check the engine
+  out at the pinned release and SHA-256-check the model download
+  (MODEL_SHA256) — a file that does not match is deleted, never
+  accepted as the model.
 
 The model home is SHARED with the Design Shell: ~/design-shell-models/
 is checked first, so if Joshua already pulled the model for the
@@ -27,6 +30,7 @@ empty, and PIXELFORGE_SD_MODEL overrides both.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -43,6 +47,15 @@ MODEL_URL = ("https://huggingface.co/Steward/lcm-dreamshaper-v7-gguf/"
              "resolve/main/" + MODEL_FILENAME)
 ENGINE_REPO = "https://github.com/leejet/stable-diffusion.cpp"
 ENGINE_RELEASE = "master-1086-465adf3"
+# SHA-256 of the pinned model file, recomputed 2026-11-12 from the
+# verified copy (2,134,675,232 bytes). Both installers check every
+# model download against this and refuse a file that does not
+# match — a partial or corrupt download must never pass as the
+# model. This is the ONE place the hash lives: the GUI installer
+# imports it, and install.sh carries a literal copy that the
+# installer tests check against this value.
+MODEL_SHA256 = ("0642060766117fdeb8cae0ccdc73ee974ac5779be1112d0a"
+                "82f2b965bbd00e15")
 
 DEFAULT_COUNT = 3
 DEFAULT_SIZE = 512
@@ -158,6 +171,52 @@ def require_model() -> Path:
     if model is None:
         raise PixelForgeError(model_missing_text())
     return model
+
+
+# ------------------------------------------------------- install pins
+
+def engine_clone_command(dest) -> list:
+    """The git clone that fetches the engine at the pinned release.
+
+    --branch pins the tag: a plain clone fetches whatever master
+    HEAD happens to be that day, which is how the installers used
+    to fetch it — the pin was defined here and referenced nowhere.
+    --recursive pulls the ggml submodule; without it the build
+    fails. Kept separate, like build_command, so the installers
+    and the tests share the one command."""
+    return ["git", "clone", "--depth", "1",
+            "--branch", ENGINE_RELEASE,
+            "--recursive", ENGINE_REPO, str(dest)]
+
+
+def model_download_command(dest) -> list:
+    """The curl download for the model. -C - resumes a partial
+    file instead of restarting a 2.1 GB download from scratch."""
+    return ["curl", "-fSL", "-C", "-", MODEL_URL, "-o", str(dest)]
+
+
+def file_sha256(path) -> str:
+    """SHA-256 of a file, read in 1 MB chunks — the model is
+    2.1 GB, so it is never read into memory whole."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def check_model_file(path) -> None:
+    """Raise PixelForgeError unless the file at `path` is exactly
+    the pinned model — its SHA-256 must equal MODEL_SHA256. The
+    message names the expected and actual hashes, so a corrupt or
+    partial download is never mistaken for the real model."""
+    actual = file_sha256(path)
+    if actual != MODEL_SHA256:
+        raise PixelForgeError(
+            "the image model at %s failed its SHA-256 check — "
+            "expected %s, got %s (the file is not the pinned "
+            "model: delete it and download again)"
+            % (path, MODEL_SHA256, actual))
 
 
 # ------------------------------------------------------------------- prompt

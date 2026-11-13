@@ -6,6 +6,7 @@ PNG), because no engine or model exists in this sandbox. Live
 generation against the real LCM model is NOT proven here — it needs
 Joshua's PC, where the model pull is the long pole.
 """
+import hashlib
 import json
 import os
 import sys
@@ -20,13 +21,19 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from helpers import ensure_app, stub_env, write_stub_engine  # noqa: E402
 from pixel_forge import imagegen  # noqa: E402
 from pixel_forge.imagegen import (DEFAULT_NEGATIVE,  # noqa: E402
+                                  ENGINE_RELEASE, ENGINE_REPO,
                                   GenerationCancelled, MODEL_FILENAME,
-                                  build_command, engine_missing_text,
-                                  engine_status, find_engine, find_model,
-                                  generate, load_batch, model_missing_text,
-                                  new_batch, pixelize_candidates,
-                                  prompt_to_sprites, save_batch, set_keeper,
-                                  slugify, validate_prompt)
+                                  MODEL_SHA256, MODEL_URL,
+                                  build_command, check_model_file,
+                                  engine_clone_command,
+                                  engine_missing_text, engine_status,
+                                  file_sha256, find_engine, find_model,
+                                  generate, load_batch,
+                                  model_download_command,
+                                  model_missing_text, new_batch,
+                                  pixelize_candidates, prompt_to_sprites,
+                                  save_batch, set_keeper, slugify,
+                                  validate_prompt)
 from pixel_forge.pixelize import PixelForgeError  # noqa: E402
 
 
@@ -336,6 +343,71 @@ class CommandTests(ImageGenBase):
         self.assertEqual(cmd[cmd.index("-H") + 1], "512")
         self.assertEqual(cmd[cmd.index("-s") + 1], "42")
         self.assertEqual(cmd[cmd.index("-o") + 1], "/out/cand-01.png")
+
+
+class InstallPinTests(ImageGenBase):
+    """Task 31 (core): the engine pin and the model hash are the
+    one source of truth in imagegen.py — the installers use them,
+    they are not defined-and-forgotten. The hash tests use a SMALL
+    file with a patched MODEL_SHA256; no test downloads 2.1 GB."""
+
+    def test_engine_clone_command_pins_release(self):
+        cmd = engine_clone_command("/tmp/sd")
+        self.assertEqual(cmd[0], "git")
+        self.assertEqual(cmd[1], "clone")
+        self.assertEqual(cmd[cmd.index("--branch") + 1], ENGINE_RELEASE)
+        self.assertIn("--recursive", cmd)
+        self.assertEqual(cmd[cmd.index("--depth") + 1], "1")
+        self.assertIn(ENGINE_REPO, cmd)
+        self.assertEqual(cmd[-1], "/tmp/sd")
+
+    def test_clone_command_uses_the_constant(self):
+        # The bug being fixed was a defined-but-unreferenced pin:
+        # change the constant and the command must follow it, or
+        # the command carries a duplicated literal.
+        with mock.patch.object(imagegen, "ENGINE_RELEASE",
+                               "sentinel-release-1"):
+            cmd = engine_clone_command("/tmp/sd")
+        self.assertIn("sentinel-release-1", cmd)
+        self.assertNotIn(ENGINE_RELEASE, cmd)
+
+    def test_model_download_command_resumes(self):
+        cmd = model_download_command("/m/model.gguf")
+        self.assertEqual(cmd[0], "curl")
+        self.assertIn("-C", cmd)
+        self.assertEqual(cmd[cmd.index("-C") + 1], "-")
+        self.assertIn(MODEL_URL, cmd)
+        self.assertEqual(cmd[cmd.index("-o") + 1], "/m/model.gguf")
+
+    def test_file_sha256_matches_hashlib(self):
+        path = os.path.join(self.work, "small.bin")
+        data = b"pixel-forge pin test"
+        Path(path).write_bytes(data)
+        self.assertEqual(file_sha256(path),
+                         hashlib.sha256(data).hexdigest())
+
+    def test_check_model_file_accepts_matching_hash(self):
+        path = os.path.join(self.work, "small.gguf")
+        data = b"a small stand-in for the model"
+        Path(path).write_bytes(data)
+        with mock.patch.object(
+                imagegen, "MODEL_SHA256",
+                hashlib.sha256(data).hexdigest()):
+            check_model_file(path)  # must not raise
+
+    def test_check_model_file_rejects_wrong_hash(self):
+        path = os.path.join(self.work, "small.gguf")
+        data = b"a small stand-in for the model"
+        Path(path).write_bytes(data)
+        actual = hashlib.sha256(data).hexdigest()
+        wrong = "0" * 64
+        with mock.patch.object(imagegen, "MODEL_SHA256", wrong):
+            with self.assertRaises(PixelForgeError) as caught:
+                check_model_file(path)
+        message = str(caught.exception)
+        self.assertIn(wrong, message)
+        self.assertIn(actual, message)
+        self.assertIn(str(path), message)
 
 
 class GenerateTests(ImageGenBase):

@@ -42,6 +42,8 @@ from PySide6.QtWidgets import (  # noqa: E402
     QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
 
+from .pixelize import PixelForgeError  # noqa: E402
+
 
 # ---------------------------------------------------------------- context
 
@@ -293,9 +295,18 @@ def step_image_engine(ctx):
     model download. A failed step is a WARNING, never a failure:
     Pixel Forge still works for images and video without the engine,
     and prompt import just says plainly what to install.
+
+    The engine is checked out at the pinned ENGINE_RELEASE, never
+    master HEAD, and the model download is SHA-256-checked against
+    MODEL_SHA256 (both from imagegen — the one source of truth). A
+    download that fails the check is deleted, never kept; a curl
+    failure leaves any partial file in place, so the next run
+    resumes it instead of starting over.
     """
-    from .imagegen import (ENGINE_REPO, MODEL_FILENAME, MODEL_URL,
-                           find_engine, find_model)
+    from .imagegen import (ENGINE_RELEASE, MODEL_FILENAME,
+                           check_model_file, engine_clone_command,
+                           find_engine, find_model,
+                           model_download_command)
 
     ctx.log("Checking the image engine (for prompt import)…")
     engine = find_engine()
@@ -338,20 +349,29 @@ def step_image_engine(ctx):
         # The prebuilt Linux binary needs glibc 2.43 (Ubuntu 26.04);
         # Mint ships 2.39, so the engine is built from source here.
         # The clone MUST be --recursive: ggml is a submodule, and a
-        # non-recursive clone fails the build.
+        # non-recursive clone fails the build. It is pinned to
+        # ENGINE_RELEASE: a plain clone fetches whatever master
+        # HEAD happens to be that day.
         ctx.log("Building the image engine from source (one-time "
                 "compile — allow up to half an hour)…")
         tmpd = tempfile.mkdtemp(prefix="pixel-forge-sd-")
         try:
             src = os.path.join(tmpd, "sd")
             build_dir = os.path.join(src, "build")
+            code = ctx.run(engine_clone_command(src), timeout=900)
+            if code != 0:
+                ctx.log("WARNING: could not check out the image "
+                        "engine at %s (git clone exit %s) — prompt "
+                        "import will stay unavailable. Try "
+                        "./install.sh --with-image-engine in a "
+                        "terminal to see the git output."
+                        % (ENGINE_RELEASE, code))
+                return StepResult(StepResult.WARN,
+                                  "engine checkout failed — prompt "
+                                  "import unavailable")
             code = ctx.run(
-                ["git", "clone", "--depth", "1", "--recursive",
-                 ENGINE_REPO, src], timeout=900)
-            if code == 0:
-                code = ctx.run(
-                    ["cmake", "-S", src, "-B", build_dir,
-                     "-DCMAKE_BUILD_TYPE=Release"], timeout=600)
+                ["cmake", "-S", src, "-B", build_dir,
+                 "-DCMAKE_BUILD_TYPE=Release"], timeout=600)
             if code == 0:
                 code = ctx.run(
                     ["cmake", "--build", build_dir,
@@ -386,15 +406,35 @@ def step_image_engine(ctx):
                 % MODEL_FILENAME)
         model_home = ctx.home / "design-shell-models"
         ctx.mkdir(model_home)
-        code = ctx.run(["curl", "-fSL", MODEL_URL, "-o",
-                        str(model_home / MODEL_FILENAME)],
+        model_path = model_home / MODEL_FILENAME
+        code = ctx.run(model_download_command(model_path),
                        timeout=3600)
-        if find_model() is None:
+        if code != 0 or not model_path.is_file():
+            # A failed download leaves any partial file in place:
+            # the next run resumes it (-C -) instead of starting
+            # over. Only a completed-but-wrong file is deleted,
+            # below.
             ctx.log("WARNING: the model download failed (exit %s) — "
                     "prompt import will stay unavailable until the "
                     "model is in ~/design-shell-models/." % code)
             return StepResult(StepResult.WARN,
                               "model download failed — prompt import "
+                              "unavailable")
+        # The download landed — prove it is the pinned model before
+        # accepting it. A mismatched file is deleted, never kept:
+        # a partial or corrupt download must not pass as the model.
+        try:
+            check_model_file(model_path)
+        except PixelForgeError as exc:
+            try:
+                model_path.unlink()
+            except OSError:
+                pass
+            ctx.log("WARNING: %s — the bad file was removed, so "
+                    "prompt import will stay unavailable until the "
+                    "model downloads cleanly." % exc)
+            return StepResult(StepResult.WARN,
+                              "model checksum failed — prompt import "
                               "unavailable")
         ctx.log("OK: image model downloaded")
     return StepResult(StepResult.DONE)

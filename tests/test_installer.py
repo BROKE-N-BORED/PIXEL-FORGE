@@ -3,13 +3,18 @@
 The dry run never writes anything or runs anything privileged: every
 step logs what it would do. Skipped when PySide6 is not importable.
 """
+import contextlib
+import hashlib
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -202,6 +207,200 @@ class InstallerTests(unittest.TestCase):
             path = os.path.join(out_dir, "pixel-forge-%d.png" % size)
             self.assertTrue(os.path.isfile(path))
             self.assertGreater(os.path.getsize(path), 100)
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 not available")
+class ImageEnginePinTests(unittest.TestCase):
+    """Task 31 (core): the GUI installer's image-engine step clones
+    at the pinned release and SHA-256-checks the model download.
+    The subprocess calls are stubbed at the InstallContext
+    boundary — no test clones or downloads anything for real."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(
+            lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+    def _ctx(self, lines, run):
+        from pixel_forge.installer import InstallContext
+
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.install_image_engine = True
+        ctx.home = Path(self.tmp)
+        # Build tools present, so the step reaches the clone.
+        ctx.which = lambda _name: "/usr/bin/" + _name
+        ctx.run = run
+        ctx.run_admin = lambda _script, timeout=None: 0
+        return ctx
+
+    def _drive_step(self, run, engine_values, model_values,
+                    check=None, release=None):
+        """Drive the real step_image_engine with stubbed process
+        calls. engine_values / model_values are the find_* return
+        values, consumed in call order; check replaces
+        check_model_file (default: records the path it was given);
+        release patches ENGINE_RELEASE. Returns (result, lines,
+        commands, checked_paths)."""
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import step_image_engine
+
+        lines = []
+        commands = []
+        checked = []
+
+        def recording_run(cmd, timeout=None):
+            commands.append(list(cmd))
+            return run(cmd, timeout)
+
+        ctx = self._ctx(lines, recording_run)
+        engine_iter = iter(engine_values)
+        model_iter = iter(model_values)
+        patches = [
+            mock.patch.object(imagegen, "find_engine",
+                              lambda: next(engine_iter)),
+            mock.patch.object(imagegen, "find_model",
+                              lambda: next(model_iter)),
+            mock.patch.object(
+                imagegen, "check_model_file",
+                check if check is not None
+                else lambda p: checked.append(Path(p))),
+        ]
+        if release is not None:
+            patches.append(mock.patch.object(
+                imagegen, "ENGINE_RELEASE", release))
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            result = step_image_engine(ctx)
+        return result, lines, commands, checked
+
+    def _curl_lands_a_file(self, cmd, timeout=None):
+        """A stub run: curl writes a small file at its -o target,
+        everything else succeeds silently."""
+        if cmd[0] == "curl":
+            dest = Path(cmd[cmd.index("-o") + 1])
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"fake model bytes")
+        return 0
+
+    def test_step_clones_pinned_release_and_checks_model(self):
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import StepResult
+
+        result, _lines, commands, checked = self._drive_step(
+            self._curl_lands_a_file,
+            engine_values=[None, Path("/opt/sd.cpp/bin/sd-cli")],
+            model_values=[None, None])
+        self.assertEqual(result.status, StepResult.DONE)
+        clones = [c for c in commands
+                  if len(c) > 1 and c[1] == "clone"]
+        self.assertEqual(len(clones), 1)
+        clone = clones[0]
+        self.assertEqual(clone[clone.index("--branch") + 1],
+                         imagegen.ENGINE_RELEASE)
+        self.assertIn("--recursive", clone)
+        self.assertEqual(clone[clone.index("--depth") + 1], "1")
+        self.assertTrue(any(c[0] == "cmake" for c in commands),
+                        "cmake never ran after the clone")
+        curls = [c for c in commands if c[0] == "curl"]
+        self.assertEqual(len(curls), 1)
+        self.assertIn("-C", curls[0])
+        self.assertEqual(curls[0][curls[0].index("-C") + 1], "-")
+        self.assertEqual(
+            checked,
+            [Path(self.tmp) / "design-shell-models"
+             / imagegen.MODEL_FILENAME],
+            "the model download was never hash-checked")
+
+    def test_step_uses_the_pinned_constant(self):
+        # The bug being fixed was a defined-but-unreferenced pin:
+        # change the constant and the clone command must follow it,
+        # or the step carries a duplicated literal.
+        result, _lines, commands, _checked = self._drive_step(
+            self._curl_lands_a_file,
+            engine_values=[None, Path("/opt/sd.cpp/bin/sd-cli")],
+            model_values=[None, None],
+            release="sentinel-release-2")
+        from pixel_forge.installer import StepResult
+
+        self.assertEqual(result.status, StepResult.DONE)
+        clones = [c for c in commands
+                  if len(c) > 1 and c[1] == "clone"]
+        self.assertEqual(len(clones), 1)
+        self.assertIn("sentinel-release-2", clones[0])
+
+    def test_clone_failure_fails_loudly_with_the_reason(self):
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import StepResult
+
+        def run(cmd, timeout=None):
+            if len(cmd) > 1 and cmd[1] == "clone":
+                return 128
+            return 0
+
+        result, lines, commands, _checked = self._drive_step(
+            run, engine_values=[None],
+            model_values=[Path("/m/model.gguf")])
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("checkout failed", result.detail)
+        log = "\n".join(lines)
+        self.assertIn(imagegen.ENGINE_RELEASE, log)
+        self.assertIn("git clone exit 128", log)
+        self.assertFalse(any(c[0] == "cmake" for c in commands),
+                         "cmake ran after a failed clone")
+
+    def test_checksum_mismatch_deletes_the_file(self):
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import StepResult
+        from pixel_forge.pixelize import PixelForgeError
+
+        expected = "a" * 64
+        actual = "b" * 64
+
+        def bad_check(path):
+            raise PixelForgeError(
+                "the image model at %s failed its SHA-256 check — "
+                "expected %s, got %s" % (path, expected, actual))
+
+        result, lines, _commands, _checked = self._drive_step(
+            self._curl_lands_a_file,
+            engine_values=[Path("/opt/sd.cpp/bin/sd-cli")],
+            model_values=[None, None], check=bad_check)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("checksum failed", result.detail)
+        model_path = (Path(self.tmp) / "design-shell-models"
+                      / imagegen.MODEL_FILENAME)
+        self.assertFalse(model_path.exists(),
+                         "the bad model file was kept")
+        log = "\n".join(lines)
+        self.assertIn(expected, log)
+        self.assertIn(actual, log)
+        self.assertIn("removed", log)
+
+    def test_failed_download_keeps_the_partial_file(self):
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import StepResult
+
+        def run(cmd, timeout=None):
+            if cmd[0] == "curl":
+                # A partial download from an earlier interrupted run.
+                dest = Path(cmd[cmd.index("-o") + 1])
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(b"partial")
+                return 22
+            return 0
+
+        result, _lines, _commands, checked = self._drive_step(
+            run, engine_values=[Path("/opt/sd.cpp/bin/sd-cli")],
+            model_values=[None, None])
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("download failed", result.detail)
+        model_path = (Path(self.tmp) / "design-shell-models"
+                      / imagegen.MODEL_FILENAME)
+        self.assertTrue(model_path.exists(),
+                        "the partial file was deleted — resume lost")
+        self.assertEqual(checked, [],
+                         "the hash check ran on a failed download")
 
 
 @unittest.skipUnless(HAS_QT, "PySide6 not available")
@@ -665,6 +864,117 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("Skipped ffmpeg", proc.stdout)
         self.assertNotIn("SUDO-CALLED", proc.stdout)
+
+
+def _install_sh_text():
+    path = os.path.join(ROOT, "install.sh")
+    with open(path) as fh:
+        return fh.read()
+
+
+def _imagegen_constant(name):
+    """A module-level constant from pixel_forge/imagegen.py, read
+    from the source with ast — no import, so this works without
+    PySide6 (imagegen imports the Qt-only core)."""
+    import ast
+
+    path = os.path.join(ROOT, "pixel_forge", "imagegen.py")
+    with open(path) as fh:
+        tree = ast.parse(fh.read())
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    return ast.literal_eval(node.value)
+    raise AssertionError("no %s in imagegen.py" % name)
+
+
+def _model_download_block():
+    """The exact model download + hash-check lines from
+    install.sh, verbatim — from the curl line through the closing
+    `fi` of the checksum check. The tests below run these lines,
+    not a paraphrase of them."""
+    text = _install_sh_text()
+    start = text.index("curl -fSL -C -")
+    end = text.index('echo "Model downloaded to', start)
+    return text[start:end]
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash not available")
+class InstallScriptPinTests(unittest.TestCase):
+    """Task 31 (core): install.sh pins the same release and model
+    hash as imagegen.py, and its shipped lines delete a bad
+    download. Bash runs use a stubbed `curl` — never a real
+    download."""
+
+    def test_pinned_tag_matches_imagegen(self):
+        match = re.search(r'^SD_RELEASE="([^"]+)"$',
+                          _install_sh_text(), re.MULTILINE)
+        self.assertIsNotNone(match, "install.sh has no SD_RELEASE")
+        self.assertEqual(match.group(1),
+                         _imagegen_constant("ENGINE_RELEASE"))
+
+    def test_pinned_hash_matches_imagegen(self):
+        match = re.search(r'^SD_MODEL_SHA256="([0-9a-f]{64})"$',
+                          _install_sh_text(), re.MULTILINE)
+        self.assertIsNotNone(match,
+                             "install.sh has no SD_MODEL_SHA256")
+        self.assertEqual(match.group(1),
+                         _imagegen_constant("MODEL_SHA256"))
+
+    def test_clone_uses_the_pinned_tag(self):
+        text = _install_sh_text()
+        self.assertIn('git clone --depth 1 --branch "$SD_RELEASE" '
+                      '--recursive "$SD_REPO"', text)
+
+    def test_download_resumes(self):
+        self.assertIn("curl -fSL -C -", _install_sh_text())
+
+    def _run_download_block(self, content, sha):
+        """Run the shipped download + check lines with a stubbed
+        curl that writes `content`, and SD_MODEL_SHA256 set to
+        `sha`. Returns (proc, model_path)."""
+        home = tempfile.mkdtemp()
+        self.addCleanup(
+            lambda: shutil.rmtree(home, ignore_errors=True))
+        script = (
+            "set -euo pipefail\n"
+            "SD_MODEL_HOME=%s\n"
+            "SD_MODEL_FILE=LCM_Dreamshaper_v7-f16.gguf\n"
+            "SD_MODEL_URL=https://example.invalid/model.gguf\n"
+            "SD_MODEL_SHA256=%s\n"
+            "curl() { mkdir -p \"$SD_MODEL_HOME\"; "
+            "printf '%%s' %s > \"$SD_MODEL_HOME/$SD_MODEL_FILE\"; }\n"
+            % (shlex.quote(home), sha, shlex.quote(content))
+            + _model_download_block()
+        )
+        proc = subprocess.run(["bash", "-c", script],
+                              capture_output=True, text=True,
+                              timeout=30)
+        return proc, os.path.join(home,
+                                  "LCM_Dreamshaper_v7-f16.gguf")
+
+    def test_bad_download_is_deleted(self):
+        proc, path = self._run_download_block(
+            "corrupt-model-bytes", "0" * 64)
+        output = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, output)
+        self.assertFalse(os.path.exists(path),
+                         "the bad file was kept")
+        self.assertIn("failed its SHA-256 check", output)
+        self.assertIn("expected: " + "0" * 64, output)
+        self.assertIn("got:      ", output)
+        self.assertIn("removed", output)
+
+    def test_good_download_is_kept(self):
+        content = "good-model-bytes"
+        sha = hashlib.sha256(content.encode()).hexdigest()
+        proc, path = self._run_download_block(content, sha)
+        output = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, output)
+        self.assertTrue(os.path.exists(path))
+        with open(path) as fh:
+            self.assertEqual(fh.read(), content)
 
 
 if __name__ == "__main__":

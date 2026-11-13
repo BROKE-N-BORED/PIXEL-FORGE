@@ -1,5 +1,38 @@
 # Pixel Forge changelog
 
+## 0.17 — 2026-11-12
+
+The image engine pin is enforced and the model download is
+SHA-256-checked — the core of task-list item #31 (repo-audit
+Top 5 #2). `ENGINE_RELEASE` was defined in `imagegen.py` and
+referenced NOWHERE: both installers cloned stable-diffusion.cpp
+master HEAD, so the engine was whatever master happened to be
+that day, and the 2.1 GB model download had no checksum at all.
+
+- Both installers check the engine out at the pinned release
+  (`master-1086-465adf3`, the tag the live generation was proven
+  against). The GUI installer builds the clone command from
+  `imagegen.engine_clone_command`, which reads the constant —
+  there is no duplicated literal to drift. `install.sh` carries
+  the literal tag (bash cannot import Python) and a test asserts
+  it equals `ENGINE_RELEASE`, so the two can never drift
+  silently. A failed checkout fails the step loudly, naming the
+  release and the git exit code, and cmake never runs after it.
+- Both installers download the model with curl resume (`-C -`),
+  so an interrupted 2.1 GB download picks up where it stopped
+  instead of restarting. After the download lands, its SHA-256
+  is checked against the pinned `MODEL_SHA256` (recomputed
+  2026-11-12 from the verified copy:
+  `06420607…00e15`). On a mismatch the bad file is DELETED and
+  the step fails loudly with the expected vs actual hash — a
+  partial or corrupt download is never accepted as the model.
+  A failed download leaves any partial file in place, so the
+  next run resumes it.
+- The rest of task 31 (disk-space pre-check, cheap steps first,
+  per-step progress, Cancel mid-step, apt output on failure,
+  version display, uninstall entry) is NOT in this version — it
+  is task 76, a separate version.
+
 ## 0.16 — 2026-11-12
 
 A spritesheet saved to the library no longer carries stale

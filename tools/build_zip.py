@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Pixel Forge v0.16 release zip.
+"""Build the Pixel Forge v0.17 release zip.
 
 Zip modes matter: GUI extractors (Thunar's) drop the execute bit unless
 external_attr carries the full regular-file type bits — 0o100755 for
@@ -11,7 +11,7 @@ import sys
 import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VERSION = "0.16"
+VERSION = "0.17"
 PREFIX = "pixel-forge-v%s/" % VERSION
 
 EXECUTABLES = {"install.sh", "uninstall.sh", "run.sh",
