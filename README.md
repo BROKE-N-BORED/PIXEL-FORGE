@@ -90,7 +90,18 @@ it keeps them and prints the way to remove them by hand.
 
 - **Image tab:** import an image (or drop one on the window), adjust
   the size, palette, and dithering, and press Export PNG. Conversion
-  is live — every change re-pixelizes at once.
+  is live — every change re-pixelizes at once. The pixel preview is
+  also a canvas: pick a tool above it (Pencil, Eraser, Fill,
+  Eyedropper, Line, Rectangle) and a color from the strip of swatches
+  — one per color the sprite actually uses — and click or drag on
+  the preview to fix pixels in place. Rectangles are outline only.
+  Every edit is one undo step (Ctrl+Z / Ctrl+Y), the info line shows
+  "(edited)" while the result carries edits, and Export PNG and Save
+  to library write the edited sprite. A control change, a preset, or
+  a new image load re-pixelizes from the source, so each one asks
+  first before throwing the edits away (default No). A sprite with
+  no opaque pixels has no colors to draw with — the strip stays
+  empty until a result with colors loads.
 - **Video tab:** import a video or a GIF (or drop one on the window),
   pick how many frames per second to keep, then keep or drop frames
   in the strip, watch the animation play, and press Export frames to
@@ -186,11 +197,12 @@ it keeps them and prints the way to remove them by hand.
   cannot be deleted).
 - **Undo:** the Edit menu has Undo (Ctrl+Z) and Redo (Ctrl+Y
   and Ctrl+Shift+Z), each named after the step it will do.
-  Four kinds of change are undoable: library deletes, preset
-  deletes, keep/drop choices on the Video strip, and control
+  Five kinds of change are undoable: library deletes, preset
+  deletes, keep/drop choices on the Video strip, control
   changes on the Image, Video, and Prompt tabs (size, palette,
   colors, dithering, and the preset selection — applying a
-  preset is one step). A library delete moves the sprite's
+  preset is one step), and pixel edits on the Image tab's
+  result (one drag, fill, line, or rectangle per step). A library delete moves the sprite's
   files to a `trash/` folder in the library folder instead of
   removing them, so undo brings the entry and its files back;
   the delete becomes permanent when the undo entry leaves the

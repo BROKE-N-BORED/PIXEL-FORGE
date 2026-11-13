@@ -1,5 +1,47 @@
 # Pixel Forge changelog
 
+## 0.43 — 2026-11-13
+
+Pixel editor — task-list item #33:
+
+- The Image tab's pixel preview is a canvas now: click and drag
+  on it to fix pixels in place, instead of round-tripping to
+  another program. Six tools sit above the canvas — Pencil,
+  Eraser, Fill, Eyedropper, Line, and Rectangle — with a color
+  strip of one swatch per color the result actually uses, in
+  first-appearance order. The editor draws with the result's own
+  palette, not a color wheel. Nothing is selected by default:
+  the canvas does nothing on click until a tool is chosen, and
+  the pencil, fill, line, and rectangle need a color picked
+  first.
+- Pencil paints the picked color (a drag is one undo step, and
+  fast drags interpolate so no gaps are left); Eraser paints
+  transparency; Fill flood-fills the connected area of one
+  color (a click on a pixel already the picked color does
+  nothing); Eyedropper picks the color under the cursor into the
+  drawing color (a transparent pixel has nothing to pick);
+  Line and Rectangle draw on drag, previewed live and committed
+  on release as one undo step. Rectangles are outline only.
+- Every pixel edit is one entry on the existing undo stack, so
+  the Edit menu names it ("Undo Draw", "Undo Fill", "Undo
+  Erase", "Undo Line", "Undo Rectangle") and Ctrl+Z / Ctrl+Y
+  work. The info line shows "(edited)" while the result carries
+  edits, and undoing every edit clears it again. Export PNG and
+  Save to library write the edited result.
+- A control change, a preset, or a new image load re-pixelizes
+  from the source, which would throw the edits away — so each
+  one asks first ("Re-pixelize and lose your edits?" and the
+  same question for presets and new loads), default No.
+  Declining a control change puts the controls back where they
+  were; declining a preset puts the picker back; declining a
+  load keeps the current image and result.
+- The raster operations live in a new stdlib-only module,
+  `pixel_forge/editor.py` (flood fill, Bresenham lines,
+  rectangle outlines, distinct colors, the eyedropper read),
+  so they are tested on bare python as well as through the GUI.
+  The editor covers the Image tab's result only — video frames,
+  prompt candidates, and code assets are not editable yet.
+
 ## 0.42 — 2026-11-13
 
 Installer failure traces — task-list item #32:

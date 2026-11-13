@@ -5663,5 +5663,350 @@ class UndoGuiTests(unittest.TestCase):
                          "Undo Delete Rock && Roll")
 
 
+class PixelEditorTests(unittest.TestCase):
+    """Task 33: the pixel editor on the Image tab — tools,
+    colors, undo, and the re-pixelize guard. The test image is
+    a 32 x 32 source with a red left half and a blue right
+    half, so the result has exactly two colors and the fill
+    boundary is a straight line."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        from pixel_forge.image import Image, argb
+        source = Image(32, 32)
+        for y in range(32):
+            for x in range(32):
+                source.setPixel(x, y, argb(255, 0, 0) if x < 16
+                                else argb(0, 0, 255))
+        cls.two_color = write_image(
+            source, os.path.join(cls.tmp, "two.png"))
+        cls.solid = write_image(
+            make_solid_image(32, 32, 0, 255, 0),
+            os.path.join(cls.tmp, "solid.png"))
+        from pixel_forge.image import argb as _argb
+        cls.red = _argb(255, 0, 0)
+        cls.blue = _argb(0, 0, 255)
+        cls.green = _argb(0, 255, 0)
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self.win = MainWindow(library_dir=self.lib_dir,
+                              restore=False)
+        self.win.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _load_two_color(self):
+        self.assertTrue(self.win.load_image(self.two_color))
+        self.app.processEvents()
+        self.assertEqual(self.win.result_image.width(), 32)
+        self.assertEqual(self.win.result_image.height(), 32)
+
+    def _confirm(self, answer):
+        """Patch the Yes/No confirm to answer Yes or No."""
+        from unittest import mock
+        return mock.patch.object(
+            QMessageBox, "question", return_value=answer)
+
+    def _pick_tool(self, tool):
+        self.win.editor_tool_buttons[tool].click()
+        self.app.processEvents()
+
+    def _pick_color(self, index=0):
+        swatches = list(self.win._editor_swatch_by_color.values())
+        self.assertGreater(len(swatches), index)
+        swatches[index].click()
+        self.app.processEvents()
+
+    def _pos(self, x, y):
+        return self.win.after_label.pos_for_pixel(x, y)
+
+    def _click(self, x, y):
+        from PySide6.QtTest import QTest
+        QTest.mouseClick(self.win.after_label,
+                         Qt.MouseButton.LeftButton,
+                         pos=self._pos(x, y))
+        self.app.processEvents()
+
+    def _drag(self, x0, y0, x1, y1):
+        from PySide6.QtTest import QTest
+        canvas = self.win.after_label
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton,
+                         pos=self._pos(x0, y0))
+        QTest.mouseMove(canvas, pos=self._pos(x1, y1))
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton,
+                           pos=self._pos(x1, y1))
+        self.app.processEvents()
+
+    def _pixel(self, x, y):
+        return self.win.result_image.pixel(x, y)
+
+    def test_tools_disabled_before_load(self):
+        self.assertFalse(
+            self.win.editor_tool_buttons["pencil"].isEnabled())
+        self.assertFalse(self.win.editor_color_scroll.isEnabled())
+        self._load_two_color()
+        self.assertTrue(
+            self.win.editor_tool_buttons["pencil"].isEnabled())
+        self.assertTrue(self.win.editor_color_scroll.isEnabled())
+
+    def test_nothing_selected_by_default(self):
+        self._load_two_color()
+        self.assertIsNone(self.win._editor_tool)
+        self.assertIsNone(self.win._editor_color)
+        for button in self.win.editor_tool_buttons.values():
+            self.assertFalse(button.isChecked())
+        for button in self.win._editor_swatch_by_color.values():
+            self.assertFalse(button.isChecked())
+
+    def test_click_with_no_tool_does_nothing(self):
+        self._load_two_color()
+        self._click(5, 5)
+        self.assertEqual(len(self.win._undo_stack), 0)
+        self.assertEqual(self._pixel(5, 5), self.red)
+        self.assertFalse(self.win._result_edited)
+
+    def test_pencil_click_paints_one_pixel(self):
+        self._load_two_color()
+        self._pick_tool("pencil")
+        self._pick_color(1)  # blue
+        self._click(3, 3)
+        self.assertEqual(self._pixel(3, 3), self.blue)
+        self.assertEqual(self._pixel(3, 4), self.red)
+        self.assertEqual(len(self.win._undo_stack), 1)
+        self.assertEqual(self.win._undo_action.text(), "Undo Draw")
+        self.assertTrue(self.win._result_edited)
+        self.assertIn("(edited)", self.win.info_label.text())
+
+    def test_pencil_drag_is_one_undo_step(self):
+        self._load_two_color()
+        self._pick_tool("pencil")
+        self._pick_color(1)  # blue
+        self._drag(2, 2, 2, 5)
+        for y in range(2, 6):
+            self.assertEqual(self._pixel(2, y), self.blue)
+        self.assertEqual(self._pixel(3, 3), self.red)
+        self.assertEqual(len(self.win._undo_stack), 1)
+        # Undo restores the pixels and clears the edited flag;
+        # redo paints them again.
+        self.win._on_undo()
+        for y in range(2, 6):
+            self.assertEqual(self._pixel(2, y), self.red)
+        self.assertFalse(self.win._result_edited)
+        self.assertNotIn("(edited)", self.win.info_label.text())
+        self.assertEqual(self.win._redo_action.text(), "Redo Draw")
+        self.win._on_redo()
+        for y in range(2, 6):
+            self.assertEqual(self._pixel(2, y), self.blue)
+        self.assertTrue(self.win._result_edited)
+
+    def test_pencil_without_color_does_nothing(self):
+        self._load_two_color()
+        self._pick_tool("pencil")
+        self._click(3, 3)
+        self.assertEqual(len(self.win._undo_stack), 0)
+        self.assertEqual(self._pixel(3, 3), self.red)
+        self.assertIn("Pick a color",
+                      self.win.statusBar().currentMessage())
+
+    def test_eraser_paints_transparent(self):
+        self._load_two_color()
+        self._pick_tool("eraser")
+        self._click(3, 3)
+        self.assertEqual(self._pixel(3, 3), 0)
+        self.assertEqual(self._pixel(3, 4), self.red)
+        self.assertEqual(self.win._undo_action.text(), "Undo Erase")
+        self.win._on_undo()
+        self.assertEqual(self._pixel(3, 3), self.red)
+
+    def test_fill_fills_the_region(self):
+        self._load_two_color()
+        self._pick_tool("fill")
+        self._pick_color(1)  # blue
+        self._click(2, 2)  # the red left half
+        for x in (0, 8, 15):
+            self.assertEqual(self._pixel(x, 15), self.blue)
+        for x in (16, 24, 31):
+            self.assertEqual(self._pixel(x, 15), self.blue)
+        self.assertEqual(len(self.win._undo_stack), 1)
+        self.assertEqual(self.win._undo_action.text(), "Undo Fill")
+        self.win._on_undo()
+        self.assertEqual(self._pixel(2, 2), self.red)
+        self.assertEqual(self._pixel(20, 20), self.blue)
+
+    def test_fill_with_matching_color_is_a_noop(self):
+        self._load_two_color()
+        self._pick_tool("fill")
+        self._pick_color(0)  # red
+        self._click(2, 2)  # already red
+        self.assertEqual(len(self.win._undo_stack), 0)
+        self.assertFalse(self.win._result_edited)
+
+    def test_eyedropper_picks_the_color(self):
+        self._load_two_color()
+        self._pick_tool("eyedropper")
+        self._click(20, 20)  # the blue right half
+        self.assertEqual(self.win._editor_color, self.blue)
+        self.assertEqual(len(self.win._undo_stack), 0)
+        self.assertFalse(self.win._result_edited)
+        swatch = self.win._editor_swatch_by_color[self.blue]
+        self.assertTrue(swatch.isChecked())
+
+    def test_eyedropper_on_transparent_picks_nothing(self):
+        self._load_two_color()
+        self._pick_tool("eraser")
+        self._click(3, 3)
+        self._pick_tool("eyedropper")
+        self._click(3, 3)
+        self.assertIsNone(self.win._editor_color)
+        self.assertIn("transparent",
+                      self.win.statusBar().currentMessage())
+
+    def test_line_draws_and_undoes(self):
+        self._load_two_color()
+        self._pick_tool("line")
+        self._pick_color(1)  # blue
+        self._drag(2, 2, 5, 2)
+        for x in range(2, 6):
+            self.assertEqual(self._pixel(x, 2), self.blue)
+        self.assertEqual(self._pixel(2, 3), self.red)
+        self.assertEqual(len(self.win._undo_stack), 1)
+        self.assertEqual(self.win._undo_action.text(), "Undo Line")
+        self.win._on_undo()
+        for x in range(2, 6):
+            self.assertEqual(self._pixel(x, 2), self.red)
+
+    def test_rectangle_draws_outline_only(self):
+        self._load_two_color()
+        self._pick_tool("rectangle")
+        self._pick_color(1)  # blue
+        self._drag(2, 2, 5, 5)
+        for x in range(2, 6):
+            self.assertEqual(self._pixel(x, 2), self.blue)
+            self.assertEqual(self._pixel(x, 5), self.blue)
+        for y in range(2, 6):
+            self.assertEqual(self._pixel(2, y), self.blue)
+            self.assertEqual(self._pixel(5, y), self.blue)
+        self.assertEqual(self._pixel(3, 3), self.red)
+        self.assertEqual(self._pixel(4, 4), self.red)
+        self.assertEqual(len(self.win._undo_stack), 1)
+        self.assertEqual(self.win._undo_action.text(),
+                         "Undo Rectangle")
+
+    def test_color_strip_lists_result_colors(self):
+        self._load_two_color()
+        colors = list(self.win._editor_swatch_by_color)
+        self.assertEqual(colors, [self.red, self.blue])
+
+    def test_canvas_mapping_round_trips(self):
+        self._load_two_color()
+        canvas = self.win.after_label
+        for x, y in ((0, 0), (5, 7), (31, 31), (16, 16)):
+            self.assertEqual(canvas.pixel_at(canvas.pos_for_pixel(
+                x, y)), (x, y))
+        from PySide6.QtCore import QPoint
+        self.assertIsNone(canvas.pixel_at(QPoint(-100, -100)))
+
+    def test_repixelize_guard_declines(self):
+        self._load_two_color()
+        self._pick_tool("pencil")
+        self._pick_color(1)
+        self._click(3, 3)
+        self.assertEqual(self._pixel(3, 3), self.blue)
+        with self._confirm(QMessageBox.StandardButton.No) as ask:
+            self.win.colors_spin.setValue(8)
+            self.app.processEvents()
+        self.assertEqual(ask.call_count, 1)
+        # The control is back where it was, the edit survives,
+        # and no control-change step was recorded.
+        self.assertEqual(self.win.colors_spin.value(), 16)
+        self.assertEqual(self._pixel(3, 3), self.blue)
+        self.assertTrue(self.win._result_edited)
+        self.assertEqual(len(self.win._undo_stack), 1)
+
+    def test_repixelize_guard_accepts(self):
+        self._load_two_color()
+        self._pick_tool("pencil")
+        self._pick_color(1)
+        self._click(3, 3)
+        with self._confirm(QMessageBox.StandardButton.Yes):
+            self.win.colors_spin.setValue(8)
+            self.app.processEvents()
+        self.assertEqual(self.win.colors_spin.value(), 8)
+        self.assertEqual(self._pixel(3, 3), self.red)
+        self.assertFalse(self.win._result_edited)
+        self.assertNotIn("(edited)", self.win.info_label.text())
+        # The edit entry stays on the stack below the control
+        # change — undoing the control change first keeps the
+        # snapshots consistent.
+        self.assertEqual(len(self.win._undo_stack), 2)
+        self.assertEqual(self.win._undo_action.text(),
+                         "Undo Change colors")
+
+    def test_preset_guard_declines(self):
+        self._load_two_color()
+        self._pick_tool("pencil")
+        self._pick_color(1)
+        self._click(3, 3)
+        index = self.win.preset_combo.findData("builtin:Game Boy 32")
+        self.assertGreaterEqual(index, 0)
+        with self._confirm(QMessageBox.StandardButton.No) as ask:
+            self.win.preset_combo.setCurrentIndex(index)
+            self.app.processEvents()
+        self.assertEqual(ask.call_count, 1)
+        self.assertIsNone(self.win.preset_combo.currentData())
+        self.assertEqual(self.win.colors_spin.value(), 16)
+        self.assertEqual(self._pixel(3, 3), self.blue)
+        self.assertTrue(self.win._result_edited)
+        self.assertEqual(len(self.win._undo_stack), 1)
+
+    def test_load_guard_declines_and_accepts(self):
+        self._load_two_color()
+        self._pick_tool("pencil")
+        self._pick_color(1)
+        self._click(3, 3)
+        with self._confirm(QMessageBox.StandardButton.No):
+            self.assertFalse(self.win.load_image(self.solid))
+        self.assertEqual(self.win.source_path, self.two_color)
+        self.assertEqual(self._pixel(3, 3), self.blue)
+        self.assertTrue(self.win._result_edited)
+        with self._confirm(QMessageBox.StandardButton.Yes):
+            self.assertTrue(self.win.load_image(self.solid))
+        self.assertEqual(self.win.source_path, self.solid)
+        self.assertEqual(self._pixel(3, 3), self.green)
+        self.assertFalse(self.win._result_edited)
+
+    def test_export_writes_edited_pixels(self):
+        self._load_two_color()
+        self._pick_tool("pencil")
+        self._pick_color(1)
+        self._click(3, 3)
+        from pixel_forge.pixelize import load_image as core_load
+        out = os.path.join(self.tmp, "edited.png")
+        self.assertTrue(self.win.export_image(out))
+        back = core_load(out)
+        self.assertEqual(back.pixel(3, 3), self.blue)
+        self.assertEqual(back.pixel(3, 4), self.red)
+
+    def test_save_to_library_saves_edited_pixels(self):
+        self._load_two_color()
+        self._pick_tool("pencil")
+        self._pick_color(1)
+        self._click(3, 3)
+        entry = self.win.save_image_result_to_library("Edited", [])
+        from pixel_forge.pixelize import load_image as core_load
+        back = core_load(os.path.join(self.lib_dir, entry["file"]))
+        self.assertEqual(back.pixel(3, 3), self.blue)
+        self.assertEqual(back.pixel(3, 4), self.red)
+
+
 if __name__ == "__main__":
     unittest.main()

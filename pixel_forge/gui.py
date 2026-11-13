@@ -40,14 +40,15 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import (QAction, QDesktopServices, QIcon, QImage,
-                           QImageReader, QKeySequence, QPainter, QPixmap,
-                           QShortcut)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
-                               QComboBox, QDialog, QDoubleSpinBox,
-                               QFileDialog, QHBoxLayout, QInputDialog,
-                               QLabel, QLineEdit, QListWidget,
+from PySide6.QtCore import (QPoint, QSize, Qt, QThread, QTimer, QUrl,
+                            Signal)
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QIcon,
+                           QImage, QImageReader, QKeySequence, QPainter,
+                           QPixmap, QShortcut)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup,
+                               QCheckBox, QComboBox, QDialog,
+                               QDoubleSpinBox, QFileDialog, QHBoxLayout,
+                               QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMainWindow, QMessageBox,
                                QProgressBar, QPushButton, QScrollArea,
                                QSlider, QSpinBox, QSplitter, QStackedWidget,
@@ -56,6 +57,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
 
 from . import __version__
 from .codeinput import CODE_EXTENSIONS, parse_paths
+from .editor import (distinct_colors, draw_line, draw_rect_outline,
+                     flood_fill, line_points, pick_color, rect_points)
 from .history import (batches_dir, load_history, record_batch,
                       record_prompt, save_history)
 from .imagegen import (DEFAULT_COUNT, DEFAULT_NEGATIVE, DEFAULT_SIZE,
@@ -119,6 +122,8 @@ QPushButton { background-color: #3a3a42; border: 1px solid #55555e;
     border-radius: 4px; padding: 7px 14px; }
 QPushButton:hover { background-color: #4a4a54; }
 QPushButton:pressed { background-color: #2e2e35; }
+QPushButton:checked { background-color: #4a4a54;
+    border-color: #e07020; }
 QPushButton:disabled { color: #77777f; border-color: #3a3a42; }
 QPushButton#export { background-color: #8a4513; border-color: #d97a2e;
     font-weight: bold; }
@@ -241,6 +246,87 @@ def dimmed_pixmap(pixmap):
     painter.drawPixmap(0, 0, pixmap)
     painter.end()
     return dimmed
+
+
+class _PixelCanvas(QLabel):
+    """The Image tab's pixel preview, clickable for editing
+    (task 33).
+
+    A plain QLabel showing the checkboarded result pixmap, with
+    left-button mouse events forwarded to the window as
+    image-pixel coordinates. The pixmap is centered in the label
+    (AlignCenter) and scaled by the zoom slider — capped at
+    MAX_DISPLAY on its longest side — so the mapping is computed
+    from the actual pixmap size, never assumed from the zoom
+    value.
+    """
+
+    def __init__(self, window):
+        super().__init__("Your pixel sprite appears here")
+        self._window = window
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setWordWrap(True)
+
+    def _pixmap_origin(self):
+        """Where the pixmap's top-left corner sits inside the
+        label, or None when no pixmap is set."""
+        pixmap = self.pixmap()
+        if pixmap is None:
+            return None
+        return ((self.width() - pixmap.width()) // 2,
+                (self.height() - pixmap.height()) // 2)
+
+    def pixel_at(self, pos):
+        """The image pixel under a widget position, or None when
+        the position is off the image (or no image is showing)."""
+        image = self._window.result_image
+        pixmap = self.pixmap()
+        if image is None or pixmap is None:
+            return None
+        origin = self._pixmap_origin()
+        x = int((pos.x() - origin[0]) * image.width()
+                / pixmap.width())
+        y = int((pos.y() - origin[1]) * image.height()
+                / pixmap.height())
+        if 0 <= x < image.width() and 0 <= y < image.height():
+            return (x, y)
+        return None
+
+    def pos_for_pixel(self, x, y):
+        """The widget position at the center of one image pixel
+        — the inverse of pixel_at, for tests and proof scripts."""
+        image = self._window.result_image
+        pixmap = self.pixmap()
+        if image is None or pixmap is None:
+            return QPoint(0, 0)
+        origin = self._pixmap_origin()
+        px = origin[0] + (x + 0.5) * pixmap.width() / image.width()
+        py = origin[1] + (y + 0.5) * pixmap.height() / image.height()
+        return QPoint(int(px), int(py))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._window._canvas_press(
+                self.pixel_at(event.position().toPoint()))
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._window._canvas_move(
+                self.pixel_at(event.position().toPoint()))
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._window._canvas_release(
+                self.pixel_at(event.position().toPoint()))
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
 
 
 class PromptWorker(QThread):
@@ -901,6 +987,27 @@ class _ControlChangeCommand(UndoCommand):
         self.win._apply_control_state(self.tab, self.after)
 
 
+class _PixelEditCommand(UndoCommand):
+    """One pixel edit on the Image tab's result (task 33): the
+    whole image before and after. Results are small (at most
+    512 x 512), so a full snapshot per step is cheap — and it
+    keeps undo exact for every tool, including fill. The window
+    installs a COPY of the snapshot, so a later edit never
+    mutates what this entry holds."""
+
+    def __init__(self, win, before, after, text):
+        super().__init__(text)
+        self.win = win
+        self.before = before
+        self.after = after
+
+    def undo(self):
+        self.win._set_edited_result(self.before)
+
+    def redo(self):
+        self.win._set_edited_result(self.after)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, library_dir=None, restore=True):
         super().__init__()
@@ -956,6 +1063,19 @@ class MainWindow(QMainWindow):
         self.source_path = None
         self.result_image = None
         self._updating_size = False
+        # Pixel editor (task 33): the result's edit state, the
+        # chosen tool and color, and the drag in progress.
+        # _result_original is the freshly pixelized result — the
+        # edited flag is whether the live result still equals
+        # it, recomputed after every undo/redo, so undoing all
+        # edits clears the flag again. No tool and no color are
+        # selected until the user picks them.
+        self._result_edited = False
+        self._result_original = None
+        self._editor_tool = None
+        self._editor_color = None
+        self._editor_drag = None
+        self._editor_swatch_by_color = {}
 
         # Video tab state. Raw frames live on disk in a temp dir;
         # only the small pixelized frames are held in memory.
@@ -1702,14 +1822,69 @@ class MainWindow(QMainWindow):
         after_layout = QVBoxLayout(after_pane)
         after_layout.setContentsMargins(0, 0, 0, 0)
         after_layout.addWidget(self._section("Pixel art"))
-        self.after_label = QLabel("Your pixel sprite appears here")
-        self.after_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.after_label.setWordWrap(True)
+        # Pixel editor toolbar (task 33): the tools sit above
+        # the canvas they work on. Nothing is selected by
+        # default — the canvas does nothing on click until a
+        # tool is chosen, and the pencil, fill, line, and
+        # rectangle need a color picked first.
+        tool_row = QHBoxLayout()
+        self.editor_tool_group = QButtonGroup(self)
+        self.editor_tool_group.setExclusive(True)
+        self.editor_tool_buttons = {}
+        for tool, label, tip in (
+                ("pencil", "Pencil",
+                 "Paint the picked color, one pixel at a time"),
+                ("eraser", "Eraser",
+                 "Paint transparency, one pixel at a time"),
+                ("fill", "Fill",
+                 "Fill the connected area of one color"),
+                ("eyedropper", "Eyedropper",
+                 "Pick the color under the cursor"),
+                ("line", "Line",
+                 "Draw a straight line — drag, then release"),
+                ("rectangle", "Rectangle",
+                 "Draw a rectangle outline — drag, then release")):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setToolTip(tip)
+            button.clicked.connect(
+                lambda _c, t=tool: self._on_editor_tool(t))
+            self.editor_tool_group.addButton(button)
+            self.editor_tool_buttons[tool] = button
+            tool_row.addWidget(button)
+        tool_row.addStretch(1)
+        after_layout.addLayout(tool_row)
+        # The color strip: one swatch per color the result
+        # actually uses, in first-appearance order — the editor
+        # draws with the result's own palette, not a color
+        # wheel. Rebuilt by _refresh_editor_colors on every new
+        # result; a horizontal scroll when the result uses many
+        # colors.
+        self.editor_color_scroll = QScrollArea()
+        self.editor_color_scroll.setWidgetResizable(True)
+        self.editor_color_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.editor_color_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.editor_color_scroll.setFixedHeight(32)
+        self.editor_color_scroll.setToolTip(
+            "Colors this sprite uses — click one to paint with it")
+        color_row_widget = QWidget()
+        self.editor_color_layout = QHBoxLayout(color_row_widget)
+        self.editor_color_layout.setContentsMargins(2, 2, 2, 2)
+        self.editor_color_layout.setSpacing(4)
+        self.editor_color_layout.addStretch(1)
+        self.editor_color_scroll.setWidget(color_row_widget)
+        self.editor_color_group = QButtonGroup(self)
+        self.editor_color_group.setExclusive(True)
+        after_layout.addWidget(self.editor_color_scroll)
+        self.after_label = _PixelCanvas(self)
         self.after_scroll = QScrollArea()
         self.after_scroll.setWidgetResizable(True)
         self.after_scroll.setWidget(self.after_label)
         after_layout.addWidget(self.after_scroll)
         previews.addWidget(after_pane)
+        self._update_editor_enabled()
 
         previews.setSizes([500, 500])
         main_layout.addWidget(previews, 1)
@@ -1723,6 +1898,13 @@ class MainWindow(QMainWindow):
         Returns True on success. On failure shows a message box and
         returns False — the window stays up either way.
         """
+        # A new load replaces the result, which throws the pixel
+        # edits away — ask first (task 33). Declining keeps the
+        # current image and result.
+        if self._result_edited and not self._confirm_discard_edits(
+                "Load a new image?",
+                "Load a new image and lose your edits?"):
+            return False
         try:
             image = load_image(path)
         except PixelForgeError as exc:
@@ -1857,10 +2039,75 @@ class MainWindow(QMainWindow):
         self._on_control_changed()
 
     def _on_control_changed(self):
+        # A control change re-pixelizes from the source, which
+        # throws the pixel edits away — ask first (task 33).
+        # Skipped while an undo/redo is applying (the stack
+        # order means no edits can exist then — any edit made
+        # after the change must be undone first) and while a
+        # preset is being applied (the preset handler asks
+        # itself, once, before the apply starts). Declining
+        # puts the controls back where they were, with signals
+        # blocked so nothing re-pixelizes and no undo step is
+        # recorded.
+        if self._result_edited and not self._undo_suppress:
+            if not self._confirm_discard_edits(
+                    "Re-pixelize?",
+                    "Re-pixelize and lose your edits?"):
+                self._restore_image_controls()
+                return
         self._mark_preset_custom("image")
         self._record_control_change("image")
         if self.source_image is not None:
             self.update_preview()
+
+    def _confirm_discard_edits(self, title, message):
+        """Ask whether to throw the pixel edits away. Returns
+        True when there are no edits, or the user said Yes.
+        Default No — declining keeps the edits and the result."""
+        if not self._result_edited:
+            return True
+        answer = QMessageBox.question(
+            self, title, message,
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _restore_image_controls(self):
+        """Put the Image tab's controls back to the undo
+        snapshot — the values they had before the change the
+        user just declined. Signals blocked throughout, so the
+        restore itself triggers no control change, no
+        re-pixelize, and no undo entry. The size combo follows
+        width and height, as it does everywhere else."""
+        if self._tab_settings is None:
+            return
+        state = self._tab_settings["image"]
+        controls = (self.size_combo, self.width_spin,
+                    self.height_spin, self.aspect_check,
+                    self.palette_combo, self.colors_spin,
+                    self.dither_check)
+        for widget in controls:
+            widget.blockSignals(True)
+        try:
+            self.width_spin.setValue(state["width"])
+            self.height_spin.setValue(state["height"])
+            self.aspect_check.setChecked(state["keep_aspect"])
+            index = self.palette_combo.findData(state["palette"])
+            if index >= 0:
+                self.palette_combo.setCurrentIndex(index)
+            self.colors_spin.setValue(state["max_colors"])
+            self.dither_check.setChecked(state["dither"])
+            width, height = state["width"], state["height"]
+            if width == height and width in SIZE_PRESETS:
+                index = self.size_combo.findData(width)
+            else:
+                index = self.size_combo.findData(None)
+            if index >= 0:
+                self.size_combo.setCurrentIndex(index)
+        finally:
+            for widget in controls:
+                widget.blockSignals(False)
 
     def _on_zoom_changed(self, value):
         self.zoom_label.setText("%dx" % value)
@@ -1935,12 +2182,32 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(str(exc))
             return
         self.result_image = result
+        # A fresh pixelize starts the edit state over: this
+        # result is the new original, no edits on it, no drag
+        # in progress, and the color strip shows its colors.
+        self._result_original = result.copy()
+        self._result_edited = False
+        self._editor_drag = None
         self._refresh_pixmaps()
-        self.info_label.setText("%d x %d, %d colors"
-                                % (result.width(), result.height(),
-                                   count_opaque_colors(result)))
+        self._refresh_info_label()
+        self._refresh_editor_colors()
+        self._update_editor_enabled()
         self.export_btn.setEnabled(True)
         self.save_library_btn.setEnabled(True)
+
+    def _refresh_info_label(self):
+        """The Image tab's info line: size and color count, plus
+        "(edited)" while the result carries pixel edits."""
+        result = self.result_image
+        if result is None:
+            self.info_label.setText("No image loaded")
+            return
+        text = "%d x %d, %d colors" % (
+            result.width(), result.height(),
+            count_opaque_colors(result))
+        if self._result_edited:
+            text += " (edited)"
+        self.info_label.setText(text)
 
     def _refresh_pixmaps(self):
         # The original always fits its pane whole — zoom is for
@@ -1951,10 +2218,14 @@ class MainWindow(QMainWindow):
         before = checkerboard_pixmap(source, fit, smooth=True)
         self.before_label.setPixmap(before)
         if self.result_image is not None:
-            after = checkerboard_pixmap(self.result_image,
-                                        self.zoom_slider.value(),
-                                        smooth=False)
-            self.after_label.setPixmap(after)
+            self._show_after_image(self.result_image)
+
+    def _show_after_image(self, image):
+        """Render one image into the pixel canvas at the current
+        zoom — the live result, or a drag preview of it."""
+        after = checkerboard_pixmap(image, self.zoom_slider.value(),
+                                    smooth=False)
+        self.after_label.setPixmap(after)
 
     # --------------------------------------------------------- export
 
@@ -2037,6 +2308,263 @@ class MainWindow(QMainWindow):
             self, "Export PNG", default, "PNG image (*.png)")
         if path and self.export_image(path):
             self._remember_export_dir(Path(path).parent)
+
+    # ------------------------------------------------ pixel editor
+    # Task 33: fix one wrong pixel without round-tripping to
+    # another program. The canvas is the result preview itself;
+    # the tools draw with the colors the result actually uses.
+    # Every pixel-changing edit is one undo step, and the
+    # re-pixelize guard (see _on_control_changed, _on_library_
+    # preset, load_image) asks before a control change, a preset,
+    # or a new load throws the edits away. Export PNG and Save
+    # to library read result_image, so they carry the edits.
+
+    def _update_editor_enabled(self):
+        """The editor tools work only on a loaded result."""
+        enabled = self.result_image is not None
+        for button in self.editor_tool_buttons.values():
+            button.setEnabled(enabled)
+        self.editor_color_scroll.setEnabled(enabled)
+
+    def _refresh_editor_colors(self):
+        """Rebuild the color strip from the current result's
+        distinct colors, keeping the picked color when the
+        result still uses it. An edit never adds a color — the
+        tools draw with strip colors only — but erasing the last
+        pixel of a color, or undoing an edit, can change the
+        set."""
+        kept = self._editor_color
+        for button in self._editor_swatch_by_color.values():
+            self.editor_color_group.removeButton(button)
+            self.editor_color_layout.removeWidget(button)
+            button.deleteLater()
+        self._editor_swatch_by_color = {}
+        self._editor_color = None
+        if self.result_image is None:
+            return
+        for color in distinct_colors(self.result_image):
+            button = QPushButton()
+            button.setCheckable(True)
+            button.setFixedSize(20, 20)
+            hex_color = "#%06x" % (color & 0xFFFFFF)
+            button.setToolTip("Paint with %s" % hex_color)
+            # The swatch's own stylesheet carries its color and
+            # its checked border: a plain background-color rule
+            # here would lose to the theme's :checked rule when
+            # the swatch is picked.
+            button.setStyleSheet(
+                "QPushButton { background-color: %s; "
+                "border: 1px solid #55555e; border-radius: 2px; "
+                "padding: 0px; } "
+                "QPushButton:checked { border: 2px solid #e07020; }"
+                % hex_color)
+            button.clicked.connect(
+                lambda _c, c=color: self._on_editor_color(c))
+            self.editor_color_group.addButton(button)
+            self.editor_color_layout.insertWidget(
+                len(self._editor_swatch_by_color), button)
+            self._editor_swatch_by_color[color] = button
+        if kept is not None and kept in self._editor_swatch_by_color:
+            self._editor_color = kept
+            self._editor_swatch_by_color[kept].setChecked(True)
+
+    def _on_editor_tool(self, tool):
+        """A tool button was clicked — it is the active tool
+        now. The button group keeps exactly one checked; the
+        canvas reads _editor_tool on every click."""
+        self._editor_tool = tool
+        self.statusBar().showMessage(
+            "%s — click or drag on the pixel preview"
+            % tool.capitalize())
+
+    def _on_editor_color(self, color):
+        """A swatch was clicked — it is the drawing color now."""
+        self._editor_color = color
+
+    def _set_edited_result(self, image):
+        """Install a snapshot as the live result (undo/redo of
+        a pixel edit). A copy — the entry's snapshot must never
+        be the live image, or the next edit would rewrite
+        history. The edited flag is recomputed against the
+        freshly pixelized result, so undoing every edit clears
+        it again."""
+        self.result_image = image.copy()
+        original = self._result_original
+        self._result_edited = (
+            original is not None and self.result_image != original)
+        self._refresh_pixmaps()
+        self._refresh_info_label()
+        self._refresh_editor_colors()
+
+    def _commit_edit(self, before, text):
+        """An edit landed: one undo step, the edited flag, and
+        the preview, info line, and color strip brought up to
+        date. Called only when the image actually changed."""
+        self._push_undo(_PixelEditCommand(
+            self, before, self.result_image.copy(), text))
+        self._result_edited = True
+        self._refresh_pixmaps()
+        self._refresh_info_label()
+        self._refresh_editor_colors()
+
+    def _paint_pixel(self, pixel, color):
+        """Set one pixel of the live result (a pencil/eraser
+        stroke point)."""
+        self.result_image.setPixel(pixel[0], pixel[1], color)
+
+    def _editor_pick(self, pixel):
+        """The eyedropper: the color under the cursor becomes
+        the drawing color. A transparent pixel has no color to
+        pick — the eraser paints transparency."""
+        color = pick_color(self.result_image, pixel[0], pixel[1])
+        if color is None or (color >> 24) == 0:
+            self.statusBar().showMessage(
+                "That pixel is transparent — the eraser paints "
+                "transparency")
+            return
+        self._editor_color = color
+        button = self._editor_swatch_by_color.get(color)
+        if button is not None:
+            button.setChecked(True)
+        self.statusBar().showMessage(
+            "Picked #%06x" % (color & 0xFFFFFF))
+
+    def _editor_fill(self, pixel):
+        """The fill tool: flood fill from the clicked pixel.
+        A click on a pixel already the picked color fills
+        nothing and records no undo step."""
+        if self._editor_color is None:
+            self.statusBar().showMessage(
+                "Pick a color from the strip first")
+            return
+        before = self.result_image.copy()
+        if flood_fill(self.result_image, pixel[0], pixel[1],
+                      self._editor_color) == 0:
+            return
+        self._commit_edit(before, "Fill")
+
+    def _canvas_press(self, pixel):
+        """A click on the pixel canvas, as an image pixel (or
+        None when the click missed the image). No tool, no
+        color, or no result — nothing happens."""
+        if pixel is None or self.result_image is None:
+            return
+        tool = self._editor_tool
+        if tool is None:
+            return
+        if tool == "eyedropper":
+            self._editor_pick(pixel)
+            return
+        if tool == "fill":
+            self._editor_fill(pixel)
+            return
+        if tool in ("pencil", "line", "rectangle"):
+            if self._editor_color is None:
+                self.statusBar().showMessage(
+                    "Pick a color from the strip first")
+                return
+        # Pencil, eraser, line, and rectangle all start a drag:
+        # the before-image is snapshotted now, and the drag
+        # commits one undo step on release. Pencil and eraser
+        # paint the start pixel at once, so a click without a
+        # drag still paints one pixel; line and rectangle only
+        # preview until release.
+        self._editor_drag = {
+            "tool": tool, "start": pixel, "last": pixel,
+            "before": self.result_image.copy()}
+        if tool == "pencil":
+            self._paint_pixel(pixel, self._editor_color)
+            self._refresh_pixmaps()
+        elif tool == "eraser":
+            self._paint_pixel(pixel, 0)
+            self._refresh_pixmaps()
+
+    def _canvas_move(self, pixel):
+        """A drag across the canvas. Pencil and eraser paint
+        as they go (interpolated, so a fast drag leaves no
+        gaps); line and rectangle redraw their preview."""
+        drag = self._editor_drag
+        if drag is None or pixel is None:
+            return
+        tool = drag["tool"]
+        if tool in ("pencil", "eraser"):
+            if pixel == drag["last"]:
+                return
+            color = self._editor_color if tool == "pencil" else 0
+            draw_line(self.result_image,
+                      drag["last"][0], drag["last"][1],
+                      pixel[0], pixel[1], color)
+            drag["last"] = pixel
+            self._refresh_pixmaps()
+        elif tool in ("line", "rectangle"):
+            if pixel == drag.get("current"):
+                return
+            drag["current"] = pixel
+            self._show_shape_preview(drag)
+
+    def _show_shape_preview(self, drag):
+        """The line or rectangle preview while dragging: the
+        current pixmap with the shape drawn on top, cell by
+        cell. The result itself is untouched until release."""
+        base = self.after_label.pixmap()
+        image = self.result_image
+        if base is None or image is None:
+            return
+        start = drag["start"]
+        end = drag.get("current", start)
+        if drag["tool"] == "line":
+            points = line_points(start[0], start[1],
+                                 end[0], end[1])
+        else:
+            points = rect_points(start[0], start[1],
+                                 end[0], end[1])
+        preview = QPixmap(base)
+        painter = QPainter(preview)
+        color = QColor.fromRgba(self._editor_color)
+        cell_w = base.width() / image.width()
+        cell_h = base.height() / image.height()
+        for x, y in points:
+            if 0 <= x < image.width() and 0 <= y < image.height():
+                left = int(x * cell_w)
+                top = int(y * cell_h)
+                right = int((x + 1) * cell_w)
+                bottom = int((y + 1) * cell_h)
+                painter.fillRect(left, top,
+                                 max(1, right - left),
+                                 max(1, bottom - top), color)
+        painter.end()
+        self.after_label.setPixmap(preview)
+
+    def _canvas_release(self, pixel):
+        """The drag ends: commit one undo step when the image
+        changed. Line and rectangle apply their shape now (the
+        drag only previewed it); pencil and eraser painted live,
+        so the commit is just the undo entry. A drag that
+        changed nothing — a click that painted its own color,
+        or a shape that landed on identical pixels — records no
+        step, and the preview is restored to the true result."""
+        drag = self._editor_drag
+        self._editor_drag = None
+        if drag is None:
+            return
+        tool = drag["tool"]
+        if tool in ("line", "rectangle"):
+            end = drag.get("current", drag["start"])
+            if tool == "line":
+                draw_line(self.result_image,
+                          drag["start"][0], drag["start"][1],
+                          end[0], end[1], self._editor_color)
+            else:
+                draw_rect_outline(self.result_image,
+                                  drag["start"][0], drag["start"][1],
+                                  end[0], end[1], self._editor_color)
+        if self.result_image == drag["before"]:
+            self._refresh_pixmaps()
+            return
+        self._commit_edit(drag["before"],
+                          {"pencil": "Draw", "eraser": "Erase",
+                           "line": "Line",
+                           "rectangle": "Rectangle"}[tool])
 
     # ============================================================ video tab
 
@@ -5631,6 +6159,20 @@ class MainWindow(QMainWindow):
             return
         if settings is None:
             return
+        # A preset re-pixelizes, which throws the pixel edits
+        # away — ask once, here, before the apply starts (the
+        # per-control guard cannot run mid-apply: recording is
+        # suppressed until it lands). Declining puts the picker
+        # back where it was.
+        if tab == "image" and self._result_edited:
+            if not self._confirm_discard_edits(
+                    "Apply preset?",
+                    "Apply this preset and lose your edits?"):
+                before = None
+                if self._tab_settings is not None:
+                    before = self._tab_settings["image"]["preset"]
+                self._select_preset(tab, before)
+                return
         # One undo step for the whole application: the apply
         # fires a control-changed signal per control, so
         # recording is suppressed until it lands, then the diff
