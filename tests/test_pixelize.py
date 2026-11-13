@@ -320,6 +320,30 @@ class PixelizeTests(unittest.TestCase):
             pixelize_image(image, 16, palette="neon")
         self.assertIn("unknown palette", str(caught.exception))
 
+    def test_quantize_empty_palette_rejected(self):
+        # B14: an empty palette used to raise a bare IndexError
+        # from the nearest-color lookup. The guard runs up front,
+        # so a fully transparent image fails the same way as an
+        # opaque one — no pixel ever needs a color, but the call
+        # is still meaningless.
+        opaque = make_solid_image(8, 8, 255, 255, 255)
+        with self.assertRaises(PixelForgeError) as caught:
+            quantize(opaque, [], dither=False)
+        self.assertIn("empty palette", str(caught.exception))
+        # A fresh Image is all zeros — fully transparent, so no
+        # pixel ever reaches the lookup. It must fail the same way.
+        transparent = Image(8, 8)
+        with self.assertRaises(PixelForgeError):
+            quantize(transparent, [], dither=False)
+
+    def test_quantize_valid_palette_unchanged(self):
+        # The guard must not change the valid path: white maps to
+        # PICO-8's nearest white (255, 241, 232), opaque.
+        image = make_solid_image(8, 8, 255, 255, 255)
+        result = quantize(image, PICO8, dither=False)
+        self.assertEqual(count_opaque_colors(result), 1)
+        self.assertEqual(result.pixel(0, 0), 0xFFFFF1E8)
+
     # ------------------------------------------------------------- file
 
     def test_pixelize_file_round_trip(self):

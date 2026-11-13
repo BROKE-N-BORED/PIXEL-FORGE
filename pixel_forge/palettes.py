@@ -76,12 +76,22 @@ def median_cut(colors, max_colors):
     Standard median-cut: split the box with the widest channel range
     at its median until there are enough boxes, then average each box.
     Deterministic — same input colors always give the same palette.
+
+    max_colors is validated FIRST, before the empty-list early
+    return — it used to be checked after, so median_cut([], 0)
+    silently returned [] instead of failing (review B14). An empty
+    color list with a valid max_colors still returns [].
     """
+    if max_colors < 1:
+        # Imported here, not at module level: pixelize imports this
+        # module, so a top-level import would be circular. This only
+        # runs on the error path, never in normal use.
+        from .pixelize import PixelForgeError
+        raise PixelForgeError(
+            "max_colors must be at least 1 (got %r)" % (max_colors,))
     distinct = sorted(set(colors))
     if len(distinct) <= max_colors:
         return distinct
-    if max_colors < 1:
-        raise ValueError("max_colors must be at least 1")
     boxes = [distinct]
     while len(boxes) < max_colors:
         widest_idx = -1
@@ -123,7 +133,19 @@ def nearest_color(rgb, palette, cache=None):
 
     Ties go to the earliest palette entry, so results are
     deterministic. cache (a dict) is an optional memo keyed by rgb.
+
+    An empty palette raises PixelForgeError — it used to raise a
+    bare IndexError from palette[0] (review B14). The guard runs
+    before the cache lookup, so an empty palette always fails,
+    even for a color the cache already knows.
     """
+    if not palette:
+        # Imported here, not at module level: pixelize imports this
+        # module, so a top-level import would be circular. This only
+        # runs on the error path, never in normal use.
+        from .pixelize import PixelForgeError
+        raise PixelForgeError(
+            "cannot find the nearest color in an empty palette")
     if cache is not None:
         hit = cache.get(rgb)
         if hit is not None:

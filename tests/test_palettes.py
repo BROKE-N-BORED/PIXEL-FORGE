@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from pixel_forge.palettes import (  # noqa: E402
     GAMEBOY, GRAYSCALE, NAMED_PALETTES, PICO8, median_cut, nearest_color,
     select_palette_colors)
+from pixel_forge.pixelize import PixelForgeError  # noqa: E402
 
 
 class NamedPaletteTests(unittest.TestCase):
@@ -104,6 +105,54 @@ class NearestColorTests(unittest.TestCase):
         first = nearest_color((10, 20, 30), PICO8, cache)
         second = nearest_color((10, 20, 30), PICO8, cache)
         self.assertEqual(first, second)
+
+
+class PaletteValidationTests(unittest.TestCase):
+    """B14: max_colors is checked before the empty-list early
+    return, and an empty palette fails plainly instead of
+    raising a bare IndexError."""
+
+    def test_median_cut_empty_list_zero_max_raises(self):
+        # Regression: this used to return [] silently, because
+        # the len(distinct) <= max_colors early return ran first.
+        with self.assertRaises(PixelForgeError) as caught:
+            median_cut([], 0)
+        self.assertIn("0", str(caught.exception))
+
+    def test_median_cut_zero_or_negative_max_raises(self):
+        colors = [(255, 0, 0), (0, 255, 0)]
+        for bad in (0, -1, -3):
+            with self.assertRaises(PixelForgeError) as caught:
+                median_cut(colors, bad)
+            self.assertIn(str(bad), str(caught.exception))
+
+    def test_median_cut_empty_list_valid_max_returns_empty(self):
+        self.assertEqual(median_cut([], 4), [])
+        self.assertEqual(median_cut([], 1), [])
+
+    def test_median_cut_pinned_output(self):
+        # Same palette as v0.28 on this input — the guard must
+        # not change the valid path. Values recorded from v0.28.
+        colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255),
+                  (255, 255, 0), (0, 255, 255), (255, 0, 255),
+                  (128, 128, 128), (10, 20, 30)]
+        self.assertEqual(median_cut(colors, 2),
+                         [(2, 132, 135), (223, 95, 95)])
+        self.assertEqual(median_cut(colors, 4),
+                         [(0, 255, 127), (5, 10, 142),
+                          (191, 191, 64), (255, 0, 127)])
+
+    def test_nearest_color_empty_palette_raises(self):
+        with self.assertRaises(PixelForgeError) as caught:
+            nearest_color((1, 2, 3), [])
+        self.assertIn("empty palette", str(caught.exception))
+
+    def test_nearest_color_empty_palette_raises_even_with_cache(self):
+        # The guard runs before the cache lookup, so a primed
+        # cache must not hide the empty palette.
+        cache = {(1, 2, 3): (255, 0, 0)}
+        with self.assertRaises(PixelForgeError):
+            nearest_color((1, 2, 3), [], cache)
 
 
 if __name__ == "__main__":

@@ -193,7 +193,13 @@ def quantize(image, palette, dither=True):
     almost entirely the lightest shade, worse than no dithering
     at all. Ordered dithering has no feedback, so it cannot
     drift. Transparent pixels are skipped entirely.
+
+    An empty palette raises PixelForgeError — the lookup used to
+    raise a bare IndexError (review B14). The guard runs up front,
+    so a fully transparent image fails the same way as any other.
     """
+    if not palette:
+        raise PixelForgeError("cannot quantize with an empty palette")
     width, height = image.width(), image.height()
     out = Image(width, height)
     src = image.data

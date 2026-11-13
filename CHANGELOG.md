@@ -1,5 +1,26 @@
 # Pixel Forge changelog
 
+## 0.29 — 2026-11-13
+
+`median_cut` now validates `max_colors` before the empty-list early
+return — task-list item #18 (bug B14, latent). The check used to
+run after `len(distinct) <= max_colors`, so `median_cut([], 0)`
+silently returned `[]` instead of failing; it is now a plain
+PixelForgeError naming the value (\"max_colors must be at least 1
+(got 0)\"). Same-class guard: an empty palette reaching
+`nearest_color` or `quantize` used to raise a bare IndexError from
+`palette[0]` — both now raise PixelForgeError naming the empty
+palette, `quantize` up front so a fully transparent image fails the
+same way as any other. The import of PixelForgeError into
+palettes.py is lazy, inside the error branch only: pixelize
+imports palettes at module level, so a top-level import would be
+circular, and the hot per-pixel path never touches it. No normal
+input reaches any of this — `resolve_palette` guards both paths
+today — and the valid path is unchanged (a median-cut case is
+pinned against the v0.28 output). `select_palette_colors` still
+raises ValueError for a bad max_colors; only the B14 sites were
+changed.
+
 ## 0.28 — 2026-11-13
 
 The Prompt tab's model-missing line now names both model homes —
