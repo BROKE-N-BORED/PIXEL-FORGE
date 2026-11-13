@@ -44,13 +44,45 @@ newer system library than Mint ships. Building it needs git, cmake,
 and a C++ compiler — if any are missing, the installer stops and
 prints the exact `sudo apt install` line. The model is shared with
 the Design Shell: if it is already in `~/design-shell-models/`, no
-second download happens.
+second download happens. When the engine is rebuilt, the old one
+is moved to `/opt/sd.cpp.bak` first, never wiped — a failed build
+leaves the working engine in place.
+
+Both installers check for internet before anything that downloads
+(the packages come from apt and pip, and the engine build and
+model download need it too). An offline run stops with a plain
+"you need internet" message instead of failing step by step. At
+the end, the installer verifies the install (the venv python
+runs, `pixel-forge --version` runs, the GUI imports) and prints
+a summary of what worked and what did not, with the plain fix
+for each failure. The venv package is detected from the system
+Python's own version (`python3.<minor>-venv`), never hardcoded,
+and a failed icon render is reported in the log and the summary
+(the install continues and the menu entry is still created)
+instead of leaving a silently icon-less menu entry.
 
 To remove it later:
 
 ```sh
 bash uninstall.sh
 ```
+
+That removes the venv, the `pixel-forge` / `pixel-forge-gui`
+commands, the menu entry, and the icons — and keeps your sprite
+library, your image models, the image engine, and the install
+folder (`~/.local/share/pixel-forge/`). To remove everything:
+
+```sh
+bash uninstall.sh --purge
+```
+
+`--purge` also removes the install folder and the image engine
+(`/opt/sd.cpp`), and asks about the things that hold your data —
+your sprite library (`~/pixel-forge-library/`) and your image
+models (`~/design-shell-models/`, shared with the Design Shell,
+and `~/pixel-forge-models/`) — one by one, default No, so
+nothing of yours is deleted without asking. Without a terminal
+it keeps them and prints the way to remove them by hand.
 
 ## Use
 

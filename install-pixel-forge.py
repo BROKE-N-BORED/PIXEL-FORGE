@@ -108,6 +108,27 @@ def _show_error(message):
     print(message, file=sys.stderr)
 
 
+def _has_network(timeout=10):
+    """One quick HEAD request to the package index — the launcher
+    downloads PySide6 (apt or pip), so an offline run stops here
+    with a plain message instead of failing quietly twice. An HTTP
+    error status still counts as online: the server answered.
+    (pixel_forge/installer.py carries its own copy: this launcher
+    cannot import it, because PySide6 is not guaranteed yet.)"""
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request("https://pypi.org/simple/",
+                                     method="HEAD")
+    try:
+        urllib.request.urlopen(request, timeout=timeout)
+        return True
+    except urllib.error.HTTPError:
+        return True
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
 def ensure_pyside6():
     """Make sure PySide6 imports. Returns True on success."""
     if have_pyside6():
@@ -120,6 +141,15 @@ def ensure_pyside6():
 
 
 def main(argv=None):
+    if not have_pyside6() and not _has_network():
+        # Offline and no Qt: both install paths below would fail
+        # quietly, so say plainly what is missing instead.
+        _show_error(
+            "You need internet to install Pixel Forge.\n\n"
+            "The installer downloads PySide6 (Qt) before it can "
+            "start. Check your connection and double-click Install "
+            "Pixel Forge again.")
+        return 1
     if not ensure_pyside6():
         _show_error(
             "Pixel Forge needs PySide6 (Qt) and could not install it.\n\n"

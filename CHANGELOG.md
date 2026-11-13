@@ -1,5 +1,55 @@
 # Pixel Forge changelog
 
+## 0.42 — 2026-11-13
+
+Installer failure traces — task-list item #32:
+
+- Both install paths (the GUI installer and `install.sh`) check
+  for internet first, before any step that downloads anything.
+  An offline run stops with a plain "you need internet" message
+  naming what needs it (system packages, pip, and — when asked
+  for — the engine build and the model download), instead of
+  failing step by step with obscure apt/pip/curl errors. The
+  check is one quick request with a 10-second timeout, so a
+  dead connection fails fast. The GUI installer's pip-failure
+  warning lost its "(no internet?)" hedge: it now names the
+  likely causes plainly. The launcher checks too, before it
+  tries to download PySide6.
+- The venv package is no longer hardcoded as `python3.12-venv`:
+  both installers ask the system Python its own version and
+  install `python3.<minor>-venv`. When the version cannot be
+  detected, they fall back to the unversioned `python3-venv`
+  and say so.
+- The image engine install backs the old engine up before
+  touching it: an existing `/opt/sd.cpp` is moved to
+  `/opt/sd.cpp.bak` (replacing an older backup), and only after
+  the new build succeeded — a failed build leaves the working
+  engine in place, and a failed backup move stops the install
+  instead of wiping. The engine install folder can be moved
+  with `PIXELFORGE_SD_INSTALL_DIR`.
+- Icon failures are reported, not swallowed: a failed render
+  names which icons failed and why (the renderer's error is
+  kept), and lands as a warning in the log and the install
+  summary — the install continues and the menu entry is still
+  created. The icon-cache and desktop-database updates report
+  their failures the same way instead of `|| true`.
+- `install.sh` verifies the install before claiming it: the
+  venv python runs, `pixel-forge --version` runs, and the GUI
+  imports from a fresh empty directory (the `python -c` cwd
+  rule from v0.11). It prints a summary at the end — what
+  failed, each with its plain fix, and whether the install is
+  usable — and the same summary on a mid-way abort, via an
+  ERR trap that records the failing command as a failed step
+  and names it.
+- `uninstall.sh --purge` now actually removes everything: the
+  install folder, the image engine, and — only if you say so —
+  the sprite library and the image models, which hold your
+  data and are asked about one by one (default No). Without a
+  terminal it keeps them and prints the way to remove them by
+  hand. A plain uninstall keeps the library, models, engine,
+  and install folder, and says so. (The README lists exactly
+  what each one removes.)
+
 ## 0.41 — 2026-11-13
 
 Undo — task-list item #30:

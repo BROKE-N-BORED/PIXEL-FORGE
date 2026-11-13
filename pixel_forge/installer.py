@@ -2,6 +2,7 @@
 """Pixel Forge GUI installer — native Qt window, no terminal needed.
 
 Double-click "Install Pixel Forge" in the extracted folder. It checks
+for an internet connection first (the install downloads packages), then
 for python3-venv and pip, creates a venv under
 ~/.local/share/pixel-forge, pip-installs Pixel Forge + PySide6, and
 writes the menu launcher, icons, and PATH shortcuts.
@@ -43,6 +44,46 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 from .pixelize import PixelForgeError, plural  # noqa: E402
+
+NETWORK_CHECK_URL = "https://pypi.org/simple/"
+NETWORK_CHECK_TIMEOUT = 10  # seconds — a dead connection must fail fast
+
+
+def has_network(url=NETWORK_CHECK_URL, timeout=NETWORK_CHECK_TIMEOUT):
+    """True when an HTTP request to url gets any response. An HTTP
+    error status still counts — the server answered, so the machine
+    is online. Only a failure to reach the host counts as offline.
+    (install-pixel-forge.py carries its own copy: it cannot import
+    this module, because PySide6 is not guaranteed yet when it runs.)"""
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(url, method="HEAD")
+    try:
+        urllib.request.urlopen(request, timeout=timeout)
+        return True
+    except urllib.error.HTTPError:
+        return True
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def venv_package_name(python=None):
+    """The Debian venv package for the system Python:
+    python3.<minor>-venv, from the interpreter's own version —
+    never hardcoded. Falls back to the unversioned python3-venv
+    when the version cannot be detected (no interpreter, or one
+    that will not answer)."""
+    exe = python or sys.executable
+    try:
+        proc = subprocess.run(
+            [exe, "-c",
+             "import sys; print(sys.version_info[0], sys.version_info[1])"],
+            capture_output=True, text=True, timeout=30)
+        major, minor = (int(part) for part in proc.stdout.split())
+        return "python%d.%d-venv" % (major, minor)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return "python3-venv"
 
 
 # ---------------------------------------------------------------- context
@@ -206,16 +247,18 @@ def render_icons_from_svg(svg_path, out_dir):
     Used by the installer when the PNGs are missing (a git clone
     ships only the SVG — the GitHub snapshot push cannot carry
     binary files — while the release zip ships the PNGs too).
-    Returns True on success."""
+    Returns (True, detail) on success, or (False, reason) on
+    failure — the caller logs the reason instead of swallowing it,
+    because a failed render means a silently icon-less menu entry."""
     try:
         from PySide6.QtGui import QImage, QPainter
         from PySide6.QtSvg import QSvgRenderer
     except ImportError:
-        return False
+        return False, "QtSvg is not available"
     try:
         renderer = QSvgRenderer(str(svg_path))
         if not renderer.isValid():
-            return False
+            return False, "pixel-forge.svg is not a valid SVG file"
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         for size in (256, 128, 48):
@@ -224,14 +267,39 @@ def render_icons_from_svg(svg_path, out_dir):
             painter = QPainter(image)
             renderer.render(painter)
             painter.end()
-            if not image.save(str(out_dir / ("pixel-forge-%d.png" % size))):
-                return False
-        return True
-    except Exception:  # noqa: BLE001 - caller logs a warning
-        return False
+            out_path = out_dir / ("pixel-forge-%d.png" % size)
+            if not image.save(str(out_path)):
+                return False, "could not write %s" % out_path.name
+        return True, "rendered 3 icons"
+    except Exception as exc:  # noqa: BLE001 - report, never raise
+        return False, str(exc)
 
 
 # ---------------------------------------------------------------- the steps
+
+def step_network(ctx):
+    """Internet check — the install downloads packages (apt, pip,
+    and the engine build + model when asked for), so an offline run
+    stops here with a plain message instead of failing step by step
+    with obscure apt/pip/curl errors. The worker skips the remaining
+    steps when this one fails."""
+    ctx.log("Checking for internet…")
+    if ctx.dryrun:
+        ctx.log("Would check for internet…")
+        return StepResult(StepResult.DONE, "dry-run")
+    if has_network():
+        ctx.log("OK: internet is available")
+        return StepResult(StepResult.DONE)
+    needs = ["system packages (apt)", "Python packages (pip)"]
+    if getattr(ctx, "install_ffmpeg", False):
+        needs.append("ffmpeg")
+    if getattr(ctx, "install_image_engine", False):
+        needs += ["the image engine build", "the model download"]
+    ctx.log("You need internet to install Pixel Forge — the install "
+            "downloads %s. Check your connection and press Install "
+            "again." % ", ".join(needs))
+    return StepResult(StepResult.FAIL, "no internet")
+
 
 def step_system(ctx):
     """python3-venv and pip — needed to build the venv."""
@@ -241,12 +309,20 @@ def step_system(ctx):
     if venv_rc == 0 and pip_rc == 0:
         ctx.log("OK: python3-venv and pip are present")
         return StepResult(StepResult.DONE)
+    # The venv package is versioned (python3.12-venv, python3.11-venv
+    # ...) — ask the system Python its own version, never hardcode
+    # one. Falls back to the unversioned python3-venv when the
+    # version cannot be detected.
+    venv_pkg = venv_package_name()
+    if venv_pkg == "python3-venv":
+        ctx.log("Could not detect the Python version — trying the "
+                "unversioned python3-venv package.")
     ctx.log("python3-venv or pip is missing — trying to install them "
             "(asks for your password)…")
     code = ctx.run_admin(
         "export DEBIAN_FRONTEND=noninteractive; "
-        "apt-get update && apt-get install -y python3.12-venv python3-pip",
-        timeout=900)
+        "apt-get update && apt-get install -y %s python3-pip"
+        % venv_pkg, timeout=900)
     venv_rc, _ = ctx.run_output([sys.executable, "-m", "venv", "--help"])
     pip_rc, _ = ctx.run_output([sys.executable, "-m", "pip", "--version"])
     if venv_rc == 0 and pip_rc == 0:
@@ -254,8 +330,8 @@ def step_system(ctx):
         return StepResult(StepResult.DONE)
     ctx.log("WARNING: python3-venv or pip is still missing (apt step "
             "exited %s) — the install cannot continue without them. "
-            "Install them from the Software Manager (python3.12-venv, "
-            "python3-pip) and press Install again." % code)
+            "Install them from the Software Manager (%s, "
+            "python3-pip) and press Install again." % (code, venv_pkg))
     return StepResult(StepResult.FAIL, "python3-venv or pip missing")
 
 
@@ -394,8 +470,22 @@ def step_image_engine(ctx):
                 return StepResult(StepResult.WARN,
                                   "engine build failed — prompt "
                                   "import unavailable")
+            # The old engine is moved aside first, never wiped: a
+            # failed build must not destroy the working engine, and
+            # the move happens only now, after the new build
+            # succeeded. `set -e` stops the script if the backup
+            # move fails, so the old engine stays in place.
+            if Path("/opt/sd.cpp").is_dir():
+                ctx.log("Backing up the existing image engine to "
+                        "/opt/sd.cpp.bak…")
             code = ctx.run_admin(
-                "rm -rf /opt/sd.cpp; mkdir -p /opt/sd.cpp/bin; "
+                "set -e; "
+                "if [ -d /opt/sd.cpp ]; then "
+                "rm -rf /opt/sd.cpp.bak; "
+                "mv /opt/sd.cpp /opt/sd.cpp.bak; "
+                "echo 'Backed up the old engine to /opt/sd.cpp.bak'; "
+                "fi; "
+                "mkdir -p /opt/sd.cpp/bin; "
                 "cp %s /opt/sd.cpp/bin/; "
                 "ln -sf /opt/sd.cpp/bin/sd-cli /usr/local/bin/sd-cli"
                 % os.path.join(build_dir, "bin", "*"), timeout=300)
@@ -489,9 +579,10 @@ def step_packages(ctx):
     if code == 0 and rc == 0:
         ctx.log("OK: Pixel Forge installed in the venv")
         return StepResult(StepResult.DONE)
-    ctx.log("WARNING: the pip install failed (no internet?) — Pixel "
-            "Forge is not installed yet. Check your connection and "
-            "press Install again.")
+    ctx.log("WARNING: the pip install failed — Pixel Forge is not "
+            "installed yet. The download may have been interrupted, "
+            "or the package index may be unreachable. Check your "
+            "connection and press Install again.")
     return StepResult(StepResult.FAIL, "pip install failed")
 
 
@@ -503,6 +594,7 @@ def step_files(ctx):
     bin_dir = ctx.home / ".local" / "bin"
     ctx.mkdir(bin_dir)
     ok = True
+    warnings = []
     ok = ctx.link(venv_bin / "pixel-forge",
                   bin_dir / "pixel-forge") and ok
     ok = ctx.link(venv_bin / "pixel-forge-gui",
@@ -511,11 +603,20 @@ def step_files(ctx):
     icons_src = SRC_DIR / "icons"
     if not ctx.dryrun and not (icons_src / "pixel-forge-256.png").is_file():
         svg = icons_src / "pixel-forge.svg"
-        if svg.is_file() and render_icons_from_svg(svg, icons_src):
-            ctx.log("OK: App icons rendered from pixel-forge.svg")
+        if svg.is_file():
+            rendered, detail = render_icons_from_svg(svg, icons_src)
+            if rendered:
+                ctx.log("OK: App icons rendered from pixel-forge.svg")
+            else:
+                ctx.log("WARNING: could not render app icons from "
+                        "the SVG (%s) — the menu entry will show a "
+                        "generic icon" % detail)
+                warnings.append("app icons could not be rendered "
+                                "(%s)" % detail)
         else:
-            ctx.log("WARNING: could not render app icons from the SVG "
+            ctx.log("WARNING: no app icons found (no PNGs, no SVG) "
                     "— the menu entry will show a generic icon")
+            warnings.append("app icons missing")
     for size in (48, 128, 256):
         dest = (ctx.home / ".local" / "share" / "icons" / "hicolor"
                 / ("%dx%d" % (size, size)) / "apps")
@@ -528,8 +629,14 @@ def step_files(ctx):
     ok = ctx.copy(icons_src / "pixel-forge.svg",
                   scalable / "pixel-forge.svg") and ok
     if ctx.which("gtk-update-icon-cache"):
-        ctx.run(["gtk-update-icon-cache", "-f", "-t",
-                 str(ctx.home / ".local" / "share" / "icons" / "hicolor")])
+        code = ctx.run(["gtk-update-icon-cache", "-f", "-t",
+                        str(ctx.home / ".local" / "share" / "icons"
+                            / "hicolor")])
+        if code != 0:
+            ctx.log("WARNING: gtk-update-icon-cache failed (exit %s) "
+                    "— the menu icon may not update until you log "
+                    "out" % code)
+            warnings.append("icon cache update failed")
 
     apps_dir = ctx.home / ".local" / "share" / "applications"
     ctx.mkdir(apps_dir)
@@ -546,10 +653,20 @@ def step_files(ctx):
     )
     ok = ctx.write_text(apps_dir / "pixel-forge.desktop", launcher) and ok
     if ctx.which("update-desktop-database"):
-        ctx.run(["update-desktop-database", str(apps_dir)])
+        code = ctx.run(["update-desktop-database", str(apps_dir)])
+        if code != 0:
+            ctx.log("WARNING: update-desktop-database failed "
+                    "(exit %s) — the menu entry may not appear until "
+                    "you log out" % code)
+            warnings.append("desktop database update failed")
     if not ok:
         return StepResult(StepResult.WARN,
                           "some shortcuts or icons could not be written")
+    if warnings:
+        # The shortcuts and the menu entry are in place, so the
+        # install works — but the icons or the menu refresh did not,
+        # and the step status should say so instead of reading done.
+        return StepResult(StepResult.WARN, "; ".join(warnings))
     ctx.log("OK: Pixel Forge is in your app menu; commands "
             "pixel-forge and pixel-forge-gui are on your PATH")
     return StepResult(StepResult.DONE)
@@ -587,6 +704,7 @@ def venv_gui_imports(home):
 
 
 STEPS = [
+    ("network", "Internet connection", step_network),
     ("system", "System packages (python3-venv and pip)", step_system),
     ("ffmpeg", "ffmpeg for video import (optional)", step_ffmpeg),
     ("image-engine", "Image engine for prompt import (optional)",
@@ -648,6 +766,7 @@ class InstallWorker(QThread):
         results = []
         total = len(STEPS)
         packages_failed = False
+        network_failed = False
         # pkexec up front (review B15): when the steps that need
         # your password cannot run, say so once before any step
         # fails — not once per step, after each one has already
@@ -688,6 +807,17 @@ class InstallWorker(QThread):
                 ctx.log("Cancelled — stopping after %d of %d steps"
                         % (index, total))
                 break
+            if network_failed:
+                # The network step failed: every remaining step
+                # downloads something (apt, pip, the engine build,
+                # the model), so they would all fail one after
+                # another. Stop here instead — the network step's
+                # own message says what to do.
+                result = StepResult(StepResult.SKIPPED, "no internet")
+                results.append(result)
+                self.step_status.emit(index, result.status)
+                self.progress.emit(int((index + 1) * 100 / total))
+                continue
             if key == "files" and packages_failed:
                 # No launcher on a broken install: step_files would
                 # symlink pixel-forge-gui at a venv whose pip install
@@ -720,6 +850,10 @@ class InstallWorker(QThread):
                 result = StepResult(StepResult.FAIL, str(exc))
             if key == "packages" and result.status == StepResult.FAIL:
                 packages_failed = True
+            if key == "network" and result.status == StepResult.FAIL:
+                network_failed = True
+                ctx.log("Stopping here — the remaining steps need an "
+                        "internet connection.")
             results.append(result)
             self.step_status.emit(index, result.status)
             self.progress.emit(int((index + 1) * 100 / total))

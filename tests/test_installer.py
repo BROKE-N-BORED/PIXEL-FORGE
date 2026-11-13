@@ -212,7 +212,8 @@ class InstallerTests(unittest.TestCase):
         if not os.path.isfile(svg):
             self.skipTest("icons/pixel-forge.svg not built yet")
         out_dir = os.path.join(self.tmp, "rendered-icons")
-        self.assertTrue(render_icons_from_svg(svg, out_dir))
+        ok, detail = render_icons_from_svg(svg, out_dir)
+        self.assertTrue(ok, detail)
         for size in (256, 128, 48):
             path = os.path.join(out_dir, "pixel-forge-%d.png" % size)
             self.assertTrue(os.path.isfile(path))
@@ -535,9 +536,9 @@ class InstallerGatingTests(unittest.TestCase):
         self.assertEqual(len(results), len(STEPS))
         self.assertEqual(calls, [],
                          "step_files ran even though packages failed")
-        self.assertEqual(results[4].status, StepResult.FAIL)
-        self.assertEqual(results[5].status, StepResult.SKIPPED)
-        self.assertEqual(results[5].detail, "packages step failed")
+        self.assertEqual(results[5].status, StepResult.FAIL)
+        self.assertEqual(results[6].status, StepResult.SKIPPED)
+        self.assertEqual(results[6].detail, "packages step failed")
         self.assertIn("Skipped: the packages step failed",
                       "\n".join(lines))
 
@@ -690,9 +691,9 @@ class InstallerGatingTests(unittest.TestCase):
         self.assertFalse(win.launch_btn.isEnabled())
         self.assertIn("1 failed step",
                       win.statusBar().currentMessage())
-        files_item = win.steps_list.item(5).text()
+        files_item = win.steps_list.item(6).text()
         self.assertIn("skipped", files_item)
-        packages_item = win.steps_list.item(4).text()
+        packages_item = win.steps_list.item(5).text()
         self.assertIn("failed", packages_item)
         gui_link = Path(home) / ".local" / "bin" / "pixel-forge-gui"
         self.assertFalse(gui_link.is_symlink())
@@ -797,10 +798,14 @@ class InstallerGatingTests(unittest.TestCase):
                          % log)
         self.assertEqual(calls, [], "a step ran after the fail-fast")
         self.assertEqual(len(results), len(STEPS))
-        self.assertEqual(results[0].status, StepResult.FAIL)
-        self.assertIn("pkexec", results[0].detail)
-        for result in results[1:]:
-            self.assertEqual(result.status, StepResult.SKIPPED)
+        by_key = {key: result
+                  for (key, _title, _func), result
+                  in zip(STEPS, results)}
+        self.assertEqual(by_key["system"].status, StepResult.FAIL)
+        self.assertIn("pkexec", by_key["system"].detail)
+        for key, result in by_key.items():
+            if key != "system":
+                self.assertEqual(result.status, StepResult.SKIPPED)
 
     def test_run_admin_stays_quiet_after_upfront_warning(self):
         # B15: once the worker's up-front check has said pkexec
@@ -1241,6 +1246,899 @@ class LauncherTests(unittest.TestCase):
         self.assertLess(script.index("apt-get update"),
                         script.index("apt-get install -y python3-pip"),
                         "update must run before the install")
+
+    def test_has_network_true_when_the_server_answers(self):
+        # An HTTP error status still counts as online: the server
+        # answered.
+        import urllib.error
+
+        launcher = _load_launcher()
+        with mock.patch("urllib.request.urlopen",
+                        return_value=mock.Mock()):
+            self.assertTrue(launcher._has_network())
+        error = urllib.error.HTTPError(
+            "https://pypi.org/simple/", 500, "boom", {}, None)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=error):
+            self.assertTrue(launcher._has_network())
+
+    def test_has_network_false_when_the_host_is_unreachable(self):
+        import urllib.error
+
+        launcher = _load_launcher()
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=urllib.error.URLError("no route")):
+            self.assertFalse(launcher._has_network())
+
+    def test_main_says_you_need_internet_when_offline(self):
+        import urllib.error
+
+        launcher = _load_launcher()
+        messages = []
+        with mock.patch.object(launcher, "have_pyside6",
+                               return_value=False), \
+                mock.patch.object(launcher, "_show_error",
+                                  side_effect=messages.append), \
+                mock.patch("urllib.request.urlopen",
+                           side_effect=urllib.error.URLError(
+                               "no route")):
+            self.assertEqual(launcher.main(), 1)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("You need internet to install Pixel Forge",
+                      messages[0])
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 not available")
+class InstallerFailureTraceTests(unittest.TestCase):
+    """Task 32: the GUI installer says "you need internet" when
+    offline, detects the venv package name, backs the old engine
+    up before wiping it, and reports icon failures instead of
+    swallowing them."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(
+            lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+    # -- the network check --------------------------------------------
+
+    def test_has_network_true_when_the_server_answers(self):
+        import pixel_forge.installer as installer_mod
+
+        with mock.patch("urllib.request.urlopen",
+                        return_value=mock.Mock()):
+            self.assertTrue(installer_mod.has_network())
+
+    def test_has_network_true_on_an_http_error(self):
+        # An HTTP error status still proves the machine is online:
+        # the server answered.
+        import urllib.error
+
+        import pixel_forge.installer as installer_mod
+
+        error = urllib.error.HTTPError(
+            "https://pypi.org/simple/", 500, "boom", {}, None)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=error):
+            self.assertTrue(installer_mod.has_network())
+
+    def test_has_network_false_when_the_host_is_unreachable(self):
+        import urllib.error
+
+        import pixel_forge.installer as installer_mod
+
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=urllib.error.URLError("no route")):
+            self.assertFalse(installer_mod.has_network())
+
+    def test_network_step_fails_plainly_when_offline(self):
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_network)
+        import pixel_forge.installer as installer_mod
+
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.install_image_engine = True
+        with mock.patch.object(installer_mod, "has_network",
+                               return_value=False):
+            result = step_network(ctx)
+        self.assertEqual(result.status, StepResult.FAIL)
+        self.assertEqual(result.detail, "no internet")
+        log = "\n".join(lines)
+        self.assertIn("You need internet to install Pixel Forge", log)
+        self.assertIn("Python packages (pip)", log)
+        self.assertIn("the model download", log)
+
+    def test_network_step_passes_when_online(self):
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_network)
+        import pixel_forge.installer as installer_mod
+
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        with mock.patch.object(installer_mod, "has_network",
+                               return_value=True):
+            result = step_network(ctx)
+        self.assertEqual(result.status, StepResult.DONE)
+        self.assertIn("internet is available", "\n".join(lines))
+
+    def test_network_step_dry_run_passes_without_checking(self):
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_network)
+        import pixel_forge.installer as installer_mod
+
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=True)
+        with mock.patch.object(installer_mod, "has_network",
+                               side_effect=AssertionError(
+                                   "dry-run must not check")):
+            result = step_network(ctx)
+        self.assertEqual(result.status, StepResult.DONE)
+
+    def test_worker_stops_when_the_network_step_fails(self):
+        # Offline: the remaining steps all download something, so
+        # they are skipped instead of failing one after another.
+        import pixel_forge.installer as installer_mod
+        from PySide6.QtCore import QEventLoop, QTimer
+        from pixel_forge.installer import InstallWorker, StepResult
+
+        calls = []
+
+        def network(_ctx):
+            calls.append("network")
+            return StepResult(StepResult.FAIL, "no internet")
+
+        def other(key):
+            def _run(_ctx):
+                calls.append(key)
+                return StepResult(StepResult.DONE)
+            return _run
+
+        steps = [(key, title,
+                  network if key == "network" else other(key))
+                 for key, title, _func in installer_mod.STEPS]
+        old_steps = installer_mod.STEPS
+        installer_mod.STEPS = steps
+        self.addCleanup(setattr, installer_mod, "STEPS", old_steps)
+        results, lines = [], []
+        loop = QEventLoop()
+        worker = InstallWorker(dryrun=True)
+        worker.log_line.connect(lines.append)
+        worker.finished.connect(
+            lambda r: (results.extend(r), loop.quit()))
+        worker.start()
+        QTimer.singleShot(60000, loop.quit)
+        loop.exec()
+        worker.wait(5000)
+        self.assertEqual(calls, ["network"],
+                         "steps ran after the network step failed")
+        self.assertEqual(len(results), len(steps))
+        self.assertEqual(results[0].status, StepResult.FAIL)
+        for result in results[1:]:
+            self.assertEqual(result.status, StepResult.SKIPPED)
+            self.assertEqual(result.detail, "no internet")
+        self.assertIn("Stopping here", "\n".join(lines))
+
+    # -- the venv package name ----------------------------------------
+
+    def test_venv_package_name_uses_the_running_python(self):
+        from pixel_forge.installer import venv_package_name
+
+        self.assertEqual(
+            venv_package_name(),
+            "python%d.%d-venv" % (sys.version_info[0],
+                                  sys.version_info[1]))
+
+    def test_venv_package_name_follows_a_faked_version(self):
+        from pixel_forge.installer import venv_package_name
+
+        stub = os.path.join(self.tmp, "python3.11")
+        with open(stub, "w") as fh:
+            fh.write("#!/bin/sh\necho '3 11'\n")
+        os.chmod(stub, 0o755)
+        self.assertEqual(venv_package_name(stub), "python3.11-venv")
+
+    def test_venv_package_name_falls_back_when_undetectable(self):
+        from pixel_forge.installer import venv_package_name
+
+        self.assertEqual(venv_package_name("/nonexistent/python3"),
+                         "python3-venv")
+        stub = os.path.join(self.tmp, "broken-python")
+        with open(stub, "w") as fh:
+            fh.write("#!/bin/sh\nexit 1\n")
+        os.chmod(stub, 0o755)
+        self.assertEqual(venv_package_name(stub), "python3-venv")
+
+    def test_system_step_installs_the_detected_package(self):
+        from pixel_forge.installer import InstallContext, step_system
+        import pixel_forge.installer as installer_mod
+
+        lines = []
+        scripts = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.run_output = lambda _cmd, timeout=60: (1, "")
+        ctx.run_admin = lambda script, timeout=None: (
+            scripts.append(script), 1)[1]
+        with mock.patch.object(installer_mod, "venv_package_name",
+                               return_value="python3.11-venv"):
+            step_system(ctx)
+        self.assertEqual(len(scripts), 1)
+        self.assertIn("python3.11-venv", scripts[0])
+        self.assertNotIn("python3.12-venv", scripts[0])
+        log = "\n".join(lines)
+        self.assertIn("python3.11-venv", log)
+
+    def test_system_step_says_so_when_the_version_is_undetectable(self):
+        from pixel_forge.installer import InstallContext, step_system
+        import pixel_forge.installer as installer_mod
+
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.run_output = lambda _cmd, timeout=60: (1, "")
+        ctx.run_admin = lambda _script, timeout=None: 1
+        with mock.patch.object(installer_mod, "venv_package_name",
+                               return_value="python3-venv"):
+            step_system(ctx)
+        self.assertIn("Could not detect the Python version",
+                      "\n".join(lines))
+
+    # -- the pip failure warning --------------------------------------
+
+    def test_pip_failure_warning_names_the_causes_plainly(self):
+        from pixel_forge.installer import (InstallContext,
+                                           step_packages)
+
+        home = tempfile.mkdtemp(prefix="pf-install-pkg32-")
+        venv_bin = os.path.join(home, ".local", "share",
+                                "pixel-forge", "venv", "bin")
+        os.makedirs(venv_bin)
+        open(os.path.join(venv_bin, "python"), "w").close()
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.home = Path(home)
+        ctx.run = lambda _cmd, timeout=None: 1
+        ctx.run_output = lambda _cmd, timeout=60: (1, "")
+        step_packages(ctx)
+        log = "\n".join(lines)
+        self.assertNotIn("(no internet?)", log)
+        self.assertIn("may have been interrupted", log)
+        self.assertIn("may be unreachable", log)
+
+    # -- the engine backup --------------------------------------------
+
+    def _drive_engine_step(self, run, admin_scripts, admin_rc=0):
+        """Drive step_image_engine with the build tools present, a
+        missing engine, and a model already there (so the step
+        stops after the engine install). Captures run_admin
+        scripts."""
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import (InstallContext,
+                                           step_image_engine)
+
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.install_image_engine = True
+        ctx.home = Path(self.tmp)
+        ctx.which = lambda _name: "/usr/bin/" + _name
+        ctx.run = run
+
+        def admin(script, timeout=None):
+            admin_scripts.append(script)
+            return admin_rc
+
+        ctx.run_admin = admin
+        engine_values = iter([None, Path("/opt/sd.cpp/bin/sd-cli")])
+        model_values = iter([Path("/m/model.gguf"),
+                             Path("/m/model.gguf")])
+        with mock.patch.object(imagegen, "find_engine",
+                               lambda: next(engine_values)), \
+                mock.patch.object(imagegen, "find_model",
+                                  lambda: next(model_values)):
+            result = step_image_engine(ctx)
+        return result, lines
+
+    def test_engine_install_moves_the_old_engine_aside(self):
+        from pixel_forge.installer import StepResult
+
+        scripts = []
+        result, _lines = self._drive_engine_step(
+            lambda _cmd, timeout=None: 0, scripts)
+        self.assertEqual(result.status, StepResult.DONE)
+        self.assertEqual(len(scripts), 1)
+        script = scripts[0]
+        self.assertIn("set -e", script)
+        self.assertIn("mv /opt/sd.cpp /opt/sd.cpp.bak", script)
+        self.assertIn("rm -rf /opt/sd.cpp.bak", script)
+        self.assertIn("Backed up the old engine to /opt/sd.cpp.bak",
+                      script)
+        # No bare wipe of /opt/sd.cpp: the only rm -rf naming it
+        # is the one clearing the old backup.
+        self.assertIsNone(
+            re.search(r"rm -rf /opt/sd\.cpp(?!\.)", script),
+            "the install script still wipes /opt/sd.cpp")
+        self.assertLess(script.index("mv /opt/sd.cpp"),
+                        script.index("mkdir -p /opt/sd.cpp/bin"),
+                        "the backup must happen before the new "
+                        "engine is copied in")
+
+    def test_failed_build_never_touches_the_old_engine(self):
+        from pixel_forge.installer import StepResult
+
+        def run(cmd, timeout=None):
+            if cmd[0] == "cmake" and "--build" in cmd:
+                return 1
+            return 0
+
+        scripts = []
+        result, _lines = self._drive_engine_step(run, scripts)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("build failed", result.detail)
+        self.assertEqual(scripts, [],
+                         "the install step ran after a failed build")
+
+    def test_failed_backup_stops_the_engine_install(self):
+        from pixel_forge.installer import StepResult
+
+        scripts = []
+        result, lines = self._drive_engine_step(
+            lambda _cmd, timeout=None: 0, scripts, admin_rc=1)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("engine install failed", result.detail)
+        self.assertIn("could not be installed to /opt/sd.cpp",
+                      "\n".join(lines))
+
+    # -- icon failures ------------------------------------------------
+
+    def test_render_icons_from_svg_reports_a_bad_svg(self):
+        try:
+            from PySide6.QtSvg import QSvgRenderer  # noqa: F401
+        except ImportError:
+            self.skipTest("QtSvg not available")
+        from pixel_forge.installer import render_icons_from_svg
+
+        bad = os.path.join(self.tmp, "bad.svg")
+        with open(bad, "w") as fh:
+            fh.write("this is not an SVG file")
+        ok, detail = render_icons_from_svg(
+            bad, os.path.join(self.tmp, "icons"))
+        self.assertFalse(ok)
+        self.assertIn("not a valid SVG", detail)
+
+    def test_step_files_reports_a_failed_icon_render(self):
+        import pixel_forge.installer as installer_mod
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_files)
+
+        # A source tree with a broken SVG and no PNGs.
+        src = Path(self.tmp) / "src"
+        (src / "icons").mkdir(parents=True)
+        (src / "icons" / "pixel-forge.svg").write_text("not an SVG")
+        old_src = installer_mod.SRC_DIR
+        installer_mod.SRC_DIR = src
+        self.addCleanup(setattr, installer_mod, "SRC_DIR", old_src)
+        home = tempfile.mkdtemp(prefix="pf-install-icons-")
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.home = Path(home)
+        ctx.which = lambda _name: None  # no cache/db tools
+        result = step_files(ctx)
+        self.assertEqual(result.status, StepResult.WARN)
+        log = "\n".join(lines)
+        self.assertIn("could not render app icons from the SVG",
+                      log)
+        self.assertIn("not a valid SVG", log)
+        # The install continues and the menu entry is still created.
+        desktop = (Path(home) / ".local" / "share" / "applications"
+                   / "pixel-forge.desktop")
+        self.assertTrue(desktop.is_file())
+
+    def test_step_files_reports_a_failed_icon_cache_update(self):
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_files)
+
+        home = tempfile.mkdtemp(prefix="pf-install-cache-")
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.home = Path(home)
+        ctx.which = lambda _name: "/usr/bin/" + _name
+
+        def run(cmd, timeout=None):
+            if cmd[0] == "gtk-update-icon-cache":
+                return 1
+            return 0
+
+        ctx.run = run
+        result = step_files(ctx)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("icon cache update failed", result.detail)
+        self.assertIn("gtk-update-icon-cache failed",
+                      "\n".join(lines))
+
+    def test_step_files_reports_a_failed_desktop_database_update(self):
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_files)
+
+        home = tempfile.mkdtemp(prefix="pf-install-db-")
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.home = Path(home)
+        ctx.which = lambda _name: "/usr/bin/" + _name
+
+        def run(cmd, timeout=None):
+            if cmd[0] == "update-desktop-database":
+                return 1
+            return 0
+
+        ctx.run = run
+        result = step_files(ctx)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("desktop database update failed", result.detail)
+        self.assertIn("update-desktop-database failed",
+                      "\n".join(lines))
+
+
+def _install_sh_function(name):
+    """A function definition from install.sh, verbatim — from
+    `name() {` through its closing `}` at column 0. The tests run
+    these definitions, not a paraphrase of them."""
+    text = _install_sh_text()
+    start = text.index("%s() {" % name)
+    end = text.index("\n}\n", start) + len("\n}\n")
+    return text[start:end]
+
+
+def _install_sh_summary_prelude():
+    """The failure-tracking declarations plus record_failure,
+    record_warning and print_summary from install.sh, verbatim."""
+    text = _install_sh_text()
+    start = text.index("declare -a FAILURES=()")
+    end = text.index("print_summary() {", start)
+    end = text.index("\n}\n", end) + len("\n}\n")
+    return text[start:end]
+
+
+def _install_sh_trap_line():
+    """The ERR trap line from install.sh, verbatim — the `trap`
+    line that prints the mid-way-abort summary."""
+    text = _install_sh_text()
+    start = text.index("trap 'record_failure")
+    end = text.index("\n", start)
+    return text[start:end]
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash not available")
+class InstallScriptFailureTraceTests(unittest.TestCase):
+    """Task 32, terminal installer: install.sh's shipped
+    functions — the detected venv package, the network check,
+    the engine backup, the verify step, and the failure summary.
+    Bash runs use stubbed commands — never a real install."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(
+            lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+    def _run_bash(self, script, env=None):
+        full_env = dict(os.environ)
+        if env:
+            full_env.update(env)
+        return subprocess.run(["bash", "-c", script],
+                              capture_output=True, text=True,
+                              timeout=60, env=full_env)
+
+    # -- the venv package name ----------------------------------------
+
+    def test_detect_venv_package_uses_the_system_version(self):
+        script = (_install_sh_function("detect_venv_package")
+                  + "detect_venv_package\n")
+        proc = self._run_bash(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout.strip(),
+            "python%d.%d-venv" % (sys.version_info[0],
+                                  sys.version_info[1]))
+
+    def test_detect_venv_package_follows_a_faked_version(self):
+        script = ("python3() { echo '3.11'; }\n"
+                  + _install_sh_function("detect_venv_package")
+                  + "detect_venv_package\n")
+        proc = self._run_bash(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "python3.11-venv")
+
+    def test_detect_venv_package_falls_back_when_undetectable(self):
+        script = ("python3() { return 1; }\n"
+                  + _install_sh_function("detect_venv_package")
+                  + "detect_venv_package\n")
+        proc = self._run_bash(script)
+        self.assertEqual(proc.stdout.strip(), "python3-venv")
+        script = ("python3() { echo 'banana'; }\n"
+                  + _install_sh_function("detect_venv_package")
+                  + "detect_venv_package\n")
+        proc = self._run_bash(script)
+        self.assertEqual(proc.stdout.strip(), "python3-venv")
+
+    def test_install_sh_names_no_hardcoded_venv_package(self):
+        text = _install_sh_text()
+        self.assertNotIn("apt install python3.12-venv", text)
+        self.assertIn("sudo apt install $VENV_PKG python3-pip", text)
+
+    # -- the network check --------------------------------------------
+
+    def test_check_network_passes_when_python3_answers(self):
+        script = ("python3() { return 0; }\n"
+                  + _install_sh_function("check_network")
+                  + "check_network && echo ONLINE\n")
+        proc = self._run_bash(script)
+        self.assertIn("ONLINE", proc.stdout)
+
+    def test_check_network_fails_when_python3_fails(self):
+        script = ("python3() { return 1; }\n"
+                  + _install_sh_function("check_network")
+                  + "check_network || echo OFFLINE\n")
+        proc = self._run_bash(script)
+        self.assertIn("OFFLINE", proc.stdout)
+
+    def test_install_sh_stops_offline_with_you_need_internet(self):
+        text = _install_sh_text()
+        self.assertIn("if ! check_network; then", text)
+        self.assertIn("You need internet to install Pixel Forge.",
+                      text)
+
+    # -- the engine backup --------------------------------------------
+
+    def _backup_script(self, sudo_body, call="backup_sd_cpp"):
+        engine = os.path.join(self.tmp, "sd.cpp")
+        script = ("SD_INSTALL_DIR=%s\n" % shlex.quote(engine)
+                  + "sudo() { %s; }\n" % sudo_body
+                  + _install_sh_function("backup_sd_cpp")
+                  + "%s; echo \"BACKUP-RC=$?\"\n" % call)
+        return engine, script
+
+    def test_backup_moves_the_old_engine_aside(self):
+        engine, script = self._backup_script('"$@"')
+        os.makedirs(os.path.join(engine, "bin"))
+        Path(os.path.join(engine, "bin", "sd-cli")).touch()
+        proc = self._run_bash(script)
+        self.assertIn("BACKUP-RC=0", proc.stdout, proc.stderr)
+        self.assertFalse(os.path.exists(engine),
+                         "the old engine was not moved aside")
+        self.assertTrue(os.path.exists(
+            os.path.join(engine + ".bak", "bin", "sd-cli")),
+            "the backup does not hold the old engine")
+        self.assertIn("Backing up the existing image engine",
+                      proc.stdout)
+
+    def test_backup_replaces_an_older_backup(self):
+        engine, script = self._backup_script('"$@"')
+        os.makedirs(os.path.join(engine, "bin"))
+        Path(os.path.join(engine, "bin", "sd-cli")).touch()
+        os.makedirs(engine + ".bak")
+        Path(os.path.join(engine + ".bak", "stale")).touch()
+        proc = self._run_bash(script)
+        self.assertIn("BACKUP-RC=0", proc.stdout, proc.stderr)
+        self.assertFalse(os.path.exists(
+            os.path.join(engine + ".bak", "stale")),
+            "the stale backup was kept")
+        self.assertTrue(os.path.exists(
+            os.path.join(engine + ".bak", "bin", "sd-cli")))
+
+    def test_backup_fails_plainly_and_keeps_the_old_engine(self):
+        # sudo fails on the move: the backup returns 1 and the old
+        # engine stays exactly where it was.
+        engine, script = self._backup_script(
+            'case "$1" in mv) return 1;; *) "$@";; esac')
+        os.makedirs(os.path.join(engine, "bin"))
+        Path(os.path.join(engine, "bin", "sd-cli")).touch()
+        proc = self._run_bash(script)
+        self.assertIn("BACKUP-RC=1", proc.stdout, proc.stderr)
+        self.assertTrue(os.path.exists(
+            os.path.join(engine, "bin", "sd-cli")),
+            "the old engine was destroyed by a failed backup")
+
+    def test_backup_is_a_noop_when_no_engine_exists(self):
+        engine, script = self._backup_script(
+            'echo "SUDO-CALLED: $*"; "$@"')
+        proc = self._run_bash(script)
+        self.assertIn("BACKUP-RC=0", proc.stdout, proc.stderr)
+        self.assertNotIn("SUDO-CALLED", proc.stdout)
+        self.assertFalse(os.path.exists(engine + ".bak"))
+
+    def test_engine_install_dir_is_overridable(self):
+        text = _install_sh_text()
+        self.assertIn(
+            'SD_INSTALL_DIR="${PIXELFORGE_SD_INSTALL_DIR:-/opt/sd.cpp}"',
+            text)
+        self.assertNotIn("sudo rm -rf /opt/sd.cpp\n", text)
+
+    # -- the verify step ----------------------------------------------
+
+    def _fake_venv(self, gui_ok):
+        """A fake venv: a python wrapper execing the test python,
+        a pixel-forge script answering --version, and — when
+        gui_ok — a stub pixel_forge package whose gui imports."""
+        root = os.path.join(self.tmp, "venv-home")
+        venv_bin = os.path.join(root, "venv", "bin")
+        os.makedirs(venv_bin)
+        wrapper = os.path.join(venv_bin, "python")
+        with open(wrapper, "w") as fh:
+            fh.write("#!/bin/sh\nexec %s \"$@\"\n" % sys.executable)
+        os.chmod(wrapper, 0o755)
+        cli = os.path.join(venv_bin, "pixel-forge")
+        with open(cli, "w") as fh:
+            fh.write("#!/bin/sh\necho 'pixel-forge 0.42'\n")
+        os.chmod(cli, 0o755)
+        site = os.path.join(root, "site")
+        os.makedirs(site)
+        if gui_ok:
+            pkg = os.path.join(site, "pixel_forge")
+            os.makedirs(pkg)
+            open(os.path.join(pkg, "__init__.py"), "w").close()
+            open(os.path.join(pkg, "gui.py"), "w").close()
+        return os.path.join(root, "venv"), site
+
+    def _run_verify(self, venv, site):
+        script = (
+            "set -euo pipefail\n"
+            "VENV=%s\n" % shlex.quote(venv)
+            + "PYTHONPATH=%s\n" % shlex.quote(site)
+            + "export PYTHONPATH\n"
+            + _install_sh_summary_prelude()
+            + _install_sh_function("verify_install")
+            + "verify_install && echo VERIFY-OK || echo VERIFY-FAILED\n"
+            + "print_summary\n"
+        )
+        return self._run_bash(script)
+
+    def test_verify_install_catches_a_missing_venv(self):
+        venv = os.path.join(self.tmp, "no-such-venv")
+        proc = self._run_verify(venv, self.tmp)
+        self.assertIn("VERIFY-FAILED", proc.stdout, proc.stderr)
+        self.assertIn("virtual environment", proc.stdout)
+        self.assertIn("re-run the installer", proc.stdout)
+
+    def test_verify_install_catches_a_broken_gui_import(self):
+        venv, site = self._fake_venv(gui_ok=False)
+        proc = self._run_verify(venv, site)
+        self.assertIn("VERIFY-FAILED", proc.stdout, proc.stderr)
+        self.assertIn("Pixel Forge GUI", proc.stdout)
+        self.assertIn("does not import", proc.stdout)
+
+    def test_verify_install_passes_on_a_working_venv(self):
+        venv, site = self._fake_venv(gui_ok=True)
+        proc = self._run_verify(venv, site)
+        self.assertIn("VERIFY-OK", proc.stdout, proc.stderr)
+        self.assertIn("No failures, no warnings.", proc.stdout)
+
+    def test_verify_import_runs_from_an_empty_directory(self):
+        # The v0.11 lesson, pinned in the shell: the import check
+        # runs from a fresh mktemp dir, not from the tree.
+        text = _install_sh_function("verify_install")
+        self.assertIn('mktemp -d', text)
+        self.assertIn('cd "$_import_tmp"', text)
+
+    # -- the failure summary ------------------------------------------
+
+    def test_print_summary_names_each_failed_step(self):
+        script = (
+            _install_sh_summary_prelude()
+            + 'record_failure "virtual environment" "re-run the installer"\n'
+            + 'record_failure "Pixel Forge GUI" "check your connection and re-run the installer"\n'
+            + 'record_warning "app icons could not be rendered"\n'
+            + "print_summary\n"
+        )
+        proc = self._run_bash(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Failed steps:", proc.stdout)
+        self.assertIn("virtual environment", proc.stdout)
+        self.assertIn("Pixel Forge GUI", proc.stdout)
+        self.assertIn("Warnings (the install still works without "
+                      "these):", proc.stdout)
+        self.assertIn("app icons could not be rendered", proc.stdout)
+
+    def test_print_summary_with_nothing_to_report(self):
+        script = _install_sh_summary_prelude() + "print_summary\n"
+        proc = self._run_bash(script)
+        self.assertIn("No failures, no warnings.", proc.stdout)
+
+    def test_err_trap_prints_the_summary_on_a_midway_abort(self):
+        script = (
+            "set -euo pipefail\n"
+            + _install_sh_summary_prelude()
+            + _install_sh_trap_line() + "\n"
+            + 'record_failure "virtual environment" "re-run the installer"\n'
+            + "false\n"
+        )
+        proc = self._run_bash(script)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        output = proc.stdout + proc.stderr
+        self.assertIn("ERROR: the install stopped early", output)
+        self.assertIn("while running: false", output)
+        self.assertIn("virtual environment", output)
+        # The failing command is recorded as a failed step, so the
+        # summary names it instead of reading "No failures" next
+        # to an aborted install.
+        self.assertIn("Failed steps:", output)
+        self.assertIn("false failed", output)
+        self.assertNotIn("No failures, no warnings.", output)
+        self.assertIn("Pixel Forge is NOT installed", output)
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash not available")
+class UninstallScriptTests(unittest.TestCase):
+    """Task 32: uninstall.sh --purge removes the leftovers (the
+    install folder, the image engine, and — only when asked —
+    the library and models) instead of claiming "removed
+    completely" while leaving them behind. Runs the real script
+    in a fake HOME with a stubbed sudo."""
+
+    def _installed_home(self):
+        """A fake HOME with an installed Pixel Forge: venv, links,
+        launcher, icons, library, models, and a fake engine dir
+        (the real /opt/sd.cpp is never touched)."""
+        home = tempfile.mkdtemp(prefix="pf-uninstall-")
+        self.addCleanup(
+            lambda: shutil.rmtree(home, ignore_errors=True))
+        prefix = os.path.join(home, ".local", "share", "pixel-forge")
+        os.makedirs(os.path.join(prefix, "venv", "bin"))
+        Path(os.path.join(prefix, "venv", "bin", "python")).touch()
+        bin_dir = os.path.join(home, ".local", "bin")
+        os.makedirs(bin_dir)
+        for name in ("pixel-forge", "pixel-forge-gui"):
+            Path(os.path.join(bin_dir, name)).touch()
+        apps = os.path.join(home, ".local", "share", "applications")
+        os.makedirs(apps)
+        Path(os.path.join(apps, "pixel-forge.desktop")).touch()
+        icons = os.path.join(home, ".local", "share", "icons",
+                             "hicolor")
+        for size in ("48x48", "128x128", "256x256"):
+            os.makedirs(os.path.join(icons, size, "apps"))
+            Path(os.path.join(icons, size, "apps",
+                              "pixel-forge.png")).touch()
+        os.makedirs(os.path.join(icons, "scalable", "apps"))
+        Path(os.path.join(icons, "scalable", "apps",
+                          "pixel-forge.svg")).touch()
+        library = os.path.join(home, "pixel-forge-library")
+        os.makedirs(library)
+        Path(os.path.join(library, "knight.png")).touch()
+        models = os.path.join(home, "design-shell-models")
+        os.makedirs(models)
+        Path(os.path.join(models, "model.gguf")).touch()
+        pf_models = os.path.join(home, "pixel-forge-models")
+        os.makedirs(pf_models)
+        Path(os.path.join(pf_models, "model.gguf")).touch()
+        engine = os.path.join(home, "fake-sd.cpp")
+        os.makedirs(os.path.join(engine, "bin"))
+        Path(os.path.join(engine, "bin", "sd-cli")).touch()
+        return home, engine
+
+    def _stub_sudo(self, body):
+        stub_dir = tempfile.mkdtemp(prefix="pf-uninstall-stubs-")
+        self.addCleanup(
+            lambda: shutil.rmtree(stub_dir, ignore_errors=True))
+        sudo = os.path.join(stub_dir, "sudo")
+        with open(sudo, "w") as fh:
+            fh.write("#!/bin/sh\n%s\n" % body)
+        os.chmod(sudo, 0o755)
+        return stub_dir
+
+    def _env(self, home, engine, stub_dir):
+        env = dict(os.environ)
+        env["HOME"] = home
+        env["PIXELFORGE_SD_INSTALL_DIR"] = engine
+        env["PATH"] = stub_dir + ":/usr/bin:/bin"
+        return env
+
+    def _run_uninstall(self, home, engine, args, sudo_body='"$@"',
+                       stdin_text=""):
+        stub_dir = self._stub_sudo(sudo_body)
+        return subprocess.run(
+            ["bash", os.path.join(ROOT, "uninstall.sh")] + args,
+            input=stdin_text, capture_output=True, text=True,
+            timeout=60, env=self._env(home, engine, stub_dir))
+
+    def _run_uninstall_tty(self, home, engine, args, stdin_text):
+        """Run uninstall.sh under a pty (via `script`), so
+        [ -t 0 ] is true and the prompts can be answered."""
+        stub_dir = self._stub_sudo('"$@"')
+        command = "bash %s %s" % (
+            shlex.quote(os.path.join(ROOT, "uninstall.sh")),
+            " ".join(shlex.quote(a) for a in args))
+        return subprocess.run(
+            ["script", "-qec", command, "/dev/null"],
+            input=stdin_text, capture_output=True, text=True,
+            timeout=60, env=self._env(home, engine, stub_dir))
+
+    def test_plain_uninstall_keeps_user_data_and_says_so(self):
+        home, engine = self._installed_home()
+        proc = self._run_uninstall(home, engine, [])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(os.path.exists(
+            os.path.join(home, ".local", "share", "pixel-forge",
+                         "venv")))
+        self.assertFalse(os.path.exists(
+            os.path.join(home, ".local", "bin", "pixel-forge")))
+        self.assertFalse(os.path.exists(
+            os.path.join(home, ".local", "share", "applications",
+                         "pixel-forge.desktop")))
+        self.assertTrue(os.path.exists(
+            os.path.join(home, "pixel-forge-library", "knight.png")))
+        self.assertTrue(os.path.exists(
+            os.path.join(home, "design-shell-models", "model.gguf")))
+        self.assertTrue(os.path.exists(
+            os.path.join(engine, "bin", "sd-cli")))
+        self.assertIn("Kept:", proc.stdout)
+        self.assertIn("--purge", proc.stdout)
+
+    def test_purge_removes_the_engine_and_the_install_folder(self):
+        home, engine = self._installed_home()
+        proc = self._run_uninstall(home, engine, ["--purge"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(os.path.exists(
+            os.path.join(home, ".local", "share", "pixel-forge")))
+        self.assertFalse(os.path.exists(engine),
+                         "the engine survived --purge")
+        self.assertIn("Removed the image engine", proc.stdout)
+        self.assertIn("Pixel Forge removed completely.", proc.stdout)
+
+    def test_purge_keeps_user_data_without_a_terminal(self):
+        # No tty: there is no way to ask, so the library and
+        # models are kept, with the way to remove them by hand.
+        home, engine = self._installed_home()
+        proc = self._run_uninstall(home, engine, ["--purge"],
+                                   stdin_text="")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(os.path.exists(
+            os.path.join(home, "pixel-forge-library", "knight.png")))
+        self.assertTrue(os.path.exists(
+            os.path.join(home, "design-shell-models", "model.gguf")))
+        self.assertTrue(os.path.exists(
+            os.path.join(home, "pixel-forge-models", "model.gguf")))
+        self.assertIn("remove it by hand", proc.stdout)
+
+    @unittest.skipUnless(shutil.which("script"),
+                         "script not available")
+    def test_purge_removes_user_data_on_yes(self):
+        home, engine = self._installed_home()
+        proc = self._run_uninstall_tty(home, engine, ["--purge"],
+                                       "y\ny\ny\n")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(os.path.exists(
+            os.path.join(home, "pixel-forge-library")))
+        self.assertFalse(os.path.exists(
+            os.path.join(home, "design-shell-models")))
+        self.assertFalse(os.path.exists(
+            os.path.join(home, "pixel-forge-models")))
+
+    @unittest.skipUnless(shutil.which("script"),
+                         "script not available")
+    def test_purge_keeps_user_data_on_no(self):
+        # An empty answer is No — nothing is pre-selected.
+        home, engine = self._installed_home()
+        proc = self._run_uninstall_tty(home, engine, ["--purge"],
+                                       "n\n\n\n")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(os.path.exists(
+            os.path.join(home, "pixel-forge-library", "knight.png")))
+        self.assertTrue(os.path.exists(
+            os.path.join(home, "design-shell-models", "model.gguf")))
+        self.assertTrue(os.path.exists(
+            os.path.join(home, "pixel-forge-models", "model.gguf")))
+
+    def test_purge_warns_when_the_engine_cannot_be_removed(self):
+        home, engine = self._installed_home()
+        proc = self._run_uninstall(home, engine, ["--purge"],
+                                   sudo_body="exit 1")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(os.path.exists(
+            os.path.join(engine, "bin", "sd-cli")))
+        self.assertIn("could not remove", proc.stdout)
+        self.assertIn("sudo rm -rf", proc.stdout)
 
 
 if __name__ == "__main__":
