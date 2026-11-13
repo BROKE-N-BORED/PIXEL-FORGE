@@ -8,6 +8,7 @@ Skipped when PySide6 is not importable.
 """
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -948,8 +949,12 @@ class PromptGuiTests(unittest.TestCase):
     def setUp(self):
         self._env = stub_env(self.stub, self.model)
         self._env.__enter__()
+        # Batches and history live in the library folder now
+        # (task 20), so generation must not write into the real
+        # ~/pixel-forge-library/ during the suite.
+        self.lib_dir = tempfile.mkdtemp()
         from pixel_forge.gui import MainWindow
-        self.win = MainWindow()
+        self.win = MainWindow(library_dir=self.lib_dir)
         self.win.tabs.setCurrentIndex(2)
 
     def tearDown(self):
@@ -957,6 +962,7 @@ class PromptGuiTests(unittest.TestCase):
         self.win.deleteLater()
         self.app.processEvents()
         self._env.__exit__(None, None, None)
+        shutil.rmtree(self.lib_dir, ignore_errors=True)
 
     def _wait_for_worker(self, timeout=30):
         """Pump events until the prompt worker stops, or fail."""
@@ -1191,27 +1197,34 @@ class PromptGuiTests(unittest.TestCase):
         self.assertTrue(self.win.prompt_generate_btn.isEnabled())
 
     def test_regenerate_with_candidates_accept_replaces_batch(self):
-        # Accepting the confirm replaces the batch: the old batch
-        # dir is gone and the new generation lands.
+        # Accepting the confirm replaces the batch in the tab —
+        # but the old batch is no longer destroyed (task 20): its
+        # folder stays, and it is recorded in History.
         from unittest import mock
         from PySide6.QtWidgets import QMessageBox
         from pixel_forge import gui as gui_mod
         self._generate()
         old_dir = self.win.prompt_batch_dir
-        old_parent = old_dir.parent
         with mock.patch.object(
                 gui_mod.QMessageBox, "question",
                 return_value=QMessageBox.StandardButton.Yes):
             self.win.prompt_edit.setText("a dragon")
             self.win._on_prompt_generate()
         self._wait_for_worker()
-        self.assertFalse(old_parent.exists())
+        self.assertTrue(old_dir.is_dir())
+        self.assertTrue((old_dir / "batch.json").is_file())
         self.assertNotEqual(self.win.prompt_batch_dir, old_dir)
         self.assertEqual(self.win.prompt_strip.count(), 3)
         self.assertEqual(self.win.prompt_keeper, "cand-01.png")
         from pixel_forge.imagegen import load_batch
         batch = load_batch(self.win.prompt_batch_dir)
         self.assertEqual(batch["prompt"], "a dragon")
+        entries = [self.win.prompt_history_list.item(i).text()
+                   for i in range(self.win.prompt_history_list.count())]
+        self.assertTrue(any("a knight" in e for e in entries),
+                        entries)
+        self.assertTrue(any("a dragon" in e for e in entries),
+                        entries)
 
     def test_regenerate_without_candidates_asks_nothing(self):
         # No candidates means nothing to lose — Generate runs
@@ -1333,6 +1346,333 @@ class PromptGuiTests(unittest.TestCase):
         self.win.grab().save(shot)
         self.assertTrue(os.path.exists(shot))
         self.assertGreater(os.path.getsize(shot), 1000)
+
+
+class PromptIterationTests(unittest.TestCase):
+    """Task 20 (prompt iteration): keeper seed, generation
+    history, elapsed time, regenerate-one, "more like this one",
+    prompt history, negative presets, steps/cfg/size controls."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        cls.stub = write_stub_engine(cls.tmp)
+        cls.model = os.path.join(cls.tmp, "dummy.gguf")
+        with open(cls.model, "wb") as f:
+            f.write(b"not a real model")
+
+    def setUp(self):
+        self._env = stub_env(self.stub, self.model)
+        self._env.__enter__()
+        self.lib_dir = tempfile.mkdtemp()
+        from pixel_forge.gui import MainWindow
+        self.win = MainWindow(library_dir=self.lib_dir)
+        self.win.tabs.setCurrentIndex(2)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        self._env.__exit__(None, None, None)
+        shutil.rmtree(self.lib_dir, ignore_errors=True)
+
+    def _wait_for_worker(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while self.win._prompt_generating():
+            self.app.processEvents()
+            if time.monotonic() > deadline:
+                self.fail("prompt worker did not finish in %ss"
+                          % timeout)
+            time.sleep(0.05)
+        self.app.processEvents()
+
+    def _generate(self, prompt="a knight"):
+        self.win.prompt_edit.setText(prompt)
+        self.win._on_prompt_generate()
+        self._wait_for_worker()
+
+    def test_seed_label_hidden_until_a_keeper_exists(self):
+        self.assertTrue(self.win.prompt_seed_label.isHidden())
+        self._generate()
+        self.assertFalse(self.win.prompt_seed_label.isHidden())
+        from pixel_forge.imagegen import load_batch
+        batch = load_batch(self.win.prompt_batch_dir)
+        keeper = next(c for c in batch["candidates"]
+                      if c["file"] == self.win.prompt_keeper)
+        self.assertEqual(self.win.prompt_seed_label.text(),
+                         "Seed: %d" % keeper["seed"])
+
+    def test_seed_label_follows_the_keeper(self):
+        self._generate()
+        from pixel_forge.imagegen import load_batch
+        batch = load_batch(self.win.prompt_batch_dir)
+        second = batch["candidates"][1]
+        self.win._pick_prompt_keeper(second["file"])
+        self.assertEqual(self.win.prompt_seed_label.text(),
+                         "Seed: %d" % second["seed"])
+
+    def test_generation_controls_default_to_the_lcm_pins(self):
+        self.assertEqual(self.win.prompt_steps_spin.value(), 4)
+        self.assertEqual(self.win.prompt_cfg_spin.value(), 1.5)
+        self.assertEqual(self.win.prompt_gen_size_spin.value(), 512)
+
+    def test_generation_controls_reach_the_engine(self):
+        log = os.path.join(self.tmp, "iter-argv.log")
+        if os.path.exists(log):
+            os.remove(log)
+        self.win.prompt_steps_spin.setValue(8)
+        self.win.prompt_cfg_spin.setValue(2.5)
+        self.win.prompt_gen_size_spin.setValue(256)
+        with stub_env(self.stub, self.model, {"STUB_LOG": log}):
+            self._generate()
+        lines = open(log).read().splitlines()
+        self.assertEqual(len(lines), 3)
+        for line in lines:
+            self.assertIn("--steps 8", line)
+            self.assertIn("--cfg-scale 2.5", line)
+            self.assertIn("-W 256 -H 256", line)
+
+    def test_history_records_batch_and_reopens_it(self):
+        self._generate("a knight")
+        first_dir = self.win.prompt_batch_dir
+        first_keeper = self.win.prompt_keeper
+        from pixel_forge.imagegen import load_batch
+        first_seed = next(
+            c["seed"] for c in load_batch(first_dir)["candidates"]
+            if c["file"] == first_keeper)
+        # A second batch replaces the tab.
+        from unittest import mock
+        from pixel_forge import gui as gui_mod
+        with mock.patch.object(
+                gui_mod.QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.Yes):
+            self._generate("a dragon")
+        self.assertNotEqual(self.win.prompt_batch_dir, first_dir)
+        # The first batch is in the list — reopen it.
+        self.assertEqual(self.win.prompt_history_list.count(), 2)
+        item = self.win.prompt_history_list.item(1)
+        self.assertIn("a knight", item.text())
+        self.win._on_prompt_history_clicked(item)
+        self.assertEqual(self.win.prompt_batch_dir, first_dir)
+        self.assertEqual(self.win.prompt_keeper, first_keeper)
+        self.assertEqual(self.win.prompt_edit.text(), "a knight")
+        self.assertEqual(self.win.prompt_strip.count(), 3)
+        self.assertEqual(self.win.prompt_seed_label.text(),
+                         "Seed: %d" % first_seed)
+
+    def test_history_entry_with_missing_folder_warns(self):
+        self._generate("a knight")
+        first_dir = self.win.prompt_batch_dir
+        shutil.rmtree(first_dir)
+        self.win._refresh_prompt_history_list()
+        item = self.win.prompt_history_list.item(0)
+        self.assertIn("batch folder missing", item.text())
+        from unittest import mock
+        from pixel_forge import gui as gui_mod
+        with mock.patch.object(gui_mod.QMessageBox,
+                               "warning") as warn:
+            self.win._on_prompt_history_clicked(item)
+        self.assertTrue(warn.called)
+        self.assertIn(str(first_dir), warn.call_args[0][2])
+        # The tab is untouched — the current batch is still there.
+        self.assertEqual(self.win.prompt_batch_dir, first_dir)
+        self.assertEqual(self.win.prompt_strip.count(), 3)
+
+    def test_corrupt_history_file_warns_and_starts_empty(self):
+        from pixel_forge.history import HISTORY_FILENAME
+        path = os.path.join(self.lib_dir, HISTORY_FILENAME)
+        with open(path, "w") as handle:
+            handle.write("{not json")
+        from pixel_forge.gui import MainWindow
+        win = MainWindow(library_dir=self.lib_dir)
+        try:
+            self.assertEqual(win.prompt_history_list.count(), 0)
+            self.assertEqual(win.prompt_history_combo.count(), 0)
+            self.assertIn("unreadable",
+                          win.statusBar().currentMessage())
+            # The corrupt file is left alone.
+            with open(path) as handle:
+                self.assertEqual(handle.read(), "{not json")
+        finally:
+            win.close()
+            win.deleteLater()
+            self.app.processEvents()
+
+    def test_prompt_history_combo_reuses_a_prompt(self):
+        self._generate("a knight")
+        combo = self.win.prompt_history_combo
+        self.assertEqual([combo.itemText(i)
+                          for i in range(combo.count())],
+                         ["a knight"])
+        self.assertEqual(combo.currentIndex(), -1)
+        self.win.prompt_edit.setText("")
+        combo.setCurrentIndex(0)
+        self.assertEqual(self.win.prompt_edit.text(), "a knight")
+        self.assertEqual(combo.currentIndex(), -1)
+
+    def test_prompt_history_persists_across_restart(self):
+        self._generate("a knight")
+        from pixel_forge.gui import MainWindow
+        win = MainWindow(library_dir=self.lib_dir)
+        try:
+            combo = win.prompt_history_combo
+            self.assertEqual([combo.itemText(i)
+                              for i in range(combo.count())],
+                             ["a knight"])
+            self.assertEqual(win.prompt_history_list.count(), 1)
+            self.assertIn("a knight",
+                          win.prompt_history_list.item(0).text())
+        finally:
+            win.close()
+            win.deleteLater()
+            self.app.processEvents()
+
+    def test_negative_presets_fill_the_field(self):
+        from pixel_forge.imagegen import NEGATIVE_PRESETS
+        combo = self.win.prompt_negative_preset_combo
+        names = [combo.itemText(i) for i in range(combo.count())]
+        self.assertEqual(names, list(NEGATIVE_PRESETS) + ["Custom"])
+        self.assertEqual(combo.currentText(), "Default")
+        combo.setCurrentIndex(names.index("No people"))
+        self.assertEqual(self.win.prompt_negative_edit.text(),
+                         NEGATIVE_PRESETS["No people"])
+        # Typing by hand reads as Custom.
+        self.win.prompt_negative_edit.setText("something else")
+        self.assertEqual(combo.currentText(), "Custom")
+        # Typing a preset's exact text selects it again.
+        self.win.prompt_negative_edit.setText(
+            NEGATIVE_PRESETS["Clean background"])
+        self.assertEqual(combo.currentText(), "Clean background")
+
+    def test_regenerate_one_replaces_only_the_selected(self):
+        self._generate()
+        from pixel_forge.imagegen import load_batch
+        before = load_batch(self.win.prompt_batch_dir)
+        seeds = {c["file"]: c["seed"]
+                 for c in before["candidates"]}
+        blobs = {c["file"]: (self.win.prompt_batch_dir
+                             / c["file"]).read_bytes()
+                 for c in before["candidates"]}
+        keeper = self.win.prompt_keeper
+        self.win.prompt_strip.setCurrentRow(1)
+        self.win._on_prompt_regenerate_one()
+        self._wait_for_worker()
+        after = load_batch(self.win.prompt_batch_dir)
+        after_seeds = {c["seed"] for c in after["candidates"]}
+        self.assertEqual(len(after["candidates"]), 3)
+        self.assertEqual(len(after_seeds), 3)
+        self.assertNotEqual(after["candidates"][1]["seed"],
+                            seeds["cand-02.png"])
+        self.assertNotEqual(
+            (self.win.prompt_batch_dir / "cand-02.png").read_bytes(),
+            blobs["cand-02.png"])
+        for name in ("cand-01.png", "cand-03.png"):
+            kept = next(c for c in after["candidates"]
+                        if c["file"] == name)
+            self.assertEqual(kept["seed"], seeds[name])
+            self.assertEqual(
+                (self.win.prompt_batch_dir / name).read_bytes(),
+                blobs[name])
+        self.assertEqual(self.win.prompt_keeper, keeper)
+        self.assertEqual(self.win.prompt_strip.count(), 3)
+        self.assertIn("Regenerated cand-02.png",
+                      self.win.statusBar().currentMessage())
+
+    def test_regenerate_one_falls_back_to_the_keeper(self):
+        # Nothing selected in the strip: the keeper is re-rolled.
+        self._generate()
+        from pixel_forge.imagegen import load_batch
+        keeper = self.win.prompt_keeper
+        old_seed = next(c["seed"]
+                        for c in load_batch(
+                            self.win.prompt_batch_dir)["candidates"]
+                        if c["file"] == keeper)
+        self.assertIsNone(self.win.prompt_strip.currentItem())
+        self.win._on_prompt_regenerate_one()
+        self._wait_for_worker()
+        new_seed = next(c["seed"]
+                        for c in load_batch(
+                            self.win.prompt_batch_dir)["candidates"]
+                        if c["file"] == keeper)
+        self.assertNotEqual(new_seed, old_seed)
+        self.assertEqual(self.win.prompt_keeper, keeper)
+        self.assertEqual(self.win.prompt_seed_label.text(),
+                         "Seed: %d" % new_seed)
+
+    def test_more_like_this_uses_keeper_seeds(self):
+        self._generate("a knight")
+        from pixel_forge.imagegen import load_batch
+        keeper_seed = next(
+            c["seed"] for c in load_batch(
+                self.win.prompt_batch_dir)["candidates"]
+            if c["file"] == self.win.prompt_keeper)
+        from unittest import mock
+        from pixel_forge import gui as gui_mod
+        with mock.patch.object(
+                gui_mod.QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.Yes) as ask:
+            self.win._on_prompt_more_like()
+        self.assertTrue(ask.called)
+        self._wait_for_worker()
+        batch = load_batch(self.win.prompt_batch_dir)
+        self.assertEqual(batch["prompt"], "a knight")
+        self.assertEqual([c["seed"] for c in batch["candidates"]],
+                         [keeper_seed + 1, keeper_seed + 2,
+                          keeper_seed + 3])
+        self.assertEqual(self.win.prompt_edit.text(), "a knight")
+
+    def test_more_like_this_decline_keeps_batch(self):
+        self._generate("a knight")
+        bdir = self.win.prompt_batch_dir
+        keeper = self.win.prompt_keeper
+        from unittest import mock
+        from pixel_forge import gui as gui_mod
+        with mock.patch.object(
+                gui_mod.QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.No) as ask:
+            self.win._on_prompt_more_like()
+        self.assertTrue(ask.called)
+        self.assertEqual(ask.call_args[0][4],
+                         QMessageBox.StandardButton.No)
+        self.assertEqual(self.win.prompt_batch_dir, bdir)
+        self.assertEqual(self.win.prompt_keeper, keeper)
+        self.assertEqual(self.win.prompt_strip.count(), 3)
+        self.assertFalse(self.win._prompt_generating())
+
+    def test_elapsed_time_shows_while_generating(self):
+        # Each candidate takes 1 s with the stub; the progress
+        # bar's text must carry the elapsed time mid-run — and it
+        # must actually UPDATE past the 0:00 it started with
+        # (a %-format bug once threw in the slot and left the
+        # bar frozen at 0:00) — and the status bar reports the
+        # total when the batch lands.
+        with stub_env(self.stub, self.model, {"STUB_DELAY": "1"}):
+            self.win.prompt_edit.setText("a knight")
+            self.win._on_prompt_generate()
+            deadline = time.monotonic() + 4.0
+            seen = ""
+            while time.monotonic() < deadline:
+                self.app.processEvents()
+                seen = self.win.prompt_progress.format()
+                if "0:02" in seen:
+                    break
+                if not self.win._prompt_generating():
+                    break
+                time.sleep(0.1)
+            self.assertIn("Generating", seen, seen)
+            self.assertIn("0:02", seen, seen)
+            self._wait_for_worker()
+        self.assertIn("took",
+                      self.win.statusBar().currentMessage())
+
+    def test_iteration_buttons_enabled_state(self):
+        self.assertFalse(self.win.prompt_regen_one_btn.isEnabled())
+        self.assertFalse(self.win.prompt_more_like_btn.isEnabled())
+        self._generate()
+        self.assertTrue(self.win.prompt_regen_one_btn.isEnabled())
+        self.assertTrue(self.win.prompt_more_like_btn.isEnabled())
 
 
 class LibraryGuiTests(unittest.TestCase):

@@ -28,7 +28,8 @@ from pathlib import Path
 
 from . import __version__
 from .codeinput import parse_paths
-from .imagegen import (DEFAULT_NEGATIVE, MODEL_FILENAME, find_engine,
+from .imagegen import (DEFAULT_NEGATIVE, DEFAULT_SIZE, LCM_CFG,
+                       LCM_STEPS, MODEL_FILENAME, find_engine,
                        find_model, prompt_to_sprites, slugify)
 from .library import Library, normalize_tags
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
@@ -141,6 +142,19 @@ def build_parser():
     prompt.add_argument("--count", type=int, default=3,
                         help="how many candidates to generate "
                         "(default: 3)")
+    # Generation settings (task 20): the LCM pins are the
+    # defaults, these let the user change them. --size is
+    # already the pixelize output size on this command, so the
+    # generated image size is --gen-size.
+    prompt.add_argument("--steps", type=int, default=LCM_STEPS,
+                        help="diffusion steps per candidate "
+                        "(default: %d)" % LCM_STEPS)
+    prompt.add_argument("--cfg", type=float, default=LCM_CFG,
+                        help="cfg scale — how closely the picture "
+                        "follows the prompt (default: %s)" % LCM_CFG)
+    prompt.add_argument("--gen-size", type=int, default=DEFAULT_SIZE,
+                        help="generated image size in pixels, square "
+                        "(default: %d)" % DEFAULT_SIZE)
     _add_pixelize_args(prompt)
     prompt.add_argument("--out", default=None,
                         help="output folder for the candidates, their "
@@ -259,6 +273,12 @@ def cmd_prompt(args):
     width, height = _validate_pixelize_args(args)
     if args.count < 1:
         raise PixelForgeError("count must be at least 1")
+    if args.steps < 1:
+        raise PixelForgeError("steps must be at least 1")
+    if args.cfg <= 0:
+        raise PixelForgeError("cfg scale must be above 0")
+    if args.gen_size < 1:
+        raise PixelForgeError("gen-size must be at least 1")
     out = args.out
     if out is None:
         out = slugify(args.prompt) + "-prompt"
@@ -289,7 +309,8 @@ def cmd_prompt(args):
         args.prompt, out, negative=args.negative, count=args.count,
         width=width, height=height, keep_aspect=args.keep_aspect,
         palette=args.palette, max_colors=args.colors,
-        dither=args.dither, progress=_progress)
+        dither=args.dither, steps=args.steps, cfg=args.cfg,
+        size=args.gen_size, progress=_progress)
     landed = [c for c in batch["candidates"]
               if c["status"] == "pending"]
     failed = len(batch["candidates"]) - len(landed)

@@ -35,25 +35,29 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QImage, QImageReader, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
-                               QDialog, QFileDialog, QHBoxLayout,
-                               QInputDialog, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMainWindow,
-                               QMessageBox, QProgressBar, QPushButton,
-                               QScrollArea, QSlider,
+                               QDialog, QDoubleSpinBox, QFileDialog,
+                               QHBoxLayout, QInputDialog, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem,
+                               QMainWindow, QMessageBox, QProgressBar,
+                               QPushButton, QScrollArea, QSlider,
                                QSpinBox, QSplitter, QStackedWidget,
                                QStatusBar, QTabWidget, QVBoxLayout,
                                QWidget)
 
 from .codeinput import CODE_EXTENSIONS, parse_paths
-from .imagegen import (DEFAULT_COUNT, DEFAULT_NEGATIVE,
+from .history import (batches_dir, load_history, record_batch,
+                      record_prompt, save_history)
+from .imagegen import (DEFAULT_COUNT, DEFAULT_NEGATIVE, DEFAULT_SIZE,
+                       LCM_CFG, LCM_STEPS, NEGATIVE_PRESETS,
                        GenerationCancelled, MODEL_FILENAME,
-                       engine_status, generate,
-                       load_batch, new_batch, require_engine,
+                       engine_status, generate, load_batch, new_batch,
+                       regenerate_candidate, require_engine,
                        require_model, set_keeper, validate_prompt)
 from .library import Library
 from .palettes import PALETTE_LABELS
@@ -191,15 +195,25 @@ class PromptWorker(QThread):
     pattern for extraction + pixelize. Signals cross back
     to the GUI thread; the worker never touches a widget itself.
     (Named `done`, not `finished` — QThread already owns `finished`.)
+
+    Two modes (task 20): "generate" runs a full round into the
+    batch; "regenerate" re-rolls one candidate (`target`, a file
+    name) and emits the updated batch. The GUI slots read
+    `mode` off the sender to tell them apart — a re-roll must
+    not auto-pick the first candidate as keeper the way a fresh
+    batch does.
     """
     progress = Signal(int, int, dict)  # done, total, candidate record
     done = Signal(dict)                # the finished batch
     failed = Signal(str)               # readable error message
     cancelled = Signal()
 
-    def __init__(self, batch_dir, parent=None):
+    def __init__(self, batch_dir, parent=None, mode="generate",
+                 target=None):
         super().__init__(parent)
         self.batch_dir = Path(batch_dir)
+        self.mode = mode
+        self.target = target
         self._cancel_event = threading.Event()
 
     def cancel(self):
@@ -207,11 +221,18 @@ class PromptWorker(QThread):
 
     def run(self):
         try:
-            batch = generate(
-                self.batch_dir,
-                cancel_event=self._cancel_event,
-                progress=lambda done, total, record:
-                    self.progress.emit(done, total, record))
+            if self.mode == "regenerate":
+                record = regenerate_candidate(
+                    self.batch_dir, self.target,
+                    cancel_event=self._cancel_event)
+                self.progress.emit(1, 1, record)
+                batch = load_batch(self.batch_dir)
+            else:
+                batch = generate(
+                    self.batch_dir,
+                    cancel_event=self._cancel_event,
+                    progress=lambda done, total, record:
+                        self.progress.emit(done, total, record))
         except GenerationCancelled:
             self.cancelled.emit()
             return
@@ -560,8 +581,11 @@ class MainWindow(QMainWindow):
         self._video_debounce_timer.timeout.connect(
             self._start_scheduled_video_run)
 
-        # Prompt tab state. Candidates live on disk in a temp batch
-        # dir (with batch.json); only the keeper is held in memory.
+        # Prompt tab state. Candidates live on disk in a batch dir
+        # under the library folder (with batch.json); only the
+        # keeper is held in memory. The history (past batches +
+        # past prompts) loads from the library folder and is
+        # written back on every generation.
         self.prompt_batch_dir = None
         self.prompt_worker = None
         self.prompt_candidates = []
@@ -569,6 +593,15 @@ class MainWindow(QMainWindow):
         self.prompt_keeper_image = None
         self.prompt_result_image = None
         self._updating_prompt_size = False
+        self._prompt_history = None
+        self._prompt_history_corrupt = False
+        # Elapsed time while generating: the timer ticks once a
+        # second and refreshes the progress bar's text.
+        self._prompt_started = None
+        self._prompt_elapsed_timer = QTimer(self)
+        self._prompt_elapsed_timer.setInterval(1000)
+        self._prompt_elapsed_timer.timeout.connect(
+            self._on_prompt_elapsed_tick)
 
         # Code tab state. Assets are small rendered buffer Images
         # held in memory; a skin also keeps its source path so its parts
@@ -599,6 +632,7 @@ class MainWindow(QMainWindow):
         self._refresh_preset_combos()
         self._refresh_library()
         self._refresh_prompt_status()
+        self._load_prompt_history()
 
     @staticmethod
     def _section(text):
@@ -1863,6 +1897,17 @@ class MainWindow(QMainWindow):
             "a knight with a red shield")
         form.addWidget(self.prompt_edit)
 
+        # Past prompts, most recent first (task 20) — picking one
+        # fills the prompt field. Nothing is selected: the combo
+        # shows blank until the user picks.
+        form.addWidget(QLabel("Prompt history"))
+        self.prompt_history_combo = QComboBox()
+        self.prompt_history_combo.setToolTip(
+            "Past prompts — pick one to reuse it")
+        self.prompt_history_combo.currentIndexChanged.connect(
+            self._on_prompt_history_picked)
+        form.addWidget(self.prompt_history_combo)
+
         form.addWidget(QLabel("Negative prompt"))
         self.prompt_negative_edit = QLineEdit()
         self.prompt_negative_edit.setText(DEFAULT_NEGATIVE)
@@ -1876,6 +1921,21 @@ class MainWindow(QMainWindow):
             "Things the picture should avoid")
         form.addWidget(self.prompt_negative_edit)
 
+        # Negative-prompt presets (task 20): picking one fills the
+        # field; typing by hand reads as "Custom". "Default" is
+        # selected because the field already holds the default
+        # text — the combo mirrors the field, it does not choose
+        # for the user.
+        self.prompt_negative_preset_combo = QComboBox()
+        for name in NEGATIVE_PRESETS:
+            self.prompt_negative_preset_combo.addItem(name, name)
+        self.prompt_negative_preset_combo.addItem("Custom", None)
+        self.prompt_negative_preset_combo.currentIndexChanged.connect(
+            self._on_negative_preset_picked)
+        form.addWidget(self.prompt_negative_preset_combo)
+        self.prompt_negative_edit.textChanged.connect(
+            self._on_negative_text_changed)
+
         self.prompt_generate_btn = QPushButton("Generate")
         self.prompt_generate_btn.setObjectName("export")
         self.prompt_generate_btn.clicked.connect(
@@ -1887,14 +1947,88 @@ class MainWindow(QMainWindow):
         self.prompt_cancel_btn.clicked.connect(self._on_prompt_cancel)
         form.addWidget(self.prompt_cancel_btn)
 
+        # Iteration (task 20): re-roll one candidate, or a new
+        # batch seeded from the keeper. Both start disabled —
+        # there is nothing to re-roll or imitate yet.
+        self.prompt_regen_one_btn = QPushButton("Regenerate one")
+        self.prompt_regen_one_btn.setEnabled(False)
+        self.prompt_regen_one_btn.clicked.connect(
+            self._on_prompt_regenerate_one)
+        form.addWidget(self.prompt_regen_one_btn)
+
+        self.prompt_more_like_btn = QPushButton("More like this one")
+        self.prompt_more_like_btn.setEnabled(False)
+        self.prompt_more_like_btn.clicked.connect(
+            self._on_prompt_more_like)
+        form.addWidget(self.prompt_more_like_btn)
+
         self.prompt_progress = QProgressBar()
         self.prompt_progress.setRange(0, DEFAULT_COUNT)
         self.prompt_progress.setValue(0)
+        self.prompt_progress.setFormat("%v of %m candidates")
         form.addWidget(self.prompt_progress)
 
         self.prompt_status_label = QLabel("Checking the image engine…")
         self.prompt_status_label.setWordWrap(True)
         form.addWidget(self.prompt_status_label)
+
+        # Generation settings (task 20): the LCM pins are the
+        # defaults — these let the user change them. This is the
+        # GENERATED picture's size; the "Size" section below is
+        # the pixelized sprite's size.
+        form.addWidget(self._section("Generation"))
+        steps_row = QHBoxLayout()
+        steps_row.addWidget(QLabel("Steps"))
+        self.prompt_steps_spin = QSpinBox()
+        self.prompt_steps_spin.setRange(1, 50)
+        self.prompt_steps_spin.setValue(LCM_STEPS)
+        self.prompt_steps_spin.setToolTip(
+            "Diffusion steps per candidate (LCM default: 4)")
+        steps_row.addWidget(self.prompt_steps_spin)
+        form.addLayout(steps_row)
+
+        cfg_row = QHBoxLayout()
+        cfg_row.addWidget(QLabel("CFG scale"))
+        self.prompt_cfg_spin = QDoubleSpinBox()
+        self.prompt_cfg_spin.setRange(0.1, 20.0)
+        self.prompt_cfg_spin.setSingleStep(0.5)
+        self.prompt_cfg_spin.setDecimals(1)
+        self.prompt_cfg_spin.setValue(LCM_CFG)
+        self.prompt_cfg_spin.setToolTip(
+            "How closely the picture follows the prompt")
+        cfg_row.addWidget(self.prompt_cfg_spin)
+        form.addLayout(cfg_row)
+
+        gen_size_row = QHBoxLayout()
+        gen_size_row.addWidget(QLabel("Image size"))
+        self.prompt_gen_size_spin = QSpinBox()
+        self.prompt_gen_size_spin.setRange(64, 1024)
+        self.prompt_gen_size_spin.setSingleStep(64)
+        self.prompt_gen_size_spin.setValue(DEFAULT_SIZE)
+        self.prompt_gen_size_spin.setSuffix(" px")
+        self.prompt_gen_size_spin.setToolTip(
+            "Generated image size, square (LCM default: 512)")
+        gen_size_row.addWidget(self.prompt_gen_size_spin)
+        form.addLayout(gen_size_row)
+
+        # Past batches, most recent first (task 20) — click one
+        # to reopen its candidates and keeper. The list is capped
+        # at 120 px so the Size section below stays reachable.
+        form.addWidget(self._section("History"))
+        self.prompt_history_list = QListWidget()
+        self.prompt_history_list.setFixedHeight(120)
+        # Items wrap: "prompt — 3 candidate(s), timestamp" is
+        # wider than the 230 px column, and a horizontal scrollbar
+        # hid the timestamp — the part that tells two batches with
+        # the same prompt apart.
+        self.prompt_history_list.setWordWrap(True)
+        self.prompt_history_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.prompt_history_list.setToolTip(
+            "Past generations — click one to reopen it")
+        self.prompt_history_list.itemClicked.connect(
+            self._on_prompt_history_clicked)
+        form.addWidget(self.prompt_history_list)
 
         form.addWidget(self._section("Size"))
         self.prompt_size_combo = QComboBox()
@@ -2008,6 +2142,11 @@ class MainWindow(QMainWindow):
         keeper_scroll.setWidgetResizable(True)
         keeper_scroll.setWidget(self.prompt_before_label)
         keeper_layout.addWidget(keeper_scroll)
+        # The keeper's seed (task 20): the number that reproduces
+        # this exact picture. Hidden until there is a keeper.
+        self.prompt_seed_label = QLabel("")
+        self.prompt_seed_label.setVisible(False)
+        keeper_layout.addWidget(self.prompt_seed_label)
         previews.addWidget(keeper_pane)
 
         pixel_pane = QWidget()
@@ -2111,6 +2250,70 @@ class MainWindow(QMainWindow):
         return (self.prompt_worker is not None
                 and self.prompt_worker.isRunning())
 
+    def _confirm_replace_batch(self):
+        """The v0.22 Re-Generate confirm, shared by Generate and
+        "More like this one": candidates in the tab mean there is
+        something to lose from the tab, so confirm first — default
+        No, declining leaves the batch untouched. The batch itself
+        is no longer destroyed — it stays in History — so the
+        dialog says replaced, not discarded. True when there is
+        nothing to lose, or the user accepts."""
+        if not self.prompt_candidates:
+            return True
+        count = len(self.prompt_candidates)
+        if self.prompt_keeper is not None:
+            lost = ("%d candidate(s) (including your keeper)"
+                    % count)
+        else:
+            lost = "%d candidate(s)" % count
+        answer = QMessageBox.question(
+            self, "Pixel Forge",
+            "Generate a new batch? The current %s will be replaced "
+            "in this tab — the batch stays in History." % lost,
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _reset_prompt_tab_for_run(self, bdir):
+        """Fresh-batch tab state before a worker starts."""
+        self.prompt_batch_dir = bdir
+        self.prompt_candidates = []
+        self.prompt_keeper = None
+        self.prompt_keeper_image = None
+        self.prompt_result_image = None
+        self.prompt_strip.clear()
+        self.prompt_export_btn.setEnabled(False)
+        self.prompt_save_library_btn.setEnabled(False)
+        self.prompt_info_label.setText("Generating…")
+        self._update_prompt_seed_label()
+        self.statusBar().showMessage(
+            "Generating 3 candidates — this takes a few minutes on "
+            "CPU. The window stays usable.")
+
+    def _start_prompt_worker(self, batch_dir, mode="generate",
+                             target=None, total=DEFAULT_COUNT):
+        """Wire a PromptWorker up and start it, with the buttons
+        and the elapsed-time clock in the running state."""
+        self.prompt_progress.setRange(0, total)
+        self.prompt_progress.setValue(0)
+        self.prompt_progress.setFormat("Generating… %v of %m — 0:00")
+        self.prompt_generate_btn.setEnabled(False)
+        self.prompt_regen_one_btn.setEnabled(False)
+        self.prompt_more_like_btn.setEnabled(False)
+        self.prompt_cancel_btn.setEnabled(True)
+        self._prompt_started = time.monotonic()
+        self._prompt_elapsed_timer.start()
+        self.prompt_worker = PromptWorker(
+            batch_dir, parent=self, mode=mode, target=target)
+        self.prompt_worker.progress.connect(
+            self._on_prompt_progress)
+        self.prompt_worker.done.connect(self._on_prompt_done)
+        self.prompt_worker.failed.connect(self._on_prompt_failed)
+        self.prompt_worker.cancelled.connect(
+            self._on_prompt_cancelled)
+        self.prompt_worker.start()
+
     def _on_prompt_generate(self):
         if self._prompt_generating():
             return
@@ -2122,60 +2325,29 @@ class MainWindow(QMainWindow):
         except PixelForgeError as exc:
             QMessageBox.warning(self, "Pixel Forge", str(exc))
             return
-        if self.prompt_candidates:
-            # B6: Re-Generate used to silently destroy the previous
-            # batch, keeper included. Candidates exist means there
-            # is something to lose, so confirm first — declining
-            # leaves the batch untouched.
-            count = len(self.prompt_candidates)
-            if self.prompt_keeper is not None:
-                lost = ("%d candidate(s) (including your keeper)"
-                        % count)
-            else:
-                lost = "%d candidate(s)" % count
-            answer = QMessageBox.question(
-                self, "Pixel Forge",
-                "Generate a new batch? The current %s will be "
-                "discarded." % lost,
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No)
-            if answer != QMessageBox.StandardButton.Yes:
-                return
+        if not self._confirm_replace_batch():
+            return
         self._cleanup_prompt_batch()
-        tmp = tempfile.mkdtemp(prefix="pixel-forge-prompt-")
         try:
+            # Batches live in a stable home under the library
+            # folder now (task 20), so the generation history can
+            # point at them across sessions — they used to live in
+            # a temp dir the next generation deleted.
+            home = batches_dir(self.library.directory)
+            home.mkdir(parents=True, exist_ok=True)
             _batch, bdir = new_batch(
-                tmp, prompt,
+                home, prompt,
                 negative=self.prompt_negative_edit.text().strip()
-                or DEFAULT_NEGATIVE)
+                or DEFAULT_NEGATIVE,
+                steps=self.prompt_steps_spin.value(),
+                cfg=self.prompt_cfg_spin.value(),
+                size=self.prompt_gen_size_spin.value())
         except PixelForgeError as exc:
-            shutil.rmtree(tmp, ignore_errors=True)
             QMessageBox.warning(self, "Pixel Forge", str(exc))
             return
-        self.prompt_batch_dir = bdir
-        self.prompt_candidates = []
-        self.prompt_keeper = None
-        self.prompt_keeper_image = None
-        self.prompt_result_image = None
-        self.prompt_strip.clear()
-        self.prompt_export_btn.setEnabled(False)
-        self.prompt_save_library_btn.setEnabled(False)
-        self.prompt_info_label.setText("Generating…")
-        self.prompt_progress.setValue(0)
-        self.prompt_generate_btn.setEnabled(False)
-        self.prompt_cancel_btn.setEnabled(True)
-        self.statusBar().showMessage(
-            "Generating 3 candidates — this takes a few minutes on "
-            "CPU. The window stays usable.")
-        self.prompt_worker = PromptWorker(bdir, parent=self)
-        self.prompt_worker.progress.connect(
-            self._on_prompt_progress)
-        self.prompt_worker.done.connect(self._on_prompt_done)
-        self.prompt_worker.failed.connect(self._on_prompt_failed)
-        self.prompt_worker.cancelled.connect(
-            self._on_prompt_cancelled)
-        self.prompt_worker.start()
+        self._record_prompt_text(prompt)
+        self._reset_prompt_tab_for_run(bdir)
+        self._start_prompt_worker(bdir)
 
     def _on_prompt_cancel(self):
         if self.prompt_worker is not None:
@@ -2183,6 +2355,25 @@ class MainWindow(QMainWindow):
             self.prompt_cancel_btn.setEnabled(False)
             self.statusBar().showMessage(
                 "Cancelling — stopping the engine…")
+
+    def _prompt_elapsed_text(self):
+        """Elapsed generation time as M:SS (0:00 before start)."""
+        if self._prompt_started is None:
+            return "0:00"
+        seconds = int(time.monotonic() - self._prompt_started)
+        return "%d:%02d" % (seconds // 60, seconds % 60)
+
+    def _on_prompt_elapsed_tick(self):
+        # Once a second while generating: the progress bar's text
+        # carries the elapsed time, so a minutes-long CPU run
+        # shows it is still working.
+        if self._prompt_generating():
+            # %v / %m are Qt placeholders — they must reach Qt
+            # literally, so the elapsed time is concatenated, not
+            # %-formatted (Python's % chokes on %v).
+            self.prompt_progress.setFormat(
+                "Generating… %v of %m — "
+                + self._prompt_elapsed_text())
 
     def _on_prompt_progress(self, done, total, record):
         # A queued signal from a previous worker can arrive after
@@ -2192,8 +2383,17 @@ class MainWindow(QMainWindow):
                 or self.prompt_batch_dir is None):
             return
         self.prompt_progress.setValue(done)
+        self.prompt_progress.setFormat(
+            "Generating… %v of %m — "
+            + self._prompt_elapsed_text())
+        if self.sender().mode == "regenerate":
+            # A re-roll replaces a candidate the strip already
+            # shows — appending would duplicate it. The done
+            # handler reloads the batch.
+            return
         self.statusBar().showMessage(
-            "Generated %d of %d candidates" % (done, total))
+            "Generated %d of %d candidates — %s"
+            % (done, total, self._prompt_elapsed_text()))
         if record["status"] == "pending":
             self.prompt_candidates.append(record)
             self._rebuild_prompt_strip()
@@ -2203,22 +2403,31 @@ class MainWindow(QMainWindow):
         if (self.sender() is not self.prompt_worker
                 or self.prompt_batch_dir is None):
             return
+        self._prompt_elapsed_timer.stop()
+        took = self._prompt_elapsed_text()
+        self.prompt_progress.setFormat("%v of %m candidates")
+        self.prompt_generate_btn.setEnabled(True)
+        self.prompt_cancel_btn.setEnabled(False)
+        if self.sender().mode == "regenerate":
+            self._on_prompt_rerolled(batch, took,
+                                     self.sender().target)
+            return
         self.prompt_candidates = [
             c for c in batch["candidates"]
             if c["status"] in ("pending", "kept")]
-        self.prompt_generate_btn.setEnabled(True)
-        self.prompt_cancel_btn.setEnabled(False)
         self.prompt_progress.setValue(len(batch["candidates"]))
         self._rebuild_prompt_strip()
         failed = [c for c in batch["candidates"]
                   if c["status"] == "failed"]
         if self.prompt_candidates:
             self._pick_prompt_keeper(self.prompt_candidates[0]["file"])
-            message = "%d candidate(s) ready — click one to keep it" % (
-                len(self.prompt_candidates))
+            message = ("%d candidate(s) ready — click one to keep "
+                       "it (took %s)"
+                       % (len(self.prompt_candidates), took))
             if failed:
                 message += " (%d failed)" % len(failed)
             self.statusBar().showMessage(message)
+            self._record_current_batch()
         else:
             self.prompt_info_label.setText("No candidates generated")
             detail = failed[0].get("error", "") if failed else ""
@@ -2227,22 +2436,43 @@ class MainWindow(QMainWindow):
                 "all %d candidates failed%s"
                 % (len(failed), (" — " + detail) if detail else ""))
             self.statusBar().showMessage("Generation failed")
+        self._update_prompt_iter_buttons()
+
+    def _on_prompt_rerolled(self, batch, took, target):
+        """A re-roll landed: refresh the candidates from the batch
+        and keep the keeper — re-picking it reloads the new
+        picture when the keeper was the one re-rolled."""
+        self.prompt_progress.setValue(1)
+        self.prompt_candidates = [
+            c for c in batch["candidates"]
+            if c["status"] in ("pending", "kept")]
+        self._rebuild_prompt_strip()
+        if self.prompt_keeper is not None:
+            self._pick_prompt_keeper(self.prompt_keeper)
+        self.statusBar().showMessage(
+            "Regenerated %s (took %s)" % (target or "candidate", took))
+        self._update_prompt_iter_buttons()
 
     def _on_prompt_failed(self, message):
         # See _on_prompt_progress: only the current worker counts.
         if (self.sender() is not self.prompt_worker
                 or self.prompt_batch_dir is None):
             return
+        self._prompt_elapsed_timer.stop()
+        self.prompt_progress.setFormat("%v of %m candidates")
         self.prompt_generate_btn.setEnabled(True)
         self.prompt_cancel_btn.setEnabled(False)
         QMessageBox.warning(self, "Pixel Forge", message)
         self.statusBar().showMessage("Generation failed")
+        self._update_prompt_iter_buttons()
 
     def _on_prompt_cancelled(self):
         # See _on_prompt_progress: only the current worker counts.
         if (self.sender() is not self.prompt_worker
                 or self.prompt_batch_dir is None):
             return
+        self._prompt_elapsed_timer.stop()
+        self.prompt_progress.setFormat("%v of %m candidates")
         self.prompt_generate_btn.setEnabled(True)
         self.prompt_cancel_btn.setEnabled(False)
         if self.prompt_batch_dir is not None:
@@ -2256,29 +2486,43 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Pixel Forge", str(exc))
                 self.statusBar().showMessage(
                     "Cancelled — the batch record could not be read")
+                self._update_prompt_iter_buttons()
                 return
             self.prompt_candidates = [
                 c for c in batch["candidates"]
                 if c["status"] in ("pending", "kept")]
             self._rebuild_prompt_strip()
             if self.prompt_candidates:
-                self._pick_prompt_keeper(
-                    self.prompt_candidates[0]["file"])
+                # A cancelled re-roll keeps the old keeper; a
+                # cancelled batch picks the first candidate.
+                if (self.sender().mode == "regenerate"
+                        and self.prompt_keeper is not None):
+                    self._pick_prompt_keeper(self.prompt_keeper)
+                else:
+                    self._pick_prompt_keeper(
+                        self.prompt_candidates[0]["file"])
+                self._record_current_batch()
         self.statusBar().showMessage(
             "Cancelled — %d candidate(s) kept"
             % len(self.prompt_candidates))
+        self._update_prompt_iter_buttons()
 
     def _cleanup_prompt_batch(self):
+        # Detach from the current batch: stop the worker and clear
+        # the tab's state. The batch dir itself stays — batches
+        # live in the library's batches folder now, and the
+        # generation history points at them (task 20). Nothing is
+        # deleted here; the v0.22 confirm guards the tab, not the
+        # files.
         self._stop_prompt_worker()
-        if self.prompt_batch_dir is not None:
-            # The batch dir sits inside its own temp parent.
-            shutil.rmtree(self.prompt_batch_dir.parent,
-                          ignore_errors=True)
-            self.prompt_batch_dir = None
+        self._prompt_elapsed_timer.stop()
+        self.prompt_batch_dir = None
         self.prompt_candidates = []
         self.prompt_keeper = None
         self.prompt_keeper_image = None
         self.prompt_result_image = None
+        self.prompt_strip.clear()
+        self._update_prompt_seed_label()
 
     def _stop_prompt_worker(self):
         if self.prompt_worker is not None:
@@ -2286,6 +2530,293 @@ class MainWindow(QMainWindow):
                 self.prompt_worker.cancel()
                 self.prompt_worker.wait(10000)
             self.prompt_worker = None
+
+    # ------------------------------------------------------ iteration
+
+    def _update_prompt_iter_buttons(self):
+        """Regenerate-one needs candidates; More-like-this needs
+        a keeper; neither runs while a generation is in flight."""
+        generating = self._prompt_generating()
+        self.prompt_regen_one_btn.setEnabled(
+            bool(self.prompt_candidates) and not generating)
+        self.prompt_more_like_btn.setEnabled(
+            self.prompt_keeper is not None and not generating)
+
+    def _update_prompt_seed_label(self):
+        """Show the keeper's seed, or hide the label with no
+        keeper. The seed is the number that reproduces this
+        exact picture."""
+        record = None
+        if self.prompt_keeper is not None:
+            record = next((c for c in self.prompt_candidates
+                           if c["file"] == self.prompt_keeper), None)
+        if record is None:
+            self.prompt_seed_label.setText("")
+            self.prompt_seed_label.setVisible(False)
+            return
+        self.prompt_seed_label.setText("Seed: %d" % record["seed"])
+        self.prompt_seed_label.setVisible(True)
+
+    def _on_prompt_regenerate_one(self):
+        """Re-roll ONE candidate: the one selected in the strip,
+        or the keeper when nothing is selected. The other
+        candidates stay, and a keeper that was not re-rolled
+        stays the keeper."""
+        if self._prompt_generating() or self.prompt_batch_dir is None:
+            return
+        target = None
+        current = self.prompt_strip.currentItem()
+        if current is not None:
+            target = current.data(Qt.ItemDataRole.UserRole)
+        if target is None:
+            target = self.prompt_keeper
+        if target is None:
+            return
+        self.prompt_info_label.setText("Regenerating %s…" % target)
+        self.statusBar().showMessage("Regenerating %s…" % target)
+        self._start_prompt_worker(
+            self.prompt_batch_dir, mode="regenerate", target=target,
+            total=1)
+
+    def _on_prompt_more_like(self):
+        """A NEW batch seeded from the keeper: the same prompt and
+        negative prompt, seeds keeper+1, +2, +3. Goes through the
+        same Re-Generate confirm as Generate — the current batch
+        leaves the tab (it stays in History)."""
+        if self._prompt_generating() or self.prompt_batch_dir is None:
+            return
+        keeper_seed = None
+        for record in self.prompt_candidates:
+            if record["file"] == self.prompt_keeper:
+                keeper_seed = record["seed"]
+                break
+        if keeper_seed is None:
+            return
+        try:
+            batch = load_batch(self.prompt_batch_dir)
+        except PixelForgeError as exc:
+            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            return
+        if not self._confirm_replace_batch():
+            return
+        self._cleanup_prompt_batch()
+        try:
+            home = batches_dir(self.library.directory)
+            home.mkdir(parents=True, exist_ok=True)
+            _batch, bdir = new_batch(
+                home, batch["prompt"],
+                negative=batch.get("negative", DEFAULT_NEGATIVE),
+                steps=int(batch.get("steps", LCM_STEPS)),
+                cfg=float(batch.get("cfg", LCM_CFG)),
+                size=int(batch.get("size", DEFAULT_SIZE)),
+                seeds=[keeper_seed + 1, keeper_seed + 2,
+                       keeper_seed + 3])
+        except PixelForgeError as exc:
+            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            return
+        # The tab shows the batch it is generating from, not
+        # whatever the user typed since.
+        self.prompt_edit.setText(batch["prompt"])
+        self.prompt_negative_edit.setText(
+            batch.get("negative", DEFAULT_NEGATIVE))
+        self.prompt_negative_edit.setCursorPosition(0)
+        self.prompt_steps_spin.setValue(
+            int(batch.get("steps", LCM_STEPS)))
+        self.prompt_cfg_spin.setValue(
+            float(batch.get("cfg", LCM_CFG)))
+        self.prompt_gen_size_spin.setValue(
+            int(batch.get("size", DEFAULT_SIZE)))
+        self._record_prompt_text(batch["prompt"])
+        self._reset_prompt_tab_for_run(bdir)
+        self._start_prompt_worker(bdir)
+
+    # -------------------------------------------------------- history
+
+    def _load_prompt_history(self):
+        """Load the prompt history from the library folder and
+        fill the prompt-history combo and the batch list. A
+        corrupt file reads as empty and warns once in the status
+        bar — startup never breaks on it, and the file is left
+        alone (not deleted, not "repaired")."""
+        (self._prompt_history,
+         self._prompt_history_corrupt) = load_history(
+            self.library.directory)
+        self._refresh_prompt_history_combo()
+        self._refresh_prompt_history_list()
+        if self._prompt_history_corrupt:
+            self.statusBar().showMessage(
+                "The prompt history file is unreadable — starting "
+                "with an empty history (the file was left alone)")
+
+    def _save_prompt_history(self):
+        """Write the history back. A failure shows in the status
+        bar and never breaks the generation it rode along with."""
+        if self._prompt_history is None:
+            return
+        try:
+            save_history(self.library.directory,
+                         self._prompt_history)
+        except PixelForgeError as exc:
+            self.statusBar().showMessage(str(exc))
+
+    def _record_prompt_text(self, prompt):
+        if self._prompt_history is None:
+            return
+        record_prompt(self._prompt_history, prompt)
+        self._save_prompt_history()
+        self._refresh_prompt_history_combo()
+
+    def _record_current_batch(self):
+        """Record the current batch in the generation history —
+        prompt, negative, seeds, keeper, timestamp, batch dir —
+        and refresh the list. A batch with no usable candidates
+        is not recorded."""
+        if (self.prompt_batch_dir is None
+                or self._prompt_history is None):
+            return
+        try:
+            batch = load_batch(self.prompt_batch_dir)
+        except PixelForgeError:
+            return
+        landed = [c for c in batch["candidates"]
+                  if c["status"] in ("pending", "kept")]
+        if not landed:
+            return
+        record_batch(self._prompt_history, {
+            "prompt": batch["prompt"],
+            "negative": batch.get("negative", ""),
+            "seeds": [c["seed"] for c in landed],
+            "keeper": batch.get("keeper"),
+            "created": batch.get("created", ""),
+            "dir": str(self.prompt_batch_dir),
+            "steps": batch.get("steps", LCM_STEPS),
+            "cfg": batch.get("cfg", LCM_CFG),
+            "size": batch.get("size", DEFAULT_SIZE),
+        })
+        self._save_prompt_history()
+        self._refresh_prompt_history_list()
+
+    def _refresh_prompt_history_combo(self):
+        combo = self.prompt_history_combo
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            for prompt in self._prompt_history["prompts"]:
+                combo.addItem(prompt, prompt)
+            combo.setCurrentIndex(-1)
+        finally:
+            combo.blockSignals(False)
+
+    def _on_prompt_history_picked(self, index):
+        if index < 0:
+            return
+        text = self.prompt_history_combo.itemData(index)
+        if text:
+            self.prompt_edit.setText(text)
+        combo = self.prompt_history_combo
+        combo.blockSignals(True)
+        combo.setCurrentIndex(-1)
+        combo.blockSignals(False)
+
+    def _refresh_prompt_history_list(self):
+        self.prompt_history_list.blockSignals(True)
+        try:
+            self.prompt_history_list.clear()
+            for index, entry in enumerate(
+                    self._prompt_history["batches"]):
+                label = "%s — %d candidate(s), %s" % (
+                    entry["prompt"], len(entry.get("seeds", [])),
+                    entry.get("created", ""))
+                if not Path(entry["dir"]).is_dir():
+                    label += " (batch folder missing)"
+                item = QListWidgetItem(label)
+                item.setData(Qt.ItemDataRole.UserRole, index)
+                self.prompt_history_list.addItem(item)
+        finally:
+            self.prompt_history_list.blockSignals(False)
+
+    def _on_prompt_history_clicked(self, item):
+        """Reopen a past batch: its candidates and keeper come
+        back into the tab, with the prompt, negative prompt, and
+        generation settings it was made with. The current batch
+        is already in History, so nothing is lost and no confirm
+        is needed. A batch whose folder is gone — or whose
+        record cannot be read — warns and leaves the tab alone."""
+        index = item.data(Qt.ItemDataRole.UserRole)
+        if index is None:
+            return
+        entries = self._prompt_history["batches"]
+        if index >= len(entries):
+            return
+        entry = entries[index]
+        bdir = Path(entry["dir"])
+        if not bdir.is_dir():
+            QMessageBox.warning(
+                self, "Pixel Forge",
+                "that batch's folder is gone: %s" % bdir)
+            return
+        if self._prompt_generating():
+            self.statusBar().showMessage(
+                "Wait for the current generation to finish, then "
+                "reopen the batch.")
+            return
+        try:
+            batch = load_batch(bdir)
+        except PixelForgeError as exc:
+            QMessageBox.warning(self, "Pixel Forge", str(exc))
+            return
+        landed = [c for c in batch["candidates"]
+                  if c["status"] in ("pending", "kept")]
+        if not landed:
+            QMessageBox.warning(
+                self, "Pixel Forge",
+                "that batch has no usable candidates left")
+            return
+        self._cleanup_prompt_batch()
+        self.prompt_batch_dir = bdir
+        self.prompt_candidates = landed
+        self.prompt_edit.setText(batch["prompt"])
+        self.prompt_negative_edit.setText(
+            batch.get("negative", DEFAULT_NEGATIVE))
+        self.prompt_negative_edit.setCursorPosition(0)
+        self.prompt_steps_spin.setValue(
+            int(batch.get("steps", LCM_STEPS)))
+        self.prompt_cfg_spin.setValue(
+            float(batch.get("cfg", LCM_CFG)))
+        self.prompt_gen_size_spin.setValue(
+            int(batch.get("size", DEFAULT_SIZE)))
+        self._rebuild_prompt_strip()
+        keeper = batch.get("keeper")
+        if keeper is not None and any(c["file"] == keeper
+                                      for c in landed):
+            self._pick_prompt_keeper(keeper)
+        else:
+            self._pick_prompt_keeper(landed[0]["file"])
+        self._update_prompt_iter_buttons()
+        self.statusBar().showMessage(
+            "Reopened batch from History: %s" % batch["prompt"])
+
+    def _on_negative_preset_picked(self, index):
+        name = self.prompt_negative_preset_combo.itemData(index)
+        if name is None:
+            return  # "Custom" — the field already holds the text
+        text = NEGATIVE_PRESETS[name]
+        if self.prompt_negative_edit.text() != text:
+            self.prompt_negative_edit.setText(text)
+            self.prompt_negative_edit.setCursorPosition(0)
+
+    def _on_negative_text_changed(self, text):
+        """Mirror the field in the preset combo: a preset's exact
+        text selects it, anything else reads as Custom."""
+        combo = self.prompt_negative_preset_combo
+        match = next((name for name, preset in NEGATIVE_PRESETS.items()
+                      if preset == text), None)
+        index = combo.findText(match if match is not None
+                               else "Custom")
+        if index >= 0 and combo.currentIndex() != index:
+            combo.blockSignals(True)
+            combo.setCurrentIndex(index)
+            combo.blockSignals(False)
 
     # ------------------------------------------------------ candidates
 
@@ -2314,6 +2845,7 @@ class MainWindow(QMainWindow):
                 self.prompt_strip.addItem(item)
         finally:
             self.prompt_strip.blockSignals(False)
+        self._update_prompt_iter_buttons()
 
     def _on_prompt_strip_clicked(self, item):
         filename = item.data(Qt.ItemDataRole.UserRole)
@@ -2332,6 +2864,7 @@ class MainWindow(QMainWindow):
         self.prompt_keeper = filename
         self.prompt_keeper_image = image
         self._rebuild_prompt_strip()
+        self._update_prompt_seed_label()
         self._update_prompt_preview()
 
     # -------------------------------------------------------- controls

@@ -62,6 +62,20 @@ DEFAULT_SIZE = 512
 LCM_STEPS = 4
 LCM_CFG = 1.5
 DEFAULT_NEGATIVE = "blurry, deformed, distorted, low quality, watermark"
+# Built-in negative-prompt presets (task 20): the Prompt tab's
+# preset combo is built from this dict, in order. "Default" is
+# the field's pre-filled text; the others add the terms for one
+# common complaint each. The user can still type anything —
+# a hand-edited field reads as "Custom" in the combo.
+NEGATIVE_PRESETS = {
+    "Default": DEFAULT_NEGATIVE,
+    "No text or watermark":
+        DEFAULT_NEGATIVE + ", text, letters, words, logo",
+    "Clean background":
+        DEFAULT_NEGATIVE + ", busy background, clutter, crowd",
+    "No people":
+        DEFAULT_NEGATIVE + ", person, people, human, face, hands",
+}
 PER_IMAGE_TIMEOUT_S = 1800
 MAX_PROMPT_LEN = 1000
 
@@ -322,16 +336,34 @@ def save_batch(batch_dir: str | Path, batch: dict) -> None:
 def new_batch(out_dir: str | Path, prompt: str,
               negative: str = DEFAULT_NEGATIVE,
               count: int = DEFAULT_COUNT,
-              size: int = DEFAULT_SIZE) -> tuple:
+              size: int = DEFAULT_SIZE,
+              steps: int = LCM_STEPS, cfg: float = LCM_CFG,
+              seeds=None) -> tuple:
     """Create the batch record; generation is a separate step.
 
     The batch lives in <out_dir>/<slug>-<HHMMSS>/ so a keeper stays
     reproducible: prompt, negative, seeds, engine, and model are all
-    in batch.json next to the pictures.
+    in batch.json next to the pictures. steps/cfg/size are the
+    generation settings for this batch (task 20) — the LCM pins
+    are the defaults, and the Prompt tab / CLI can change them.
+    seeds, when given, is the exact seed list the round uses, in
+    order — "more like this one" passes keeper seed +1, +2, +3;
+    a short list falls back to fresh random seeds.
     """
     prompt = validate_prompt(prompt)
     if count < 1:
         raise PixelForgeError("count must be at least 1")
+    if steps < 1:
+        raise PixelForgeError("steps must be at least 1")
+    if cfg <= 0:
+        raise PixelForgeError("cfg scale must be above 0")
+    if size < 1:
+        raise PixelForgeError("size must be at least 1")
+    seed_plan = None
+    if seeds is not None:
+        seed_plan = [int(s) for s in seeds]
+        if any(s < 0 for s in seed_plan):
+            raise PixelForgeError("seeds must not be negative")
     slug = slugify(prompt) + "-" + time.strftime("%H%M%S")
     parent = Path(out_dir)
     bdir = parent / slug
@@ -346,8 +378,9 @@ def new_batch(out_dir: str | Path, prompt: str,
         "negative": negative,
         "count_per_round": count,
         "size": size,
-        "steps": LCM_STEPS,
-        "cfg": LCM_CFG,
+        "steps": steps,
+        "cfg": cfg,
+        "seed_plan": seed_plan,
         "created": _stamp(),
         "engine": None,
         "model": None,
@@ -368,7 +401,11 @@ def set_keeper(batch_dir: str | Path, filename: str) -> dict:
     if record is None:
         raise PixelForgeError(
             "no candidate %r in this batch" % filename)
-    if record["status"] != "pending":
+    # "kept" is accepted too: re-picking the current keeper is a
+    # no-op, and the GUI does exactly that when it reopens a batch
+    # or re-rolls the keeper (task 20) — refusing here left the
+    # tab with no keeper and a stale seed label.
+    if record["status"] not in ("pending", "kept"):
         raise PixelForgeError(
             "candidate %r did not generate (%s)"
             % (filename, record["status"]))
@@ -391,12 +428,15 @@ def _fresh_seed(batch: dict, rng: random.Random) -> int:
 
 # ---------------------------------------------------------------- generation
 
-def build_command(engine, model, prompt, negative, seed, size, out):
+def build_command(engine, model, prompt, negative, seed, size, out,
+                  steps=LCM_STEPS, cfg=LCM_CFG):
     """The exact sd-cli invocation for one candidate. Kept separate
-    so tests can check the command without running the engine."""
+    so tests can check the command without running the engine.
+    steps/cfg default to the LCM pins — the batch's own values
+    when the user changed them (task 20)."""
     return [str(engine), "-m", str(model),
             "-p", prompt, "-n", negative,
-            "--steps", str(LCM_STEPS), "--cfg-scale", str(LCM_CFG),
+            "--steps", str(steps), "--cfg-scale", str(cfg),
             "--sampling-method", "lcm",
             "-W", str(size), "-H", str(size),
             "-s", str(seed), "-o", str(out)]
@@ -468,18 +508,33 @@ def generate(batch_dir: str | Path, count: int | None = None,
     n = count if count is not None else int(
         batch.get("count_per_round", DEFAULT_COUNT))
     size = int(batch.get("size", DEFAULT_SIZE))
+    steps = int(batch.get("steps", LCM_STEPS))
+    cfg = float(batch.get("cfg", LCM_CFG))
+    # A seed plan (from "more like this one") is consumed in
+    # order; a plan seed already used by a landed candidate is
+    # skipped so two candidates never share a seed, and a short
+    # plan falls back to fresh random seeds.
+    plan = list(batch.get("seed_plan") or [])
     rng = random.Random()
     try:
         for done in range(n):
             if cancel_event is not None and cancel_event.is_set():
                 raise GenerationCancelled()
-            seed = _fresh_seed(batch, rng)
+            seed = None
+            while plan:
+                planned = plan.pop(0)
+                if planned not in {c["seed"]
+                                  for c in batch["candidates"]}:
+                    seed = planned
+                    break
+            if seed is None:
+                seed = _fresh_seed(batch, rng)
             index = len(batch["candidates"]) + 1
             fname = "cand-%02d.png" % index
             out = Path(batch_dir) / fname
             cmd = build_command(engine, model, batch["prompt"],
                                 batch.get("negative", ""), seed,
-                                size, out)
+                                size, out, steps=steps, cfg=cfg)
             record = {"file": fname, "seed": seed, "status": "pending"}
             ok, error = _run_one(cmd, out, timeout_s, cancel_event)
             if not ok:
@@ -494,6 +549,58 @@ def generate(batch_dir: str | Path, count: int | None = None,
         save_batch(batch_dir, batch)
         raise
     return batch
+
+
+def regenerate_candidate(batch_dir: str | Path, filename: str,
+                         timeout_s: int = PER_IMAGE_TIMEOUT_S,
+                         cancel_event=None) -> dict:
+    """Re-roll ONE candidate with a fresh seed (task 20).
+
+    The new picture is generated into a temp file first and only
+    replaces the old one on success — a failed or cancelled
+    re-roll leaves the original candidate untouched, seed and
+    all. The record keeps its file name and its status (a
+    re-rolled keeper stays the keeper); its seed is updated and
+    its pixel file is cleared, since the old pixel version is
+    for a picture that no longer exists. Returns the updated
+    record. Raises PixelForgeError for a missing candidate or a
+    failed run, GenerationCancelled on cancel.
+    """
+    batch = load_batch(batch_dir)
+    record = next((c for c in batch["candidates"]
+                   if c["file"] == filename), None)
+    if record is None:
+        raise PixelForgeError(
+            "no candidate %r in this batch" % filename)
+    if record["status"] not in ("pending", "kept"):
+        raise PixelForgeError(
+            "candidate %r did not generate (%s)"
+            % (filename, record["status"]))
+    engine = require_engine()
+    model = require_model()
+    size = int(batch.get("size", DEFAULT_SIZE))
+    steps = int(batch.get("steps", LCM_STEPS))
+    cfg = float(batch.get("cfg", LCM_CFG))
+    seed = _fresh_seed(batch, random.Random())
+    out = Path(batch_dir) / filename
+    tmp = Path(batch_dir) / (filename + ".regen.tmp")
+    cmd = build_command(engine, model, batch["prompt"],
+                        batch.get("negative", ""), seed,
+                        size, tmp, steps=steps, cfg=cfg)
+    try:
+        ok, error = _run_one(cmd, tmp, timeout_s, cancel_event)
+    except GenerationCancelled:
+        tmp.unlink(missing_ok=True)
+        raise
+    if not ok:
+        tmp.unlink(missing_ok=True)
+        raise PixelForgeError(
+            "re-rolling %s failed — %s" % (filename, error))
+    os.replace(tmp, out)
+    record["seed"] = seed
+    record.pop("pixel_file", None)
+    save_batch(batch_dir, batch)
+    return record
 
 
 def pixelize_candidates(batch_dir: str | Path, width=32, height=None,
@@ -527,11 +634,15 @@ def prompt_to_sprites(prompt: str, out_dir: str | Path,
                       count: int = DEFAULT_COUNT,
                       width=32, height=None, keep_aspect=False,
                       palette="image", max_colors=16, dither=True,
+                      steps: int = LCM_STEPS, cfg: float = LCM_CFG,
+                      size: int = DEFAULT_SIZE,
                       progress=None) -> tuple:
     """Full CLI pipeline: prompt in, candidates + pixelized versions
-    out. Returns (batch, batch_dir)."""
+    out. Returns (batch, batch_dir). steps/cfg/size are the
+    generation settings (task 20) — the LCM pins by default."""
     _batch, bdir = new_batch(out_dir, prompt, negative=negative,
-                             count=count)
+                             count=count, size=size, steps=steps,
+                             cfg=cfg)
     batch = generate(bdir, progress=progress)
     landed = [c for c in batch["candidates"]
               if c["status"] == "pending"]

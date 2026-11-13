@@ -159,6 +159,43 @@ class CliTests(unittest.TestCase):
         self.assertIn("--negative", out)
         self.assertIn("--size", out)
         self.assertIn("--palette", out)
+        # Task 20: generation settings. --size is already the
+        # pixelize size, so the generated size is --gen-size.
+        self.assertIn("--steps", out)
+        self.assertIn("--cfg", out)
+        self.assertIn("--gen-size", out)
+
+    def test_prompt_generation_settings_reach_the_engine(self):
+        out_dir = os.path.join(self.tmp, "settings-out")
+        log = os.path.join(self.tmp, "settings-argv.log")
+        with stub_env(self.stub, self.model, {"STUB_LOG": log}):
+            code, _out, err = self._run(
+                ["prompt", "a knight", "--out", out_dir,
+                 "--steps", "8", "--cfg", "2.5", "--gen-size", "256",
+                 "--size", "32"])
+        self.assertEqual(code, 0, err)
+        lines = open(log).read().splitlines()
+        self.assertEqual(len(lines), 3)
+        for line in lines:
+            self.assertIn("--steps 8", line)
+            self.assertIn("--cfg-scale 2.5", line)
+            self.assertIn("-W 256 -H 256", line)
+        batches = [d for d in os.listdir(out_dir)
+                   if os.path.isdir(os.path.join(out_dir, d))]
+        batch = json.load(open(os.path.join(
+            out_dir, batches[0], "batch.json")))
+        self.assertEqual(batch["steps"], 8)
+        self.assertEqual(batch["cfg"], 2.5)
+        self.assertEqual(batch["size"], 256)
+
+    def test_prompt_bad_generation_settings_fail_cleanly(self):
+        cases = (["--steps", "0"], ["--cfg", "0"],
+                 ["--gen-size", "0"])
+        for flag in cases:
+            code, _out, err = self._run(
+                ["prompt", "a knight"] + flag)
+            self.assertEqual(code, 1, flag)
+            self.assertNotIn("Traceback", err)
 
     def test_prompt_happy_path(self):
         out_dir = os.path.join(self.tmp, "knight-out")

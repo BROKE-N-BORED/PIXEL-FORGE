@@ -73,12 +73,23 @@ bash uninstall.sh
 - **Prompt tab:** type what you want (and what to avoid), press
   Generate, and 3 candidates appear in the strip — each takes a
   few minutes on CPU, and the window stays usable while they
-  generate. Click a candidate to keep it, adjust the size, palette,
-  and dithering, and press Export PNG. The status line shows whether
-  the image engine and model are installed; if either is missing,
-  Generate says plainly what to install instead of faking anything.
-  Generating again replaces the previous candidates, so export your
-  keeper first.
+  generate (the progress bar shows the elapsed time). Click a
+  candidate to keep it, adjust the size, palette, and dithering,
+  and press Export PNG. The status line shows whether the image
+  engine and model are installed; if either is missing, Generate
+  says plainly what to install instead of faking anything.
+  Generating again asks first, and the previous batch stays in
+  History — past batches are listed under the Generation section
+  and click to reopen, with the keeper's seed shown under the
+  candidate preview. Regenerate one re-rolls a single candidate;
+  More like this one generates a new batch seeded from the keeper
+  (keeper seed +1, +2, +3). The Generation section sets the steps,
+  CFG scale, and generated image size (LCM defaults: 4 steps, cfg
+  1.5, 512 px); the Negative prompt has presets (Default, No text
+  or watermark, Clean background, No people) and the Prompt history
+  combo offers past prompts back. Batches live in
+  `~/pixel-forge-library/batches/` and the history in
+  `prompt-history.json` in the same folder.
 - **Code tab:** import a `.py`, `.js`, or `.ts` file (or a whole
   folder of them) and the pixel art the code defines is rebuilt as
   real sprites — pixel maps and palettes, parsed statically and
@@ -141,11 +152,16 @@ Options for `prompt` only:
 - `--negative` — things the picture should avoid (default: blurry,
   deformed, distorted, low quality, watermark).
 - `--count` — how many candidates to generate (default 3).
+- `--steps` — diffusion steps per candidate (default 4, the LCM pin).
+- `--cfg` — cfg scale, how closely the picture follows the prompt
+  (default 1.5, the LCM pin).
+- `--gen-size` — generated image size in pixels, square (default 512).
+  `--size` on this command is the pixelized output size, not this.
 - `--out` — output folder for the candidates, their pixelized
   versions (`cand-01-pixel.png`, ...), and `batch.json`, which
-  records the prompt, negative, and seeds so a keeper is
-  reproducible (default: `<prompt-slug>-prompt` in the current
-  folder).
+  records the prompt, negative, seeds, steps, cfg, and size so a
+  keeper is reproducible (default: `<prompt-slug>-prompt` in the
+  current folder).
 
 Options for `convert` (and the pixelize half of `frames` and
 `prompt`):

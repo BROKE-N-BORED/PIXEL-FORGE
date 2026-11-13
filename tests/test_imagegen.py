@@ -23,10 +23,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from helpers import stub_env, write_stub_engine  # noqa: E402
 from pixel_forge import imagegen  # noqa: E402
 from pixel_forge.imagegen import (DEFAULT_NEGATIVE,  # noqa: E402
-                                  ENGINE_RELEASE, ENGINE_REPO,
-                                  GenerationCancelled, MODEL_FILENAME,
-                                  MODEL_SHA256, MODEL_URL,
-                                  build_command, check_model_file,
+                                  DEFAULT_SIZE, ENGINE_RELEASE,
+                                  ENGINE_REPO, LCM_CFG, LCM_STEPS,
+                                  NEGATIVE_PRESETS, GenerationCancelled,
+                                  MODEL_FILENAME, MODEL_SHA256,
+                                  MODEL_URL, build_command,
+                                  check_model_file,
                                   engine_clone_command,
                                   engine_missing_text, engine_status,
                                   file_sha256, find_engine, find_model,
@@ -34,8 +36,8 @@ from pixel_forge.imagegen import (DEFAULT_NEGATIVE,  # noqa: E402
                                   model_download_command,
                                   model_missing_text, new_batch,
                                   pixelize_candidates, prompt_to_sprites,
-                                  save_batch, set_keeper, slugify,
-                                  validate_prompt)
+                                  regenerate_candidate, save_batch,
+                                  set_keeper, slugify, validate_prompt)
 from pixel_forge.pixelize import PixelForgeError, load_image  # noqa: E402
 
 # The QApplication must exist before the first load_image
@@ -259,6 +261,25 @@ class BatchTests(ImageGenBase):
         batch = set_keeper(bdir, "cand-01.png")
         self.assertEqual(batch["keeper"], "cand-01.png")
         self.assertEqual(batch["candidates"][1]["status"], "pending")
+
+    def test_set_keeper_on_already_kept_is_a_noop(self):
+        # Task 20: reopening a batch and re-rolling the keeper
+        # both re-pick the current keeper — that must succeed,
+        # not refuse with "did not generate".
+        bdir = self._batch()
+        batch = load_batch(bdir)
+        batch["candidates"] = [
+            {"file": "cand-01.png", "seed": 1, "status": "pending"},
+            {"file": "cand-02.png", "seed": 2, "status": "pending"},
+        ]
+        from pixel_forge.imagegen import save_batch
+        save_batch(bdir, batch)
+        set_keeper(bdir, "cand-02.png")
+        batch = set_keeper(bdir, "cand-02.png")
+        self.assertEqual(batch["keeper"], "cand-02.png")
+        kept = [c for c in batch["candidates"]
+                if c["status"] == "kept"]
+        self.assertEqual([c["file"] for c in kept], ["cand-02.png"])
 
     def test_set_keeper_unknown_or_failed_refuses(self):
         bdir = self._batch()
@@ -607,6 +628,167 @@ class GenerateTests(ImageGenBase):
             with self.assertRaises(PixelForgeError) as ctx:
                 prompt_to_sprites("a knight", out_dir)
         self.assertIn("all 3 candidates failed", str(ctx.exception))
+
+
+class PromptIterationTests(ImageGenBase):
+    """Task 20: steps/cfg/size threading, seed plans ("more like
+    this one"), and regenerate-one-candidate."""
+
+    def test_new_batch_records_generation_settings(self):
+        _batch, bdir = new_batch(self.work, "a knight", steps=8,
+                                 cfg=2.5, size=256)
+        record = load_batch(bdir)
+        self.assertEqual(record["steps"], 8)
+        self.assertEqual(record["cfg"], 2.5)
+        self.assertEqual(record["size"], 256)
+
+    def test_new_batch_defaults_are_the_lcm_pins(self):
+        _batch, bdir = new_batch(self.work, "a knight")
+        record = load_batch(bdir)
+        self.assertEqual(record["steps"], LCM_STEPS)
+        self.assertEqual(record["cfg"], LCM_CFG)
+        self.assertEqual(record["size"], DEFAULT_SIZE)
+        self.assertIsNone(record["seed_plan"])
+
+    def test_new_batch_rejects_bad_settings(self):
+        for kwargs in ({"steps": 0}, {"cfg": 0}, {"cfg": -1},
+                       {"size": 0}, {"seeds": [-1]}):
+            with self.assertRaises(PixelForgeError):
+                new_batch(self.work, "a knight", **kwargs)
+
+    def test_build_command_uses_given_steps_and_cfg(self):
+        cmd = build_command("/e/sd-cli", "/m/model.gguf", "a knight",
+                            "blurry", 42, 256, "/out/cand-01.png",
+                            steps=8, cfg=2.5)
+        self.assertEqual(cmd[cmd.index("--steps") + 1], "8")
+        self.assertEqual(cmd[cmd.index("--cfg-scale") + 1], "2.5")
+        self.assertEqual(cmd[cmd.index("-W") + 1], "256")
+        self.assertEqual(cmd[cmd.index("-H") + 1], "256")
+
+    def test_generate_uses_batch_settings_in_the_command(self):
+        bdir = self._batch(steps=8, cfg=2.5, size=256)
+        log = os.path.join(self.work, "argv.log")
+        with stub_env(self.stub, self.model, {"STUB_LOG": log}):
+            generate(bdir)
+        lines = Path(log).read_text().splitlines()
+        self.assertEqual(len(lines), 3)
+        for line in lines:
+            self.assertIn("--steps 8", line)
+            self.assertIn("--cfg-scale 2.5", line)
+            self.assertIn("-W 256 -H 256", line)
+
+    def test_generate_uses_seed_plan_in_order(self):
+        bdir = self._batch(seeds=[100, 101, 102])
+        log = os.path.join(self.work, "argv.log")
+        with stub_env(self.stub, self.model, {"STUB_LOG": log}):
+            batch = generate(bdir)
+        self.assertEqual([c["seed"] for c in batch["candidates"]],
+                         [100, 101, 102])
+        lines = Path(log).read_text().splitlines()
+        seeds = [line.split("-s ")[1].split(" ")[0] for line in lines]
+        self.assertEqual(seeds, ["100", "101", "102"])
+
+    def test_generate_seed_plan_skips_used_seeds(self):
+        # A second round re-reads the same plan: every planned
+        # seed is already used, so the new candidate gets a
+        # fresh random seed instead of a duplicate.
+        bdir = self._batch(seeds=[100, 101, 102])
+        with stub_env(self.stub, self.model):
+            generate(bdir)
+            batch = generate(bdir, count=1)
+        seeds = [c["seed"] for c in batch["candidates"]]
+        self.assertEqual(len(seeds), 4)
+        self.assertEqual(len(set(seeds)), 4)
+        self.assertNotIn(seeds[3], (100, 101, 102))
+
+    def test_generate_short_seed_plan_falls_back_to_random(self):
+        bdir = self._batch(seeds=[100])
+        with stub_env(self.stub, self.model):
+            batch = generate(bdir)
+        seeds = [c["seed"] for c in batch["candidates"]]
+        self.assertEqual(seeds[0], 100)
+        self.assertEqual(len(set(seeds)), 3)
+
+    def test_prompt_to_sprites_passes_generation_settings(self):
+        out_dir = os.path.join(self.work, "out")
+        log = os.path.join(self.work, "argv.log")
+        with stub_env(self.stub, self.model, {"STUB_LOG": log}):
+            batch, _bdir = prompt_to_sprites(
+                "a knight", out_dir, width=32, steps=8, cfg=2.5,
+                size=256)
+        self.assertEqual(batch["steps"], 8)
+        self.assertEqual(batch["cfg"], 2.5)
+        self.assertEqual(batch["size"], 256)
+        lines = Path(log).read_text().splitlines()
+        for line in lines:
+            self.assertIn("--steps 8", line)
+            self.assertIn("--cfg-scale 2.5", line)
+            self.assertIn("-W 256 -H 256", line)
+
+    def test_regenerate_candidate_replaces_one_only(self):
+        bdir = self._batch()
+        with stub_env(self.stub, self.model):
+            batch = generate(bdir)
+        before = {c["file"]: (c["seed"], (bdir / c["file"]).read_bytes())
+                  for c in batch["candidates"]}
+        with stub_env(self.stub, self.model):
+            record = regenerate_candidate(bdir, "cand-02.png")
+        self.assertEqual(record["file"], "cand-02.png")
+        self.assertNotEqual(record["seed"], before["cand-02.png"][0])
+        self.assertNotEqual((bdir / "cand-02.png").read_bytes(),
+                            before["cand-02.png"][1])
+        after = load_batch(bdir)
+        self.assertEqual(len(after["candidates"]), 3)
+        for name in ("cand-01.png", "cand-03.png"):
+            kept = next(c for c in after["candidates"]
+                        if c["file"] == name)
+            self.assertEqual(kept["seed"], before[name][0])
+            self.assertEqual((bdir / name).read_bytes(),
+                             before[name][1])
+
+    def test_regenerate_candidate_keeps_keeper_status(self):
+        bdir = self._batch()
+        with stub_env(self.stub, self.model):
+            generate(bdir)
+        set_keeper(bdir, "cand-02.png")
+        with stub_env(self.stub, self.model):
+            record = regenerate_candidate(bdir, "cand-02.png")
+        self.assertEqual(record["status"], "kept")
+        self.assertEqual(load_batch(bdir)["keeper"], "cand-02.png")
+
+    def test_regenerate_candidate_failure_leaves_original(self):
+        bdir = self._batch()
+        with stub_env(self.stub, self.model):
+            generate(bdir)
+        original = (bdir / "cand-02.png").read_bytes()
+        seed = load_batch(bdir)["candidates"][1]["seed"]
+        with stub_env(self.stub, self.model, {"STUB_FAIL": "1"}):
+            with self.assertRaises(PixelForgeError) as ctx:
+                regenerate_candidate(bdir, "cand-02.png")
+        self.assertIn("cand-02.png", str(ctx.exception))
+        self.assertEqual((bdir / "cand-02.png").read_bytes(),
+                         original)
+        self.assertEqual(load_batch(bdir)["candidates"][1]["seed"],
+                         seed)
+        self.assertFalse((bdir / "cand-02.png.regen.tmp").exists())
+
+    def test_regenerate_candidate_unknown_or_failed_refuses(self):
+        bdir = self._batch()
+        with stub_env(self.stub, self.model, {"STUB_FAIL": "1"}):
+            generate(bdir)
+        with stub_env(self.stub, self.model):
+            with self.assertRaises(PixelForgeError):
+                regenerate_candidate(bdir, "cand-99.png")
+            with self.assertRaises(PixelForgeError):
+                regenerate_candidate(bdir, "cand-01.png")
+
+    def test_negative_presets(self):
+        self.assertEqual(NEGATIVE_PRESETS["Default"],
+                         DEFAULT_NEGATIVE)
+        self.assertEqual(len(NEGATIVE_PRESETS), 4)
+        for name, text in NEGATIVE_PRESETS.items():
+            self.assertTrue(text, name)
+            self.assertIn(DEFAULT_NEGATIVE, text, name)
 
 
 if __name__ == "__main__":

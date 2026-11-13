@@ -1,5 +1,66 @@
 # Pixel Forge changelog
 
+## 0.31 — 2026-11-13
+
+Prompt iteration — task-list item #20, eight sub-items in one
+release:
+
+- The keeper's seed shows under the Candidate preview
+  ("Seed: 265905322") — the number that reproduces that exact
+  picture. Hidden until there is a keeper.
+- Generation history: GUI batches now live in
+  `~/pixel-forge-library/batches/` instead of a temp dir the
+  next generation deleted, and `prompt-history.json` in the
+  library folder records each batch (prompt, negative, seeds,
+  keeper, timestamp, batch dir, steps, cfg, size), capped at
+  50 entries. The History list on the Prompt tab reopens a
+  past batch — candidates, keeper, prompt, negative prompt,
+  and generation settings all come back. A batch whose folder
+  is gone is marked "(batch folder missing)" and warns instead
+  of crashing. A corrupt history file reads as empty and warns
+  once in the status bar; startup never breaks on it, and the
+  file is left alone. The CLI's `--out` behavior is unchanged.
+- Elapsed time: the progress bar reads "Generating… 1 of 3 —
+  0:42" while a run is in flight (ticking once a second), and
+  the status bar reports the total time when a batch lands
+  ("3 candidate(s) ready — click one to keep it (took 1:23)").
+- Regenerate one re-rolls a single candidate — the one selected
+  in the strip, or the keeper when nothing is selected — with a
+  fresh seed. The new picture is generated into a temp file and
+  only replaces the old one on success, so a failed or
+  cancelled re-roll leaves the original untouched; the other
+  candidates and the keeper (unless it was the one re-rolled)
+  stay. Disabled with no candidates.
+- More like this one generates a new batch from the keeper:
+  the same prompt and negative prompt, seeds keeper+1, +2, +3.
+  It goes through the same Re-Generate confirm as Generate.
+  Disabled with no keeper.
+- Prompt history: past prompts are remembered across sessions
+  (in prompt-history.json, most recent first, no duplicates,
+  capped at 20) and the Prompt history combo offers them back
+  — picking one fills the prompt field.
+- Negative-prompt presets: Default (the pre-filled text), No
+  text or watermark, Clean background, No people. Picking one
+  fills the negative-prompt field; typing by hand reads as
+  Custom in the combo.
+- Generation settings on the Prompt tab: steps (default 4),
+  CFG scale (default 1.5), and generated image size (default
+  512 px) — the LCM pins are the defaults, the controls let
+  the user change them, and the chosen values flow through to
+  the sd-cli command. The CLI `prompt` command gains the same
+  three as `--steps`, `--cfg`, and `--gen-size` (`--size` on
+  that command is already the pixelized output size).
+- The Re-Generate confirm still asks before replacing the
+  candidates in the tab (Yes/No, default No), but the dialog
+  now says the batch is replaced in the tab and stays in
+  History — it is no longer destroyed. The v0.22 test that
+  pinned the old batch dir's deletion now pins its survival.
+- Fixed in passing: `set_keeper` refused to re-pick the
+  current keeper ("did not generate") because it only accepted
+  "pending" records. Reopening a batch and re-rolling the
+  keeper both re-pick the keeper, so re-marking it is now a
+  no-op instead of an error; a failed candidate still refuses.
+
 ## 0.30 — 2026-11-13
 
 The B15 minor group — task-list item #19, eleven small fixes in
