@@ -3589,8 +3589,13 @@ class ShortcutsMenusTests(unittest.TestCase):
         self.assertEqual(sorted(menus), ["File", "Help"])
         file_items = [(a.text(), a.shortcut().toString())
                       for a in menus["File"].actions()]
+        # Task 29 adds the Recent files submenu after Export; it
+        # has no shortcut, and it is disabled while the session
+        # is empty (this window's library folder is fresh).
         self.assertEqual(file_items, [("Import", "Ctrl+O"),
-                                      ("Export", "Ctrl+S")])
+                                      ("Export", "Ctrl+S"),
+                                      ("Recent files", "")])
+        self.assertFalse(menus["File"].actions()[2].isEnabled())
         help_items = [a.text()
                       for a in menus["Help"].actions()]
         self.assertEqual(help_items,
@@ -5041,6 +5046,267 @@ class BatchProcessingGuiTests(unittest.TestCase):
         self.assertIn("first.png", message)
         self.assertIn("skipped", message)
         self.assertIn("archive.zip", message)
+
+
+class SessionGuiTests(unittest.TestCase):
+    """Task 29: recent files in the File menu and session restore
+    on startup. Every test gets its own library folder, so the
+    session under test is isolated from the shared test library."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        cls.image = write_image(
+            make_solid_image(64, 64, 10, 200, 30),
+            os.path.join(cls.tmp, "first.png"))
+        cls.image2 = write_image(
+            make_solid_image(48, 48, 200, 30, 10),
+            os.path.join(cls.tmp, "second.png"))
+        cls.skin = write_image(
+            make_solid_image(64, 64, 30, 10, 200),
+            os.path.join(cls.tmp, "skin.png"))
+        cls.amp = write_image(
+            make_solid_image(32, 32, 200, 200, 10),
+            os.path.join(cls.tmp, "rock & roll.png"))
+        cls.game1 = os.path.join(cls.tmp, "game1.py")
+        with open(cls.game1, "w") as handle:
+            handle.write('PALETTE = ["#ff0000", "#00ff00"]\n'
+                         "HERO = [[0, 1], [1, 0]]\n")
+        cls.game2 = os.path.join(cls.tmp, "game2.py")
+        with open(cls.game2, "w") as handle:
+            handle.write("SWORD = [[0, 1], [1, 0]]\n")
+        cls.clip = None
+        try:
+            cls.clip = make_test_video(
+                os.path.join(cls.tmp, "clip.mp4"), duration=2)
+        except Exception:
+            pass  # video tests skip below when ffmpeg is missing
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        # restore=False: these tests drive restore by hand, so a
+        # show() never restores behind the test's back.
+        self.win = MainWindow(library_dir=self.lib_dir,
+                              restore=False)
+        self._extra_windows = []
+
+    def tearDown(self):
+        for extra in self._extra_windows:
+            extra.close()
+            extra.deleteLater()
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _session_file(self):
+        from pixel_forge.session import load_session
+        data, corrupt = load_session(self.lib_dir)
+        return data, corrupt
+
+    def _wait_for_video(self, win=None, timeout=30):
+        win = win or self.win
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (win.video_worker is None
+                    and not win._video_debounce_timer.isActive()):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_recent_menu_disabled_when_empty(self):
+        self.assertFalse(self.win._recent_menu.isEnabled())
+        self.assertEqual(self.win._recent_menu.actions(), [])
+
+    def test_image_load_records_session(self):
+        self.assertTrue(self.win.load_image(self.image))
+        data, corrupt = self._session_file()
+        self.assertFalse(corrupt)
+        self.assertEqual(data["last_image"], self.image)
+        self.assertEqual(data["recent"],
+                         [{"path": self.image, "kind": "image"}])
+        self.assertTrue(self.win._recent_menu.isEnabled())
+        actions = self.win._recent_menu.actions()
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].text(), "first.png — image")
+        self.assertEqual(actions[0].data(),
+                         (self.image, "image"))
+
+    def test_failed_load_records_nothing(self):
+        from unittest import mock
+        import pixel_forge.gui as gui_mod
+        with mock.patch.object(gui_mod.QMessageBox, "warning"):
+            self.assertFalse(self.win.load_image(
+                os.path.join(self.tmp, "missing.png")))
+        data, corrupt = self._session_file()
+        self.assertEqual(data["recent"], [])
+        self.assertIsNone(data["last_image"])
+        self.assertFalse(os.path.exists(
+            os.path.join(self.lib_dir, "session.json")))
+        self.assertFalse(self.win._recent_menu.isEnabled())
+
+    def test_video_load_records_session(self):
+        if self.clip is None:
+            raise unittest.SkipTest("ffmpeg not installed")
+        self.assertTrue(self.win.load_video(self.clip))
+        data, _corrupt = self._session_file()
+        self.assertEqual(data["last_video"], self.clip)
+        self.assertEqual(data["recent"],
+                         [{"path": self.clip, "kind": "video"}])
+        self.assertTrue(self._wait_for_video())
+
+    def test_code_load_records_each_file_and_last_code(self):
+        self.assertTrue(self.win.load_code([self.game1,
+                                            self.game2]))
+        data, _corrupt = self._session_file()
+        self.assertEqual(data["last_code"],
+                         [self.game1, self.game2])
+        self.assertEqual(
+            [e["path"] for e in data["recent"]],
+            [self.game2, self.game1])
+        self.assertTrue(all(e["kind"] == "code"
+                            for e in data["recent"]))
+
+    def test_game_asset_records_skin(self):
+        self.assertTrue(self.win.load_game_asset(self.skin))
+        data, _corrupt = self._session_file()
+        self.assertEqual(data["recent"],
+                         [{"path": self.skin, "kind": "skin"}])
+
+    def test_recent_menu_lists_most_recent_first(self):
+        self.assertTrue(self.win.load_image(self.image))
+        self.assertTrue(self.win.load_code(self.game1))
+        self.assertTrue(self.win.load_image(self.image2))
+        texts = [a.text()
+                 for a in self.win._recent_menu.actions()]
+        self.assertEqual(texts, ["second.png — image",
+                                 "game1.py — code",
+                                 "first.png — image"])
+
+    def test_recent_menu_click_loads_into_tab(self):
+        if self.clip is None:
+            raise unittest.SkipTest("ffmpeg not installed")
+        self.assertTrue(self.win.load_image(self.image))
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        self.win.tabs.setCurrentIndex(0)
+        actions = self.win._recent_menu.actions()
+        video_action = [a for a in actions
+                        if a.data()[1] == "video"][0]
+        video_action.trigger()
+        self.assertEqual(self.win.tabs.currentIndex(), 1)
+        self.assertEqual(self.win.video_path, self.clip)
+        self.assertTrue(self._wait_for_video())
+        self.assertGreater(len(self.win.video_frames), 0)
+
+    def test_missing_recent_entry_prunes_without_modal(self):
+        self.assertTrue(self.win.load_image(self.image))
+        os.unlink(self.image)
+        try:
+            action = self.win._recent_menu.actions()[0]
+            action.trigger()
+            self.app.processEvents()
+            self.assertIsNone(QApplication.activeModalWidget())
+            data, _corrupt = self._session_file()
+            self.assertEqual(data["recent"], [])
+            self.assertFalse(self.win._recent_menu.isEnabled())
+            self.assertIn("No longer there: first.png",
+                          self.win.statusBar().currentMessage())
+        finally:
+            # The shared setUpClass image is gone — put it back
+            # for the tests after this one.
+            write_image(make_solid_image(64, 64, 10, 200, 30),
+                        self.image)
+
+    def test_ampersand_in_filename_is_escaped(self):
+        # Qt reads a bare & in menu text as a mnemonic marker and
+        # eats it — the action text must double it, so the menu
+        # shows the file's real name.
+        self.assertTrue(self.win.load_image(self.amp))
+        actions = self.win._recent_menu.actions()
+        self.assertEqual(actions[0].text(),
+                         "rock && roll.png — image")
+
+    def test_restore_loads_last_image_video_code(self):
+        if self.clip is None:
+            raise unittest.SkipTest("ffmpeg not installed")
+        from pixel_forge.gui import MainWindow
+        self.assertTrue(self.win.load_image(self.image))
+        self.assertTrue(self.win.load_video(self.clip))
+        self.assertTrue(self._wait_for_video())
+        self.assertTrue(self.win.load_code(self.game1))
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        # A fresh window on the same library folder, restore on:
+        # show() triggers the restore.
+        win2 = MainWindow(library_dir=self.lib_dir)
+        self._extra_windows.append(win2)
+        win2.show()
+        self.assertTrue(self._wait_for_video(win2))
+        self.assertEqual(win2.source_path, self.image)
+        self.assertEqual(win2.video_path, self.clip)
+        self.assertGreater(len(win2.video_frames), 0)
+        self.assertGreater(len(win2.code_assets), 0)
+        # Nothing switches tabs: the Image tab stays current.
+        self.assertEqual(win2.tabs.currentIndex(), 0)
+
+    def test_restore_skips_missing_files_silently(self):
+        from pixel_forge.gui import MainWindow
+        from pixel_forge.session import (empty_session, save_session,
+                                         set_last_code,
+                                         set_last_image,
+                                         set_last_video)
+        data = empty_session()
+        set_last_image(data, os.path.join(self.tmp, "gone.png"))
+        set_last_video(data, os.path.join(self.tmp, "gone.mp4"))
+        set_last_code(data, [os.path.join(self.tmp, "gone.py")])
+        save_session(self.lib_dir, data)
+        win2 = MainWindow(library_dir=self.lib_dir)
+        self._extra_windows.append(win2)
+        win2.show()
+        self.app.processEvents()
+        self.assertIsNone(QApplication.activeModalWidget())
+        self.assertIsNone(win2.source_path)
+        self.assertIsNone(win2.video_path)
+        self.assertEqual(win2.code_assets, [])
+        self.assertIn("Could not restore",
+                      win2.statusBar().currentMessage())
+
+    def test_restore_flag_off_skips_restore(self):
+        # The mechanism main() uses for a command-line file: a
+        # window built with restore=False never restores, even
+        # with a session on disk.
+        from pixel_forge.session import (empty_session, save_session,
+                                         set_last_image)
+        data = empty_session()
+        set_last_image(data, self.image)
+        save_session(self.lib_dir, data)
+        self.win.show()
+        self.app.processEvents()
+        self.assertIsNone(self.win.source_path)
+
+    def test_corrupt_session_reads_empty_and_warns(self):
+        from pixel_forge.gui import MainWindow
+        from pixel_forge.session import session_path
+        os.makedirs(self.lib_dir, exist_ok=True)
+        session_path(self.lib_dir).write_text(
+            "{not json", encoding="utf-8")
+        win2 = MainWindow(library_dir=self.lib_dir,
+                          restore=False)
+        self._extra_windows.append(win2)
+        self.assertEqual(win2._session["recent"], [])
+        self.assertFalse(win2._recent_menu.isEnabled())
+        self.assertIn("unreadable",
+                      win2.statusBar().currentMessage())
+        # The bad file is left alone.
+        self.assertEqual(
+            session_path(self.lib_dir).read_text(
+                encoding="utf-8"),
+            "{not json")
 
 
 if __name__ == "__main__":

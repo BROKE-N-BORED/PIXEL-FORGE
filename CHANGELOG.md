@@ -1,5 +1,40 @@
 # Pixel Forge changelog
 
+## 0.40 — 2026-11-13
+
+Recent files + session restore — task-list item #29:
+
+- Every successful load records its file in `session.json` in the
+  library folder (`pixel-forge-session`, version 1): imports,
+  drops, and library loads alike. A failed load records nothing.
+  The file holds the last-loaded image, the last-loaded video,
+  the last-loaded code paths, and a combined recent-files list
+  (most recent first, capped at ten, deduped by path, each entry
+  with its kind: image, video, code, or skin).
+- The File menu has a "Recent files" submenu listing the recent
+  files, most recent first, each named with its kind. Picking
+  one loads it into its tab exactly as if it had just been
+  imported. A file that no longer exists is pruned from the list
+  when picked, with one plain status-bar note — no modal. The
+  submenu is disabled when the list is empty, and it rebuilds
+  when it opens and whenever the session changes, so it is never
+  stale.
+- On startup the window restores the last-loaded image, video,
+  and code into their tabs, once, after the window is shown. Each
+  loads only when its file still exists; a missing file is
+  skipped with a status-bar note at most, never a dialog. The
+  video restores through the normal worker path, so the window
+  never freezes, and nothing switches tabs — the Image tab stays
+  current. A file given on the command line wins over the
+  session: no restore happens then. A clip over the frame-count
+  threshold still asks the extraction question on restore.
+- A corrupt or wrong-shaped session file reads as empty and
+  warns once in the status bar; the file itself is left alone.
+  Game assets record as kind "skin" in the recent list — they
+  load through the game-asset path either way, skin or texture.
+  The Prompt tab is not part of session restore (its history
+  already lives in `prompt-history.json`).
+
 ## 0.39 — 2026-11-13
 
 Batch processing — task-list item #28, eight sub-items in one

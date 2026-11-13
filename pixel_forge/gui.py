@@ -76,6 +76,8 @@ from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
 from .presets import (BUILTIN_PRESETS, SHEET_COLS_VALUES, PresetStore,
                       read_preset_export)
 from .qtimage import to_qimage
+from .session import (load_session, record_recent, save_session,
+                      set_last_code, set_last_image, set_last_video)
 from .skins import (detect_skin, extract_skin, pixelize_texture,
                     skin_figure, skin_parts, texture_target_size)
 from .spritesheet import (build_metadata, extract_frame,
@@ -735,7 +737,7 @@ class SheetFrameDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, library_dir=None):
+    def __init__(self, library_dir=None, restore=True):
         super().__init__()
         self.setWindowTitle("Pixel Forge %s" % __version__)
         self.resize(1020, 640)
@@ -743,9 +745,19 @@ class MainWindow(QMainWindow):
         # Library + presets. library_dir is a test hook — the real
         # window uses ~/pixel-forge-library/ (or PIXELFORGE_LIBRARY).
         # Nothing is created on disk until the first save.
+        # restore is a second hook: main() turns it off when a file
+        # was given on the command line (that file wins over the
+        # session), and tests turn it off to drive restore by hand.
         self.library = Library(library_dir)
         self.preset_store = PresetStore(self.library.directory)
         self._applying_preset = False
+        # Session (task 29): recent files + the last-loaded image,
+        # video, and code, from session.json in the library folder.
+        # Loaded at the end of __init__; restored once, when the
+        # window is first shown (see showEvent).
+        self._session = None
+        self._session_corrupt = False
+        self._session_restored = not restore
         # The malformed-entries warning shows in the status bar
         # once per window; the Library tab's count label carries
         # it permanently (see _refresh_library).
@@ -872,6 +884,7 @@ class MainWindow(QMainWindow):
         self._refresh_library()
         self._refresh_prompt_status()
         self._load_prompt_history()
+        self._load_session()
 
     # ================================================ menus, shortcuts, help
 
@@ -897,6 +910,17 @@ class MainWindow(QMainWindow):
         file_menu.addAction(export_action)
         self._import_action = import_action
         self._export_action = export_action
+        # Recent files (task 29): the submenu lists what was
+        # loaded before, most recent first. It rebuilds when it
+        # opens (aboutToShow) and whenever the session changes,
+        # so it is never stale — a disabled menu never emits
+        # aboutToShow, so the enabled state cannot be fixed only
+        # at open time.
+        recent_menu = file_menu.addMenu("Recent files")
+        recent_menu.aboutToShow.connect(self._refresh_recent_menu)
+        recent_menu.menuAction().setToolTip(
+            "Open a file you loaded before")
+        self._recent_menu = recent_menu
 
         help_menu = self.menuBar().addMenu("Help")
         about_action = QAction("About Pixel Forge", self)
@@ -1353,6 +1377,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Loaded %s (%d x %d)"
                                      % (Path(path).name, image.width(),
                                         image.height()))
+        self._record_session(path, "image")
         return True
 
     def _on_import(self):
@@ -2055,7 +2080,10 @@ class MainWindow(QMainWindow):
         self.video_start_edit.clear()
         self.video_end_edit.clear()
         self._refresh_video_estimate()
-        return self._reload_video_frames(fresh=True)
+        started = self._reload_video_frames(fresh=True)
+        if started:
+            self._record_session(path, "video")
+        return started
 
     def _on_video_import(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -3641,6 +3669,150 @@ class MainWindow(QMainWindow):
         except PixelForgeError as exc:
             self.statusBar().showMessage(str(exc))
 
+    # ================================================ session (task 29)
+
+    def _load_session(self):
+        """Load the session (recent files + last-loaded image,
+        video, and code) from the library folder. A corrupt file
+        reads as empty and warns once in the status bar — startup
+        never breaks on it, and the file is left alone (not
+        deleted, not "repaired")."""
+        (self._session,
+         self._session_corrupt) = load_session(self.library.directory)
+        self._refresh_recent_menu()
+        if self._session_corrupt:
+            self.statusBar().showMessage(
+                "The session file is unreadable — starting with an "
+                "empty session (the file was left alone)")
+
+    def _save_session(self):
+        """Write the session back. A failure shows in the status
+        bar and never breaks the load it rode along with."""
+        if self._session is None:
+            return
+        try:
+            save_session(self.library.directory, self._session)
+        except PixelForgeError as exc:
+            self.statusBar().showMessage(str(exc))
+
+    def _record_session(self, path, kind):
+        """A file loaded successfully (task 29): it goes to the
+        top of the recent list, and an image or video also
+        becomes the one restored on the next startup. A game
+        asset records as kind "skin" — it loads through
+        load_game_asset either way, skin or texture."""
+        if self._session is None:
+            return
+        record_recent(self._session, str(path), kind)
+        if kind == "image":
+            set_last_image(self._session, str(path))
+        elif kind == "video":
+            set_last_video(self._session, str(path))
+        self._save_session()
+        self._refresh_recent_menu()
+
+    def _record_code_session(self, paths, files):
+        """A code import loaded successfully (task 29): the paths
+        load_code was given become the ones restored on the next
+        startup, and every file actually parsed goes to the
+        recent list — a folder import records its files, not the
+        folder."""
+        if self._session is None:
+            return
+        set_last_code(self._session, [str(p) for p in paths])
+        for found in files:
+            record_recent(self._session, str(found), "code")
+        self._save_session()
+        self._refresh_recent_menu()
+
+    def _refresh_recent_menu(self):
+        """Rebuild the Recent files submenu from the session —
+        most recent first, each entry named with its kind. Called
+        when the menu opens and whenever the session changes, so
+        the list and the enabled state are never stale. A "&" in
+        a file name is doubled: Qt reads a bare & in menu text as
+        a mnemonic marker and would eat it."""
+        menu = self._recent_menu
+        menu.clear()
+        recent = self._session["recent"] if self._session else []
+        menu.setEnabled(bool(recent))
+        for entry in recent:
+            text = "%s — %s" % (Path(entry["path"]).name.replace(
+                "&", "&&"), entry["kind"])
+            action = QAction(text, self)
+            action.setData((entry["path"], entry["kind"]))
+            action.triggered.connect(self._on_recent_file)
+            menu.addAction(action)
+
+    def _on_recent_file(self, _checked=False):
+        """Open a recent file into its tab, exactly as if it had
+        just been imported. A file that no longer exists is
+        pruned from the list with one plain status-bar note — no
+        modal, no crash."""
+        action = self.sender()
+        if action is None:
+            return
+        path, kind = action.data()
+        if not Path(path).exists():
+            self._session["recent"] = [
+                e for e in self._session["recent"]
+                if e["path"] != path]
+            self._save_session()
+            self._refresh_recent_menu()
+            self.statusBar().showMessage(
+                "No longer there: %s" % Path(path).name)
+            return
+        if kind == "image":
+            self.tabs.setCurrentIndex(0)
+            self.load_image(path)
+        elif kind == "video":
+            self.tabs.setCurrentIndex(1)
+            self.load_video(path)
+        elif kind == "code":
+            self.tabs.setCurrentIndex(3)
+            self.load_code([path])
+        elif kind == "skin":
+            self.tabs.setCurrentIndex(3)
+            self.load_game_asset(path)
+
+    def restore_session(self):
+        """Restore the last-loaded image, video, and code into
+        their tabs (task 29). Each loads only when its file still
+        exists — a missing file is skipped with one status-bar
+        note at most, never a modal. The loads go through the
+        normal import paths, so the video restores on its worker
+        thread (the v0.9 stale guard covers a user who starts
+        something else mid-restore) and nothing switches tabs:
+        the Image tab stays current, and the restored video and
+        code are waiting on their own tabs. A clip over the
+        frame-count threshold still asks the extraction question
+        — the guardrail does not know the clip was restored."""
+        if self._session is None:
+            return
+        skipped = []
+        image = self._session.get("last_image")
+        if image:
+            if Path(image).is_file():
+                self.load_image(image)
+            else:
+                skipped.append(Path(image).name)
+        video = self._session.get("last_video")
+        if video:
+            if Path(video).is_file():
+                self.load_video(video)
+            else:
+                skipped.append(Path(video).name)
+        last_code = self._session.get("last_code") or []
+        existing = [p for p in last_code if Path(p).exists()]
+        if existing:
+            self.load_code(existing)
+        elif last_code:
+            skipped.extend(Path(p).name for p in last_code)
+        if skipped:
+            self.statusBar().showMessage(
+                "Could not restore %s — no longer there"
+                % ", ".join(skipped))
+
     def _record_prompt_text(self, prompt):
         if self._prompt_history is None:
             return
@@ -4292,6 +4464,7 @@ class MainWindow(QMainWindow):
             message += (", %s skipped"
                         % plural(len(result["skipped"]), "file"))
         self.statusBar().showMessage(message)
+        self._record_code_session(paths, result["files"])
         return True
 
     def load_game_asset(self, path):
@@ -4323,7 +4496,10 @@ class MainWindow(QMainWindow):
         self.code_texture_image = image
         self.code_texture_path = str(path)
         if layout is not None:
-            return self._show_skin(image, path, layout)
+            ok = self._show_skin(image, path, layout)
+            if ok:
+                self._record_session(path, "skin")
+            return ok
         # Texture: pixelize off the GUI thread with the controls
         # reset to this texture's defaults (native size, 256
         # colors, no dithering) — the first render is exactly
@@ -4332,6 +4508,7 @@ class MainWindow(QMainWindow):
         self.code_skin_layout = None
         self._reset_code_texture_controls(image)
         self._start_texture_worker()
+        self._record_session(path, "skin")
         return True
 
     def _show_skin(self, image, path, layout):
@@ -5702,6 +5879,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             "Loaded %s from %s"
             % (metadata["frames"][index]["name"], entry["name"]))
+        self._record_session(path, "image")
 
     def _on_library_rename(self):
         entry = self._selected_library_entry()
@@ -6002,6 +6180,15 @@ class MainWindow(QMainWindow):
 
     # --------------------------------------------------------- cleanup
 
+    def showEvent(self, event):
+        # Session restore (task 29) runs once, after the window
+        # is shown — the video restore starts a worker, and the
+        # window must be up first so it never blocks startup.
+        super().showEvent(event)
+        if not self._session_restored:
+            self._session_restored = True
+            self.restore_session()
+
     def closeEvent(self, event):
         self._stop_playback()
         self._stop_prompt_worker()
@@ -6022,8 +6209,10 @@ def main(argv=None):
     if icon_path.is_file():
         from PySide6.QtGui import QIcon
         app.setWindowIcon(QIcon(str(icon_path)))
-    window = MainWindow()
     args = list(sys.argv[1:] if argv is None else argv[1:])
+    # A file on the command line wins over the session (task
+    # 29): the user asked for this file, so no restore.
+    window = MainWindow(restore=not (args and os.path.isfile(args[0])))
     if args and os.path.isfile(args[0]):
         if Path(args[0]).suffix.lower() in VIDEO_EXTENSIONS:
             window.tabs.setCurrentIndex(1)

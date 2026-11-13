@@ -356,6 +356,7 @@ there until the first save:
 ~/pixel-forge-library/
   library.json     the index
   presets.json     your saved presets
+  session.json     recent files + the last-loaded image, video, code
   knight.png       one sprite entry
   walk-sheet.png   one spritesheet entry (the PNG half)
   walk-sheet.json  the spritesheet's metadata (the JSON half)
@@ -436,6 +437,39 @@ Importing a name that matches a built-in saves it as a user
 preset shown as "(custom)"; importing a name that already exists
 as a user preset asks before replacing it in the window, and
 refuses in the CLI until the old one is deleted.
+
+`session.json` holds the recent-files list and the last-loaded
+image, video, and code paths (`pixel-forge-session`, version 1):
+
+```json
+{
+  "format": "pixel-forge-session",
+  "version": 1,
+  "last_image": "/home/user/pictures/knight.png",
+  "last_video": "/home/user/clips/walk.mp4",
+  "last_code": ["/home/user/code/sprites.py"],
+  "recent": [
+    {"path": "/home/user/code/sprites.py", "kind": "code"},
+    {"path": "/home/user/clips/walk.mp4", "kind": "video"},
+    {"path": "/home/user/pictures/knight.png", "kind": "image"}
+  ]
+}
+```
+
+Every successful load records its file — imports, drops, and
+library loads alike; a failed load records nothing. The File menu
+has a "Recent files" submenu listing the last ten, most recent
+first, each named with its kind; picking one loads it into its
+tab exactly as if it had just been imported. A file that no
+longer exists is dropped from the list when picked, with a plain
+note in the status bar. On startup the window restores the
+last-loaded image, video, and code into their tabs — each only
+when its file still exists, a missing one skipped with a
+status-bar note at most, never a dialog. The Image tab stays
+current; the restored video and code are waiting on their own
+tabs. A file given on the command line wins over the session: no
+restore happens then. A corrupt session file reads as empty and
+warns once in the status bar; the file itself is left alone.
 
 ## What v0.30 does and does not do
 
