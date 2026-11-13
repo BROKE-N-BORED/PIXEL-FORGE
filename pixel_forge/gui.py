@@ -74,7 +74,7 @@ from .presets import (BUILTIN_PRESETS, SHEET_COLS_VALUES, PresetStore,
                       read_preset_export)
 from .qtimage import to_qimage
 from .skins import (detect_skin, extract_skin, pixelize_texture,
-                    skin_figure, skin_parts)
+                    skin_figure, skin_parts, texture_target_size)
 from .spritesheet import (build_metadata, extract_frame,
                           frames_from_sheet, load_metadata,
                           pack_frames, write_sheet)
@@ -92,6 +92,9 @@ STRIP_THUMB = 64  # frame strip thumbnail size, in pixels
 VIDEO_DEBOUNCE_MS = 300  # ms of no control changes before a Video
 # tab re-extract / re-pixelize runs — a dragged slider fires
 # dozens of changes, and only the settled one needs a run.
+TEXTURE_DEBOUNCE_MS = 300  # same idea for the Code tab's
+# texture controls (task 26): a dragged size spin fires dozens
+# of changes, and only the settled one needs a re-render.
 
 # Export-button contrast (task 22): the text is #e8e6e3 on the
 # button background. The old orange (#b35a1b) measured 3.84:1 —
@@ -302,18 +305,28 @@ class TextureWorker(QThread):
     touches a widget itself. Only a buffer Image crosses the
     thread boundary (QPixmap is not thread-safe) — a plain
     Python object, safer to pass than a QImage was.
+
+    Settings arrive as one dict (width, height, palette,
+    max_colors, dither), snapshotted at start like the Video
+    worker's — a later control change cannot rewrite the run
+    in flight, it starts a newer run instead, and the stale
+    guard in _on_texture_done drops the older result. The
+    settings ride back in the result too, so the detail line
+    describes the render that actually landed, not the
+    controls as they stand when it lands.
     """
     done = Signal(dict)   # path, source size, texture, color count
     failed = Signal(str)  # readable error message
 
-    def __init__(self, image, path, parent=None):
+    def __init__(self, image, path, settings=None, parent=None):
         super().__init__(parent)
         self.image = image
         self.path = str(path)
+        self.settings = dict(settings) if settings else {}
 
     def run(self):
         try:
-            texture = pixelize_texture(self.image)
+            texture = pixelize_texture(self.image, **self.settings)
             colors = count_opaque_colors(texture)
         except PixelForgeError as exc:
             self.failed.emit(str(exc))
@@ -327,6 +340,7 @@ class TextureWorker(QThread):
             "source_height": self.image.height(),
             "image": texture,
             "colors": colors,
+            "settings": self.settings,
         })
 
 
@@ -826,6 +840,19 @@ class MainWindow(QMainWindow):
         self.code_skin_path = None
         self.code_skin_layout = None
         self.texture_worker = None
+        # Texture rendering state (task 26): the source image a
+        # texture (or an overridden skin) re-pixelizes from, and
+        # the skin override flag — per loaded asset, reset on
+        # every new import. The debounce timer waits for the
+        # texture controls to settle before re-rendering.
+        self.code_texture_image = None
+        self.code_texture_path = None
+        self.code_treat_as_texture = False
+        self._texture_debounce_timer = QTimer(self)
+        self._texture_debounce_timer.setSingleShot(True)
+        self._texture_debounce_timer.setInterval(TEXTURE_DEBOUNCE_MS)
+        self._texture_debounce_timer.timeout.connect(
+            self._on_texture_debounce)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_image_tab(), "Image")
@@ -3973,6 +4000,79 @@ class MainWindow(QMainWindow):
         skipped_scroll.setWidget(self.code_skipped_label)
         form.addWidget(skipped_scroll)
 
+        # Skin-detection override (task 26): a 64x64 or 64x32
+        # image is detected as a skin by size alone, so a
+        # non-skin of exactly that size would be split into
+        # parts. The button offers the other reading — and back
+        # again. Visible only for skin-sized assets; the text
+        # names the action it will take.
+        self.code_treat_texture_btn = QPushButton("Treat as texture")
+        self.code_treat_texture_btn.setToolTip(
+            "Render this skin-sized image as a plain texture "
+            "instead of splitting it into skin parts")
+        self.code_treat_texture_btn.clicked.connect(
+            self._on_treat_texture_toggled)
+        self.code_treat_texture_btn.setVisible(False)
+        form.addWidget(self.code_treat_texture_btn)
+
+        # Texture controls (task 26): a texture used to render
+        # at fixed native size with a 256-color from-image
+        # palette and no dithering. The controls mirror the
+        # Image tab's — same widgets, same ranges — and a change
+        # re-renders through the worker. The whole section lives
+        # in one container so it shows and hides as a unit; it
+        # is visible only while a texture is showing.
+        self.code_texture_section = QWidget()
+        texture_form = QVBoxLayout(self.code_texture_section)
+        texture_form.setContentsMargins(0, 0, 0, 0)
+        texture_form.addWidget(self._section("Texture"))
+        texture_size_row = QHBoxLayout()
+        self.code_texture_width_spin = QSpinBox()
+        self.code_texture_width_spin.setRange(1, MAX_CUSTOM_SIZE)
+        self.code_texture_width_spin.setPrefix("W ")
+        self.code_texture_width_spin.setToolTip(
+            "Texture width in pixels")
+        self.code_texture_width_spin.valueChanged.connect(
+            self._on_code_texture_control_changed)
+        self.code_texture_height_spin = QSpinBox()
+        self.code_texture_height_spin.setRange(1, MAX_CUSTOM_SIZE)
+        self.code_texture_height_spin.setPrefix("H ")
+        self.code_texture_height_spin.setToolTip(
+            "Texture height in pixels")
+        self.code_texture_height_spin.valueChanged.connect(
+            self._on_code_texture_control_changed)
+        texture_size_row.addWidget(self.code_texture_width_spin)
+        texture_size_row.addWidget(self.code_texture_height_spin)
+        texture_form.addLayout(texture_size_row)
+        self.code_texture_palette_combo = QComboBox()
+        self.code_texture_palette_combo.setToolTip(
+            "Colors the texture may use")
+        for key in ("image", "pico8", "gameboy", "grayscale"):
+            self.code_texture_palette_combo.addItem(
+                PALETTE_LABELS[key], key)
+        self.code_texture_palette_combo.currentIndexChanged.connect(
+            self._on_code_texture_control_changed)
+        texture_form.addWidget(self.code_texture_palette_combo)
+        texture_colors_row = QHBoxLayout()
+        texture_colors_row.addWidget(QLabel("Max colors"))
+        self.code_texture_colors_spin = QSpinBox()
+        self.code_texture_colors_spin.setRange(MIN_COLORS, MAX_COLORS)
+        self.code_texture_colors_spin.setValue(MAX_COLORS)
+        self.code_texture_colors_spin.setToolTip(
+            "Most colors the texture may use")
+        self.code_texture_colors_spin.valueChanged.connect(
+            self._on_code_texture_control_changed)
+        texture_colors_row.addWidget(self.code_texture_colors_spin)
+        texture_form.addLayout(texture_colors_row)
+        self.code_texture_dither_check = QCheckBox("Dithering")
+        self.code_texture_dither_check.setToolTip(
+            "Ordered (Bayer) dithering")
+        self.code_texture_dither_check.toggled.connect(
+            self._on_code_texture_control_changed)
+        texture_form.addWidget(self.code_texture_dither_check)
+        self.code_texture_section.setVisible(False)
+        form.addWidget(self.code_texture_section)
+
         form.addWidget(self._section("Zoom"))
         zoom_row = QHBoxLayout()
         self.code_zoom_slider = QSlider(Qt.Orientation.Horizontal)
@@ -4086,6 +4186,11 @@ class MainWindow(QMainWindow):
         if isinstance(paths, (str, Path)):
             paths = [paths]
         self._stop_texture_worker()
+        # A code import is not a texture and not a skin: the
+        # override and the texture source go away with it.
+        self.code_treat_as_texture = False
+        self.code_texture_image = None
+        self.code_texture_path = None
         try:
             result = parse_paths(paths)
         except PixelForgeError as exc:
@@ -4110,6 +4215,7 @@ class MainWindow(QMainWindow):
         self._set_parts_button(
             False, "Only Minecraft skins have parts to export")
         self._rebuild_code_list()
+        self._update_code_texture_controls()
         message = ("%s from %s"
                    % (plural(len(result["assets"]), "asset"),
                       plural(len(result["files"]), "file")))
@@ -4124,8 +4230,10 @@ class MainWindow(QMainWindow):
         parts (plus the combined figure) right away; anything else
         pixelizes as a texture on a worker thread (see
         TextureWorker), so a big photo never freezes the window.
-        Returns True when the load started (or finished, for a
-        skin); False when the file cannot be read at all."""
+        A skin-sized image can be treated as a texture instead
+        with the override button (task 26). Returns True when
+        the load started (or finished, for a skin); False when
+        the file cannot be read at all."""
         try:
             image = load_image(path)
         except PixelForgeError as exc:
@@ -4137,46 +4245,63 @@ class MainWindow(QMainWindow):
         self.code_not_rendered = []
         self.code_skipped = []
         self._stop_texture_worker()
+        # A new import resets the override (task 26): whatever
+        # the last asset was treated as says nothing about this
+        # one. The source image stays in memory so the texture
+        # controls can re-pixelize from it without re-reading
+        # the file.
+        self.code_treat_as_texture = False
+        self.code_texture_image = image
+        self.code_texture_path = str(path)
         if layout is not None:
-            try:
-                parts = skin_parts(image)
-                figure = skin_figure(image)
-            except PixelForgeError as exc:
-                warn_dialog(self, "Could not split the skin", str(exc))
-                return False
-            self.code_kind = "skin"
-            self.code_skin_path = str(path)
-            self.code_skin_layout = layout
-            self.code_assets = []
-            for name, part in parts.items():
-                self.code_assets.append({
-                    "name": name, "kind": "part",
-                    "source_file": str(path),
-                    "width": part.width(), "height": part.height(),
-                    "colors": count_opaque_colors(part),
-                    "image": part,
-                    "detail": "front view, %s skin" % layout})
+            return self._show_skin(image, path, layout)
+        # Texture: pixelize off the GUI thread with the controls
+        # reset to this texture's defaults (native size, 256
+        # colors, no dithering) — the first render is exactly
+        # what an untouched texture always was.
+        self.code_skin_path = None
+        self.code_skin_layout = None
+        self._reset_code_texture_controls(image)
+        self._start_texture_worker()
+        return True
+
+    def _show_skin(self, image, path, layout):
+        """Render a skin-sized image as a skin: its parts plus
+        the combined figure. Returns True on success, False
+        when the split fails. Shared by load_game_asset and the
+        override toggle back from a texture."""
+        try:
+            parts = skin_parts(image)
+            figure = skin_figure(image)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not split the skin", str(exc))
+            return False
+        self.code_kind = "skin"
+        self.code_skin_path = str(path)
+        self.code_skin_layout = layout
+        self.code_assets = []
+        for name, part in parts.items():
             self.code_assets.append({
-                "name": "figure", "kind": "figure",
+                "name": name, "kind": "part",
                 "source_file": str(path),
-                "width": figure.width(), "height": figure.height(),
-                "colors": count_opaque_colors(figure),
-                "image": figure,
-                "detail": "combined figure, overlays included"})
-            self._set_parts_button(
-                True, "Export the skin's parts as separate PNGs")
-            self._rebuild_code_list()
-            self.statusBar().showMessage(
-                "Minecraft skin (%s): %d parts"
-                % (layout, len(parts)))
-            return True
-        # Texture: pixelize off the GUI thread. The worker hands
-        # the finished texture to _on_texture_done.
-        self.texture_worker = TextureWorker(image, path, parent=self)
-        self.texture_worker.done.connect(self._on_texture_done)
-        self.texture_worker.failed.connect(self._on_texture_failed)
-        self.statusBar().showMessage("Loading texture…")
-        self.texture_worker.start()
+                "width": part.width(), "height": part.height(),
+                "colors": count_opaque_colors(part),
+                "image": part,
+                "detail": "front view, %s skin" % layout})
+        self.code_assets.append({
+            "name": "figure", "kind": "figure",
+            "source_file": str(path),
+            "width": figure.width(), "height": figure.height(),
+            "colors": count_opaque_colors(figure),
+            "image": figure,
+            "detail": "combined figure, overlays included"})
+        self._set_parts_button(
+            True, "Export the skin's parts as separate PNGs")
+        self._rebuild_code_list()
+        self._update_code_texture_controls()
+        self.statusBar().showMessage(
+            "Minecraft skin (%s): %d parts"
+            % (layout, len(parts)))
         return True
 
     def _on_texture_done(self, result):
@@ -4187,15 +4312,31 @@ class MainWindow(QMainWindow):
         self.texture_worker = None
         texture = result["image"]
         self.code_kind = "texture"
-        self.code_skin_path = None
-        self.code_skin_layout = None
-        self._set_parts_button(
-            False, "Only Minecraft skins have parts to export")
+        # An overridden skin keeps its skin path and layout —
+        # they are what the toggle back needs, and what keeps
+        # the override button visible. A plain texture has
+        # neither.
+        if self.code_treat_as_texture:
+            self._set_parts_button(
+                False,
+                "This image is being treated as a texture — "
+                "switch back to a skin to export its parts")
+        else:
+            self.code_skin_path = None
+            self.code_skin_layout = None
+            self._set_parts_button(
+                False, "Only Minecraft skins have parts to export")
         src_w, src_h = (result["source_width"],
                         result["source_height"])
-        capped = ((texture.width(), texture.height())
-                  != (src_w, src_h))
-        if capped:
+        # Capped means the 512 px cap shrank the source — not
+        # the texture controls asking for a smaller size, which
+        # the settings suffix below already names.
+        cap_w, cap_h = texture_target_size(self.code_texture_image)
+        capped = (cap_w, cap_h) != (src_w, src_h)
+        if self.code_treat_as_texture:
+            detail = ("%d x %d skin-sized image — treated as a "
+                      "texture" % (src_w, src_h))
+        elif capped:
             detail = ("downscaled from %d x %d to %d x %d — "
                       "pixelized as a texture"
                       % (src_w, src_h, texture.width(),
@@ -4203,6 +4344,7 @@ class MainWindow(QMainWindow):
         else:
             detail = ("not a Minecraft skin (%d x %d) — "
                       "pixelized as a texture" % (src_w, src_h))
+        detail += self._texture_settings_suffix(result)
         self.code_assets = [{
             "name": Path(result["path"]).stem, "kind": "texture",
             "source_file": result["path"],
@@ -4211,13 +4353,44 @@ class MainWindow(QMainWindow):
             "image": texture,
             "detail": detail}]
         self._rebuild_code_list()
-        if capped:
+        self._update_code_texture_controls()
+        if self.code_treat_as_texture:
+            self.statusBar().showMessage(
+                "Skin-sized image treated as a texture")
+        elif capped:
             self.statusBar().showMessage(
                 "Not a skin — pixelized as a texture "
                 "(downscaled from %d x %d)" % (src_w, src_h))
         else:
             self.statusBar().showMessage(
                 "Not a skin — pixelized as a texture")
+
+    def _texture_settings_suffix(self, result):
+        """What the texture controls did to this render, in the
+        detail line's words — only the settings that differ
+        from a fresh import's defaults, so an untouched texture
+        keeps its plain detail line. The settings are the ones
+        the worker ran with (they ride back in the result), not
+        the controls as they stand when the render lands."""
+        settings = result.get("settings", {})
+        if not settings:
+            return ""
+        cap_w, cap_h = texture_target_size(self.code_texture_image)
+        parts = []
+        if ((settings.get("width"), settings.get("height"))
+                != (cap_w, cap_h)):
+            parts.append("%d x %d" % (settings["width"],
+                                     settings["height"]))
+        palette = settings.get("palette", "image")
+        if palette != "image":
+            parts.append(PALETTE_LABELS[palette])
+        if settings.get("max_colors", MAX_COLORS) != MAX_COLORS:
+            parts.append("%d colors" % settings["max_colors"])
+        if settings.get("dither"):
+            parts.append("dithered")
+        if not parts:
+            return ""
+        return ", " + ", ".join(parts)
 
     def _on_texture_failed(self, message):
         # See _on_prompt_progress: only the current worker counts.
@@ -4232,6 +4405,109 @@ class MainWindow(QMainWindow):
             if self.texture_worker.isRunning():
                 self.texture_worker.wait(10000)
             self.texture_worker = None
+
+    def _texture_settings(self):
+        """The texture controls as a pixelize_texture call."""
+        return {
+            "width": self.code_texture_width_spin.value(),
+            "height": self.code_texture_height_spin.value(),
+            "palette": self.code_texture_palette_combo.currentData(),
+            "max_colors": self.code_texture_colors_spin.value(),
+            "dither": self.code_texture_dither_check.isChecked(),
+        }
+
+    def _start_texture_worker(self):
+        """Pixelize the current texture source on a worker thread
+        with the controls' settings snapshotted at start."""
+        self._stop_texture_worker()
+        self.texture_worker = TextureWorker(
+            self.code_texture_image, self.code_texture_path,
+            settings=self._texture_settings(), parent=self)
+        self.texture_worker.done.connect(self._on_texture_done)
+        self.texture_worker.failed.connect(self._on_texture_failed)
+        self.statusBar().showMessage("Loading texture…")
+        self.texture_worker.start()
+
+    def _reset_code_texture_controls(self, image):
+        """A fresh texture's defaults: its native size (capped
+        at 512), the from-image palette, 256 colors, no
+        dithering — the render an untouched texture always had.
+        Signals blocked, so the reset itself starts no worker."""
+        target_w, target_h = texture_target_size(image)
+        self.code_texture_width_spin.blockSignals(True)
+        self.code_texture_height_spin.blockSignals(True)
+        self.code_texture_palette_combo.blockSignals(True)
+        self.code_texture_colors_spin.blockSignals(True)
+        self.code_texture_dither_check.blockSignals(True)
+        try:
+            self.code_texture_width_spin.setValue(target_w)
+            self.code_texture_height_spin.setValue(target_h)
+            self.code_texture_palette_combo.setCurrentIndex(0)
+            self.code_texture_colors_spin.setValue(MAX_COLORS)
+            self.code_texture_dither_check.setChecked(False)
+        finally:
+            self.code_texture_width_spin.blockSignals(False)
+            self.code_texture_height_spin.blockSignals(False)
+            self.code_texture_palette_combo.blockSignals(False)
+            self.code_texture_colors_spin.blockSignals(False)
+            self.code_texture_dither_check.blockSignals(False)
+
+    def _on_code_texture_control_changed(self):
+        """A texture control moved — wait for the controls to
+        settle, then re-render. Nothing to do while no texture
+        is showing."""
+        if (self.code_kind != "texture"
+                or self.code_texture_image is None):
+            return
+        self._texture_debounce_timer.start(TEXTURE_DEBOUNCE_MS)
+
+    def _on_texture_debounce(self):
+        if (self.code_kind == "texture"
+                and self.code_texture_image is not None):
+            self._start_texture_worker()
+
+    def _update_code_texture_controls(self):
+        """Show the texture controls and the override button for
+        the asset on screen: the controls only while a texture
+        is showing, the override button only for a skin-sized
+        asset — and it stays visible while one is overridden,
+        so the way back is always there. The button's text and
+        tooltip name the action it will take."""
+        skin_sized = self.code_skin_layout is not None
+        self.code_treat_texture_btn.setVisible(skin_sized)
+        if self.code_treat_as_texture:
+            self.code_treat_texture_btn.setText("Treat as skin")
+            self.code_treat_texture_btn.setToolTip(
+                "Go back to splitting this image into skin parts")
+        else:
+            self.code_treat_texture_btn.setText("Treat as texture")
+            self.code_treat_texture_btn.setToolTip(
+                "Render this skin-sized image as a plain texture "
+                "instead of splitting it into skin parts")
+        self.code_texture_section.setVisible(
+            self.code_kind == "texture")
+
+    def _on_treat_texture_toggled(self):
+        """The skin override (task 26): a skin-sized image
+        re-renders as a plain texture, or back into skin parts.
+        The source image is already in memory either way, so
+        the toggle back needs no re-read."""
+        if self.code_skin_layout is None:
+            return
+        if self.code_treat_as_texture:
+            self.code_treat_as_texture = False
+            self._stop_texture_worker()
+            self._show_skin(self.code_texture_image,
+                            self.code_texture_path,
+                            self.code_skin_layout)
+            return
+        self.code_treat_as_texture = True
+        self._set_parts_button(
+            False,
+            "This image is being treated as a texture — switch "
+            "back to a skin to export its parts")
+        self._reset_code_texture_controls(self.code_texture_image)
+        self._start_texture_worker()
 
     def _on_import_code(self):
         paths, _ = QFileDialog.getOpenFileNames(

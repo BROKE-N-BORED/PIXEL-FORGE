@@ -23,7 +23,11 @@ dithering, so the pixels come through unchanged — except that a
 texture bigger than TEXTURE_MAX_DIMENSION on its longest side
 is downscaled to fit that cap first. The core at native size
 with a 256-color palette took 209 s on a 4000x3000 photo, so
-the cap is what keeps a big photo import to seconds.
+the cap is what keeps a big photo import to seconds. The Code
+tab's texture controls (task 26) pass a size, palette, color
+limit, and dithering through pixelize_texture — the defaults
+above are what a fresh import uses, so an untouched texture
+still renders exactly as it did before those controls existed.
 """
 
 from pathlib import Path
@@ -165,19 +169,34 @@ def texture_target_size(image):
                                TEXTURE_MAX_DIMENSION, True)
 
 
-def pixelize_texture(image):
-    """A non-skin image as a texture: through the Item 1 core at
-    its native size, 256-color from-image palette, no dithering —
-    the pixels come through unchanged. Images bigger than
+def pixelize_texture(image, width=None, height=None, palette="image",
+                     max_colors=256, dither=False):
+    """A non-skin image as a texture: through the Item 1 core.
+
+    Defaults are the original behavior — native size, 256-color
+    from-image palette, no dithering, so the pixels come through
+    unchanged. Pass width/height to render at another size, a
+    named palette (\"pico8\", \"gameboy\", \"grayscale\") or a
+    smaller max_colors to limit the colors, dither=True for
+    ordered dithering. Images bigger than
     TEXTURE_MAX_DIMENSION on the longest side are downscaled to
     fit the cap first (aspect kept), so a big photo import takes
-    seconds instead of minutes; smaller textures are untouched."""
+    seconds instead of minutes; smaller textures are untouched.
+    A requested size is never bigger than the cap box either —
+    the Code tab's size spins cap at 512, and a caller asking
+    for more gets the cap fit instead."""
     target_w, target_h = texture_target_size(image)
     if (target_w, target_h) != (image.width(), image.height()):
         image = downscale(image, target_w, target_h)
-    return pixelize_image(image, width=image.width(),
-                          height=image.height(), palette="image",
-                          max_colors=256, dither=False)
+    if width is None:
+        width = image.width()
+    if height is None:
+        height = image.height()
+    width = min(width, TEXTURE_MAX_DIMENSION)
+    height = min(height, TEXTURE_MAX_DIMENSION)
+    return pixelize_image(image, width=width, height=height,
+                          palette=palette, max_colors=max_colors,
+                          dither=dither)
 
 
 def extract_skin(path, out_dir):

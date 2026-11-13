@@ -112,7 +112,12 @@ bash uninstall.sh
   A texture bigger than 512 px on its longest side is
   downscaled to fit that cap first (the info line says so),
   and loads on a worker thread, so a big photo never freezes
-  the window.
+  the window. A texture gets Size, Palette, Max colors, and
+  Dithering controls (a fresh import starts at native size,
+  256 colors, no dithering), and a skin-sized image that is
+  not really a skin can be treated as a texture instead with
+  the "Treat as texture" button — "Treat as skin" goes back
+  to the split view.
 - **Library tab:** every sprite you save from the other tabs, with
   tags and search. Save to library on the Image tab (current
   result), the Prompt tab (pixelized keeper), or the Code tab

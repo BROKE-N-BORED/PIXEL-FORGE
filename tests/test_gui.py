@@ -2961,6 +2961,236 @@ class CodeTabTests(unittest.TestCase):
         self.assertGreater(label.height(), 10)
 
 
+class CodeTextureControlsTests(unittest.TestCase):
+    """Task 26 — the Code tab's texture controls and the skin
+    override. Visibility is checked with isHidden (the flag
+    setVisible controls): isVisible is False for every widget
+    while the window was never shown."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        cls.game = os.path.join(cls.tmp, "game.py")
+        with open(cls.game, "w") as handle:
+            handle.write("HERO = [[0, 1], [1, 0]]\n")
+        # A 64x64 non-skin: a solid color, so it is unmistakably
+        # not a Minecraft skin — but skin-sized, so detection by
+        # size alone reads it as one.
+        cls.nonskin = write_image(
+            make_solid_image(64, 64, 200, 30, 30),
+            os.path.join(cls.tmp, "nonskin.png"))
+        cls.texture = write_image(
+            make_solid_image(16, 16, 1, 2, 3),
+            os.path.join(cls.tmp, "grass.png"))
+        # 48x48, deliberately NOT skin-sized: a 64x64 gradient
+        # would be detected as a skin and never reach the
+        # texture path at all.
+        cls.gradient = write_image(
+            make_gradient_image(48, 48),
+            os.path.join(cls.tmp, "gradient.png"))
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self.win = MainWindow(library_dir=self.lib_dir)
+        self.win.tabs.setCurrentIndex(3)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _wait_for_texture(self, timeout=30):
+        """Pump until the texture worker lands (or the timeout
+        hits). Returns True when the Code tab holds a texture."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.code_kind == "texture"
+                    and self.win.texture_worker is None):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _wait_for_code_size(self, width, height, timeout=30):
+        """Pump until the selected asset renders at the given
+        size — a control change is debounced 300 ms and the
+        re-render runs on a worker, so the size lands later."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            image = self.win.code_image
+            if (image is not None
+                    and image.width() == width
+                    and image.height() == height
+                    and self.win.texture_worker is None):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _wait_for_asset_count(self, count, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.code_list.count() == count
+                    and self.win.texture_worker is None):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_texture_controls_visible_with_native_defaults(self):
+        self.assertTrue(self.win.load_game_asset(self.texture))
+        self.assertTrue(self._wait_for_texture())
+        self.assertFalse(self.win.code_texture_section.isHidden())
+        self.assertEqual(self.win.code_texture_width_spin.value(),
+                         16)
+        self.assertEqual(self.win.code_texture_height_spin.value(),
+                         16)
+        self.assertEqual(
+            self.win.code_texture_palette_combo.currentData(),
+            "image")
+        self.assertEqual(self.win.code_texture_colors_spin.value(),
+                         256)
+        self.assertFalse(
+            self.win.code_texture_dither_check.isChecked())
+        # A plain texture is not skin-sized: no override button.
+        self.assertTrue(self.win.code_treat_texture_btn.isHidden())
+
+    def test_texture_size_change_rerenders(self):
+        self.assertTrue(self.win.load_game_asset(self.texture))
+        self.assertTrue(self._wait_for_texture())
+        self.win.code_texture_width_spin.setValue(8)
+        self.win.code_texture_height_spin.setValue(8)
+        self.assertTrue(self._wait_for_code_size(8, 8))
+        self.assertIn("8 x 8", self.win.code_info_label.text())
+        # Export writes the current rendering, not the import.
+        out_path = os.path.join(self.tmp, "grass-8.png")
+        self.assertTrue(self.win.export_code_asset(out_path))
+        from PySide6.QtGui import QImage
+        image = QImage(out_path)
+        self.assertEqual((image.width(), image.height()), (8, 8))
+
+    def test_texture_palette_and_colors_rerender(self):
+        from pixel_forge.pixelize import count_opaque_colors
+        self.assertTrue(self.win.load_game_asset(self.gradient))
+        self.assertTrue(self._wait_for_texture())
+        self.assertGreater(count_opaque_colors(self.win.code_image),
+                           4)
+        self.win.code_texture_palette_combo.setCurrentIndex(
+            self.win.code_texture_palette_combo.findData("pico8"))
+        self.win.code_texture_colors_spin.setValue(4)
+        deadline = time.monotonic() + 30
+        landed = False
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.texture_worker is None
+                    and count_opaque_colors(self.win.code_image)
+                    <= 4):
+                landed = True
+                break
+            time.sleep(0.05)
+        self.assertTrue(landed, "palette re-render never landed")
+        self.assertIn("PICO-8", self.win.code_info_label.text())
+        self.assertIn("4 colors", self.win.code_info_label.text())
+
+    def test_texture_dither_changes_output(self):
+        from pixel_forge.pixelize import count_opaque_colors
+        self.assertTrue(self.win.load_game_asset(self.gradient))
+        self.assertTrue(self._wait_for_texture())
+        self.win.code_texture_palette_combo.setCurrentIndex(
+            self.win.code_texture_palette_combo.findData(
+                "gameboy"))
+        self.win.code_texture_colors_spin.setValue(4)
+        # Wait for the gameboy re-render to land first, so the
+        # before/after comparison isolates the dither toggle —
+        # the size never changes here, so a size wait would
+        # return at once on the still-old render.
+        deadline = time.monotonic() + 30
+        landed = False
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.texture_worker is None
+                    and count_opaque_colors(self.win.code_image)
+                    <= 4):
+                landed = True
+                break
+            time.sleep(0.05)
+        self.assertTrue(landed, "gameboy re-render never landed")
+        width, height = (self.win.code_image.width(),
+                         self.win.code_image.height())
+        before = [self.win.code_image.pixel(x, y)
+                  for y in range(height) for x in range(width)]
+        self.win.code_texture_dither_check.setChecked(True)
+        deadline = time.monotonic() + 30
+        changed = False
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if self.win.texture_worker is None:
+                after = [self.win.code_image.pixel(x, y)
+                         for y in range(height) for x in range(width)]
+                if after != before:
+                    changed = True
+                    break
+            time.sleep(0.05)
+        self.assertTrue(changed, "dithering changed no pixels")
+
+    def test_skin_shows_override_not_texture_controls(self):
+        self.assertTrue(self.win.load_game_asset(self.nonskin))
+        self.assertEqual(self.win.code_list.count(), 13)
+        self.assertFalse(self.win.code_treat_texture_btn.isHidden())
+        self.assertEqual(self.win.code_treat_texture_btn.text(),
+                         "Treat as texture")
+        self.assertTrue(self.win.code_texture_section.isHidden())
+        self.assertTrue(self.win.code_export_parts_btn.isEnabled())
+
+    def test_treat_as_texture_renders_one_texture(self):
+        self.assertTrue(self.win.load_game_asset(self.nonskin))
+        self.win.code_treat_texture_btn.click()
+        self.assertTrue(self._wait_for_asset_count(1))
+        self.assertEqual(self.win.code_kind, "texture")
+        self.assertEqual((self.win.code_image.width(),
+                          self.win.code_image.height()), (64, 64))
+        self.assertFalse(self.win.code_export_parts_btn.isEnabled())
+        self.assertEqual(self.win.code_treat_texture_btn.text(),
+                         "Treat as skin")
+        self.assertFalse(self.win.code_texture_section.isHidden())
+        self.assertIn("treated as a texture",
+                      self.win.code_info_label.text())
+
+    def test_treat_as_skin_restores_parts(self):
+        self.assertTrue(self.win.load_game_asset(self.nonskin))
+        self.win.code_treat_texture_btn.click()
+        self.assertTrue(self._wait_for_asset_count(1))
+        self.win.code_treat_texture_btn.click()
+        self.app.processEvents()
+        self.assertEqual(self.win.code_kind, "skin")
+        self.assertEqual(self.win.code_list.count(), 13)
+        self.assertTrue(self.win.code_export_parts_btn.isEnabled())
+        self.assertEqual(self.win.code_treat_texture_btn.text(),
+                         "Treat as texture")
+        self.assertTrue(self.win.code_texture_section.isHidden())
+
+    def test_new_import_resets_override(self):
+        self.assertTrue(self.win.load_game_asset(self.nonskin))
+        self.win.code_treat_texture_btn.click()
+        self.assertTrue(self._wait_for_asset_count(1))
+        self.assertTrue(self.win.load_game_asset(self.nonskin))
+        self.assertEqual(self.win.code_kind, "skin")
+        self.assertEqual(self.win.code_list.count(), 13)
+        self.assertEqual(self.win.code_treat_texture_btn.text(),
+                         "Treat as texture")
+
+    def test_code_import_hides_texture_controls(self):
+        self.assertTrue(self.win.load_game_asset(self.texture))
+        self.assertTrue(self._wait_for_texture())
+        self.assertFalse(self.win.code_texture_section.isHidden())
+        self.assertTrue(self.win.load_code(self.game))
+        self.assertTrue(self.win.code_texture_section.isHidden())
+        self.assertTrue(self.win.code_treat_texture_btn.isHidden())
+
+
 class B15MinorGroupTests(unittest.TestCase):
     """Task 19 (B15 minor group): the GUI items — negative-prompt
     scroll, Code info duplication, frame-export overwrite confirm,

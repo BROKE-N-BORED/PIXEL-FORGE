@@ -1,5 +1,29 @@
 # Pixel Forge changelog
 
+## 0.37 — 2026-11-13
+
+Code tab controls — task-list item #26, two sub-items in one
+release:
+
+- Textures get Size, Palette, Max colors, and Dithering
+  controls on the Code tab, mirroring the Image tab's — a
+  texture used to render at fixed native size with a 256-color
+  from-image palette and no dithering, and now a change
+  re-renders it through the worker thread, so the window never
+  freezes. A fresh import still starts at its native size
+  (capped at 512), 256 colors, no dithering — an untouched
+  texture renders exactly as before. The info line names the
+  settings when they differ from those defaults, and Export
+  PNG / Save to library use the current rendering.
+- Skin-detection override: a 64x64 or 64x32 image is detected
+  as a skin by size alone, so a non-skin of exactly that size
+  used to be split into parts with no way out. "Treat as
+  texture" re-renders it as a plain texture with the controls
+  above; "Treat as skin" goes back to the split view with
+  Export parts available. The button shows only for skin-sized
+  assets, and the override resets on a new import. The info
+  line says plainly which way the asset is being treated.
+
 ## 0.36 — 2026-11-13
 
 Video guardrails — task-list item #25, five sub-items in one

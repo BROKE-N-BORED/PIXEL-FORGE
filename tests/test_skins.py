@@ -14,10 +14,12 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from helpers import (make_noisy_image,  # noqa: E402
+from helpers import (make_gradient_image, make_noisy_image,  # noqa: E402
                      make_solid_image, write_image)
 from pixel_forge.image import Image, argb  # noqa: E402
-from pixel_forge.pixelize import PixelForgeError, pixelize_image  # noqa: E402
+from pixel_forge.palettes import NAMED_PALETTES  # noqa: E402
+from pixel_forge.pixelize import (PixelForgeError,  # noqa: E402
+                                 count_opaque_colors, pixelize_image)
 from pixel_forge.skins import (detect_skin, extract_skin,  # noqa: E402
                                pixelize_texture, skin_figure,
                                skin_parts, texture_target_size)
@@ -265,6 +267,75 @@ class TextureCapTests(unittest.TestCase):
                 self.assertEqual(capped.pixel(x, y),
                                  direct.pixel(x, y),
                                  "pixel differs at %d,%d" % (x, y))
+
+
+class TextureSettingsTests(unittest.TestCase):
+    """Task 26: pixelize_texture takes a size, palette, color
+    limit, and dithering — the Code tab's texture controls."""
+
+    def test_texture_with_size_settings(self):
+        image = make_noisy_image(64, 64, rects=200)
+        texture = pixelize_texture(image, width=32, height=16)
+        self.assertEqual((texture.width(), texture.height()),
+                         (32, 16))
+
+    def test_texture_with_palette_and_colors(self):
+        image = make_gradient_image(64, 64)
+        texture = pixelize_texture(image, palette="pico8",
+                                   max_colors=4)
+        self.assertLessEqual(count_opaque_colors(texture), 4)
+        pico8 = {(r, g, b) for r, g, b in NAMED_PALETTES["pico8"]}
+        for y in range(texture.height()):
+            for x in range(texture.width()):
+                r, g, b, a = pixel(texture, x, y)
+                if a:
+                    self.assertIn((r, g, b), pico8,
+                                  "pixel %d,%d not a PICO-8 color"
+                                  % (x, y))
+
+    def test_texture_dither_changes_output(self):
+        image = make_gradient_image(64, 64)
+        flat = pixelize_texture(image, palette="gameboy",
+                                max_colors=4, dither=False)
+        dithered = pixelize_texture(image, palette="gameboy",
+                                    max_colors=4, dither=True)
+        self.assertEqual((flat.width(), flat.height()),
+                         (dithered.width(), dithered.height()))
+        differ = sum(
+            1 for y in range(64) for x in range(64)
+            if flat.pixel(x, y) != dithered.pixel(x, y))
+        self.assertGreater(differ, 0,
+                           "dithering changed no pixels")
+
+    def test_texture_defaults_match_explicit_defaults(self):
+        # The bare call and the explicit default call are the
+        # same render — the defaults are the old behavior.
+        image = make_noisy_image(64, 64, rects=200)
+        bare = pixelize_texture(image)
+        explicit = pixelize_texture(image, width=64, height=64,
+                                    palette="image", max_colors=256,
+                                    dither=False)
+        self.assertEqual((bare.width(), bare.height()),
+                         (explicit.width(), explicit.height()))
+        for y in range(64):
+            for x in range(64):
+                self.assertEqual(bare.pixel(x, y),
+                                 explicit.pixel(x, y),
+                                 "pixel differs at %d,%d" % (x, y))
+
+    def test_texture_settings_respect_the_cap(self):
+        image = make_noisy_image(1024, 1024, rects=200)
+        capped = pixelize_texture(image, width=512, height=512)
+        self.assertEqual((capped.width(), capped.height()),
+                         (512, 512))
+        small = pixelize_texture(image, width=64, height=64)
+        self.assertEqual((small.width(), small.height()),
+                         (64, 64))
+        # A request over the cap gets the cap fit, not the
+        # request — the core must never see a 1024-wide image.
+        over = pixelize_texture(image, width=1024, height=1024)
+        self.assertEqual((over.width(), over.height()),
+                         (512, 512))
 
 
 if __name__ == "__main__":
