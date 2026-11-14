@@ -109,13 +109,17 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(set(os.listdir(self.tmp)), before)
 
     def test_installer_window_smoke(self):
+        from pixel_forge import __version__
         from pixel_forge.installer import InstallerWindow, STEPS
 
         win = InstallerWindow(dryrun=True)
         win.show()
         self.app.processEvents()
         self.assertTrue(win.isVisible())
-        self.assertEqual(win.windowTitle(), "Install Pixel Forge")
+        # The title carries the version it installs, from the
+        # package (task 76) — never hardcoded twice.
+        self.assertEqual(win.windowTitle(),
+                         "Install Pixel Forge %s" % __version__)
         self.assertEqual(win.steps_list.count(), len(STEPS))
         self.assertTrue(win.install_btn.isEnabled())
         self.assertFalse(win.launch_btn.isEnabled())
@@ -232,6 +236,9 @@ class InstallerTests(unittest.TestCase):
         lines = []
         ctx = InstallContext(lines.append, dryrun=False)
         ctx.install_image_engine = True
+        # Room on the disk: the failure under test is the missing
+        # build tools, not the v0.53 disk check.
+        ctx.free_bytes_override = 100 * 1024 ** 3
         ctx.which = lambda _name: None  # git, cmake, g++ all missing
         ctx.run_admin = lambda _script, timeout=None: 100
         result = step_image_engine(ctx)
@@ -286,6 +293,12 @@ class ImageEnginePinTests(unittest.TestCase):
         ctx = InstallContext(lines.append, dryrun=False)
         ctx.install_image_engine = True
         ctx.home = Path(self.tmp)
+        # Room on the disk: the fake home is under /tmp's 512 MB
+        # tmpfs, and the v0.53 disk check would refuse a 2 GB
+        # build there. The disk check itself is pinned by
+        # DiskSpaceTests; these tests drive the clone and the
+        # download.
+        ctx.free_bytes_override = 100 * 1024 ** 3
         # Build tools present, so the step reaches the clone.
         ctx.which = lambda _name: "/usr/bin/" + _name
         ctx.run = run
@@ -632,6 +645,11 @@ class ImageEngineResumeTests(unittest.TestCase):
         ctx = InstallContext(lines.append, dryrun=False)
         ctx.install_image_engine = True
         ctx.home = Path(self.tmp)
+        # Room on the disk: the fake home is under /tmp's 512 MB
+        # tmpfs, and the v0.53 disk check would refuse a 2 GB
+        # build there. The disk check itself is pinned by
+        # DiskSpaceTests; these tests drive the resume paths.
+        ctx.free_bytes_override = 100 * 1024 ** 3
         ctx.which = lambda _name: "/usr/bin/" + _name
         ctx.run = recording_run
         ctx.run_admin = lambda _script, timeout=None: 0
@@ -993,6 +1011,10 @@ class ImageEngineResumeTests(unittest.TestCase):
         ctx = InstallContext(lines.append, dryrun=False)
         ctx.install_image_engine = True
         ctx.home = Path(self.tmp)
+        # Room on the disk: the fake home is under /tmp's 512 MB
+        # tmpfs, and the v0.53 disk check would refuse a 2.1 GB
+        # download there.
+        ctx.free_bytes_override = 100 * 1024 ** 3
         ctx.which = lambda _name: "/usr/bin/" + _name
         ctx.run = run
         ctx.run_admin = lambda _script, timeout=None: 0
@@ -1172,9 +1194,17 @@ class InstallerGatingTests(unittest.TestCase):
         self.assertEqual(len(results), len(STEPS))
         self.assertEqual(calls, [],
                          "step_files ran even though packages failed")
-        self.assertEqual(results[5].status, StepResult.FAIL)
-        self.assertEqual(results[6].status, StepResult.SKIPPED)
-        self.assertEqual(results[6].detail, "packages step failed")
+        # Indices from the step keys, not hardcoded — the order
+        # changed in v0.53 (cheap steps first) and may again.
+        keys = [key for key, _title, _func in STEPS]
+        packages_index = keys.index("packages")
+        files_index = keys.index("files")
+        self.assertEqual(results[packages_index].status,
+                         StepResult.FAIL)
+        self.assertEqual(results[files_index].status,
+                         StepResult.SKIPPED)
+        self.assertEqual(results[files_index].detail,
+                         "packages step failed")
         self.assertIn("Skipped: the packages step failed",
                       "\n".join(lines))
 
@@ -1327,9 +1357,13 @@ class InstallerGatingTests(unittest.TestCase):
         self.assertFalse(win.launch_btn.isEnabled())
         self.assertIn("1 failed step",
                       win.statusBar().currentMessage())
-        files_item = win.steps_list.item(6).text()
+        # Indices from the step keys, not hardcoded — the order
+        # changed in v0.53 (cheap steps first) and may again.
+        keys = [key for key, _title, _func in steps]
+        files_item = win.steps_list.item(keys.index("files")).text()
         self.assertIn("skipped", files_item)
-        packages_item = win.steps_list.item(5).text()
+        packages_item = win.steps_list.item(
+            keys.index("packages")).text()
         self.assertIn("failed", packages_item)
         gui_link = Path(home) / ".local" / "bin" / "pixel-forge-gui"
         self.assertFalse(gui_link.is_symlink())
@@ -1708,6 +1742,42 @@ def _imagegen_constant(name):
     raise AssertionError("no %s in imagegen.py" % name)
 
 
+def _installer_constant(name):
+    """A module-level constant from pixel_forge/installer.py, read
+    from the source with ast — no import, so the test pins the
+    literal the shell installer must match (the disk-space
+    allowances, task 76)."""
+    import ast
+
+    path = os.path.join(ROOT, "pixel_forge", "installer.py")
+    with open(path) as fh:
+        tree = ast.parse(fh.read())
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    return ast.literal_eval(node.value)
+    raise AssertionError("no %s in installer.py" % name)
+
+
+def _package_version():
+    """The package version from pixel_forge/__init__.py, read from
+    the source with ast — no import, so the test pins the literal
+    the installers must print."""
+    import ast
+
+    path = os.path.join(ROOT, "pixel_forge", "__init__.py")
+    with open(path) as fh:
+        tree = ast.parse(fh.read())
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) \
+                        and target.id == "__version__":
+                    return ast.literal_eval(node.value)
+    raise AssertionError("no __version__ in pixel_forge/__init__.py")
+
+
 def _model_download_block():
     """The exact model download + hash-check lines from
     install.sh, verbatim — from the curl line through the closing
@@ -1739,6 +1809,30 @@ def _model_resume_block():
     start = text.index('  SD_MODEL_FOUND="$(find_sd_model)"')
     marker = 'echo "Image model already downloaded: $SD_MODEL_FOUND"'
     end = text.index(marker, start) + len(marker) + len("\n  fi")
+    return text[start:end]
+
+
+def _uninstall_entry_block():
+    """The exact uninstall-entry lines from install.sh, verbatim —
+    from the `if cp "$DIR/uninstall.sh"` through its closing `fi`.
+    The tests below run these lines, not a paraphrase of them."""
+    text = _install_sh_text()
+    start = text.index('if cp "$DIR/uninstall.sh"')
+    marker = ('record_warning "the Uninstall menu entry could not '
+              'be created"')
+    end = text.index(marker, start) + len(marker) + len("\nfi")
+    return text[start:end]
+
+
+def _interrupt_trap_block():
+    """The exact Ctrl-C handler from install.sh, verbatim — from
+    the CURRENT_PID declaration through the `trap on_interrupt`
+    line. The tests below run these lines, not a paraphrase of
+    them."""
+    text = _install_sh_text()
+    start = text.index('CURRENT_PID=""')
+    marker = "trap on_interrupt INT TERM"
+    end = text.index(marker, start) + len(marker) + len("\n")
     return text[start:end]
 
 
@@ -1785,6 +1879,7 @@ class InstallScriptPinTests(unittest.TestCase):
             "SD_MODEL_FILE=LCM_Dreamshaper_v7-f16.gguf\n"
             "SD_MODEL_URL=https://example.invalid/model.gguf\n"
             "SD_MODEL_SHA256=%s\n"
+            "SD_MODEL_SIZE=2134675232\n"
             "curl() { mkdir -p \"$SD_MODEL_HOME\"; "
             "printf '%%s' %s > \"$SD_MODEL_HOME/$SD_MODEL_FILE\"; }\n"
             % (shlex.quote(home), sha, shlex.quote(content))
@@ -1970,6 +2065,7 @@ class InstallScriptResumeTests(unittest.TestCase):
             "SD_REPO=\"https://example.invalid/sd.cpp\"\n"
             "SD_BUILD_ROOT=%s\n"
             "SD_INSTALL_DIR=%s\n"
+            "SD_ENGINE_BUILD_BYTES=2147483648\n"
             "SD_BIN=\"\"\n"
             "CALL_LOG=%s\n"
             "DESCRIBE_TAG=%s\n"
@@ -1977,6 +2073,11 @@ class InstallScriptResumeTests(unittest.TestCase):
             "BUILD_FAIL_ONCE=%d\n"
             "TMPD=%s\n"
             "PIXELFORGE_MEMINFO=%s\n"
+            # Room on the disk: the build root is under /tmp's
+            # 512 MB tmpfs, and the v0.53 disk check would refuse
+            # a 2 GB build there. The disk check itself is pinned
+            # by DiskSpaceScriptTests.
+            "PIXELFORGE_FREE_BYTES=107374182400\n"
             "nproc() { echo 4; }\n"
             "g++() { return 0; }\n"
             # sudo runs the command for real, except ln — the
@@ -1992,6 +2093,11 @@ class InstallScriptResumeTests(unittest.TestCase):
             + self._GIT_STUB + self._CMAKE_STUB
             + _install_sh_function("build_jobs")
             + _install_sh_function("backup_sd_cpp")
+            + _install_sh_function("format_bytes")
+            + _install_sh_function("free_bytes_for")
+            + _install_sh_function("check_disk_space")
+            + _install_sh_function("cmake_configure")
+            + _install_sh_function("cmake_build")
             + _engine_build_block()
         )
         return script, {"build_root": build_root,
@@ -2113,10 +2219,18 @@ class InstallScriptResumeTests(unittest.TestCase):
             "SD_MODEL_SHA256=%s\n"
             "SD_MODEL_SIZE=2134675232\n"
             "CALL_LOG=%s\n"
+            # Room on the disk: the model home is under /tmp's
+            # 512 MB tmpfs, and the v0.53 disk check would refuse
+            # a 2.1 GB download there. The disk check itself is
+            # pinned by DiskSpaceScriptTests.
+            "PIXELFORGE_FREE_BYTES=107374182400\n"
             "curl() { %s; }\n"
             % (shlex.quote(model_home), sha,
                shlex.quote(call_log), curl_body)
             + _install_sh_function("find_sd_model")
+            + _install_sh_function("format_bytes")
+            + _install_sh_function("free_bytes_for")
+            + _install_sh_function("check_disk_space")
             + _model_resume_block()
         )
         return script, model_home, call_log
@@ -2534,6 +2648,10 @@ class InstallerFailureTraceTests(unittest.TestCase):
         ctx = InstallContext(lines.append, dryrun=False)
         ctx.install_image_engine = True
         ctx.home = Path(self.tmp)
+        # Room on the disk: the fake home is under /tmp's 512 MB
+        # tmpfs, and the v0.53 disk check would refuse a 2 GB
+        # build there.
+        ctx.free_bytes_override = 100 * 1024 ** 3
         ctx.which = lambda _name: "/usr/bin/" + _name
         ctx.run = run
 
@@ -3004,6 +3122,11 @@ class UninstallScriptTests(unittest.TestCase):
         apps = os.path.join(home, ".local", "share", "applications")
         os.makedirs(apps)
         Path(os.path.join(apps, "pixel-forge.desktop")).touch()
+        # The v0.53 uninstall entry: its menu file, and the
+        # uninstall script copied into the install prefix.
+        Path(os.path.join(
+            apps, "pixel-forge-uninstall.desktop")).touch()
+        Path(os.path.join(prefix, "uninstall.sh")).touch()
         icons = os.path.join(home, ".local", "share", "icons",
                              "hicolor")
         for size in ("48x48", "128x128", "256x256"):
@@ -3085,6 +3208,22 @@ class UninstallScriptTests(unittest.TestCase):
         self.assertIn("Kept:", proc.stdout)
         self.assertIn("--purge", proc.stdout)
 
+    def test_plain_uninstall_removes_the_uninstall_entry(self):
+        # Task 76 (7): the plain run removes the Uninstall menu
+        # entry (it is the entry that launched this script), and
+        # keeps the copied uninstall script — it lives in the
+        # prefix, which a plain uninstall keeps, so --purge can
+        # still be run by hand afterwards.
+        home, engine = self._installed_home()
+        proc = self._run_uninstall(home, engine, [])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(os.path.exists(
+            os.path.join(home, ".local", "share", "applications",
+                         "pixel-forge-uninstall.desktop")))
+        self.assertTrue(os.path.exists(
+            os.path.join(home, ".local", "share", "pixel-forge",
+                         "uninstall.sh")))
+
     def test_purge_removes_the_engine_and_the_install_folder(self):
         home, engine = self._installed_home()
         proc = self._run_uninstall(home, engine, ["--purge"])
@@ -3150,6 +3289,878 @@ class UninstallScriptTests(unittest.TestCase):
         self.assertIn("could not remove", proc.stdout)
         self.assertIn("sudo rm -rf", proc.stdout)
 
+
+# ---------------------------------------------------------------- task 76
+
+@unittest.skipUnless(HAS_QT, "PySide6 not available")
+class DiskSpaceTests(unittest.TestCase):
+    """Task 76 (1): the disk-space pre-check. Fits, does not fit,
+    and unknown — never a crash, never a silent proceed."""
+
+    def _ctx(self, override):
+        from pixel_forge.installer import InstallContext
+
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.free_bytes_override = override
+        return ctx, lines
+
+    def test_disk_space_ok_when_it_fits(self):
+        from pixel_forge.installer import disk_space_ok
+
+        self.assertTrue(disk_space_ok(
+            "/tmp", 2 * 1024 ** 3, free_override=100 * 1024 ** 3))
+
+    def test_disk_space_refuses_when_it_does_not_fit(self):
+        from pixel_forge.installer import disk_space_ok
+
+        self.assertFalse(disk_space_ok(
+            "/tmp", 2 * 1024 ** 3, free_override=100 * 1024 ** 2))
+
+    def test_disk_space_ok_when_free_is_unknown(self):
+        from pixel_forge.installer import disk_space_ok
+
+        # An unreadable disk never refuses: the check cannot
+        # measure it, so the install proceeds.
+        with mock.patch.object(shutil, "disk_usage",
+                               side_effect=OSError("no disk")):
+            self.assertTrue(disk_space_ok("/tmp", 2 * 1024 ** 3))
+
+    def test_disk_space_ok_with_a_per_path_override(self):
+        from pixel_forge.installer import disk_space_ok
+
+        override = {"/tmp/tight": 100 * 1024 ** 2}
+        self.assertFalse(disk_space_ok(
+            "/tmp/tight", 2 * 1024 ** 3, free_override=override))
+        # A path the override does not name falls back to the
+        # real disk — 1 byte fits anywhere.
+        self.assertTrue(disk_space_ok(
+            "/tmp", 1, free_override=override))
+
+    def test_free_bytes_for_reads_the_nearest_existing_parent(self):
+        from pixel_forge.installer import free_bytes_for
+
+        free = free_bytes_for("/tmp/does-not-exist-pf-v53/sub/dir")
+        self.assertIsInstance(free, int)
+        self.assertGreater(free, 0)
+
+    def test_check_disk_space_refusal_names_free_vs_needed(self):
+        from pixel_forge.installer import check_disk_space
+
+        ctx, lines = self._ctx(100 * 1024 ** 2)
+        self.assertFalse(check_disk_space(
+            ctx, "the install", "/tmp", 2 * 1024 ** 3))
+        log = "\n".join(lines)
+        self.assertIn("Not enough disk space", log)
+        self.assertIn("100 MB", log)
+        self.assertIn("2.0 GB", log)
+
+    def test_check_disk_space_ok_logs_the_amounts(self):
+        from pixel_forge.installer import check_disk_space
+
+        ctx, lines = self._ctx(100 * 1024 ** 3)
+        self.assertTrue(check_disk_space(
+            ctx, "the install", "/tmp", 2 * 1024 ** 3))
+        self.assertIn("OK", "\n".join(lines))
+
+    def test_check_disk_space_unknown_carries_on(self):
+        from pixel_forge.installer import check_disk_space
+
+        ctx, lines = self._ctx(None)
+        with mock.patch.object(shutil, "disk_usage",
+                               side_effect=OSError("no disk")):
+            self.assertTrue(check_disk_space(
+                ctx, "the install", "/tmp", 2 * 1024 ** 3))
+        self.assertIn("Could not read", "\n".join(lines))
+
+    def test_venv_step_refuses_without_disk_space(self):
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_venv)
+
+        home = tempfile.mkdtemp(prefix="pf-disk-venv-")
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.home = Path(home)
+        ctx.free_bytes_override = 0
+        result = step_venv(ctx)
+        self.assertEqual(result.status, StepResult.FAIL)
+        self.assertEqual(result.detail, "not enough disk space")
+        self.assertIn("Not enough disk space", "\n".join(lines))
+
+    def test_venv_step_skips_the_check_when_the_venv_exists(self):
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_venv)
+
+        home = tempfile.mkdtemp(prefix="pf-disk-venv-")
+        venv_bin = os.path.join(home, ".local", "share",
+                                "pixel-forge", "venv", "bin")
+        os.makedirs(venv_bin)
+        open(os.path.join(venv_bin, "python"), "w").close()
+        ctx = InstallContext(lambda _m: None, dryrun=False)
+        ctx.home = Path(home)
+        ctx.free_bytes_override = 0
+        result = step_venv(ctx)
+        self.assertEqual(result.status, StepResult.DONE)
+        self.assertEqual(result.detail, "already exists")
+
+    def test_image_engine_step_warns_without_build_space(self):
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_image_engine)
+
+        home = tempfile.mkdtemp(prefix="pf-disk-engine-")
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.install_image_engine = True
+        ctx.home = Path(home)
+        ctx.free_bytes_override = 0
+        ctx.which = lambda _name: "/usr/bin/" + _name
+        with mock.patch.object(imagegen, "find_engine",
+                               return_value=None), \
+                mock.patch.object(imagegen, "find_model",
+                                  return_value=Path("/m/model.gguf")):
+            result = step_image_engine(ctx)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("disk space", result.detail)
+        self.assertIn("Not enough disk space", "\n".join(lines))
+
+    def test_image_engine_step_counts_the_partial_model(self):
+        # The model check needs only what is left to download:
+        # with 100 bytes already there, a disk holding all but 50
+        # bytes of the model passes, and one holding all but 200
+        # bytes refuses.
+        import pixel_forge.imagegen as imagegen
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_image_engine)
+
+        def _drive(free):
+            home = tempfile.mkdtemp(prefix="pf-disk-model-")
+            model_home = Path(home) / "design-shell-models"
+            model_home.mkdir(parents=True)
+            (model_home / imagegen.MODEL_FILENAME).write_bytes(
+                b"x" * 100)
+            lines = []
+            ctx = InstallContext(lines.append, dryrun=False)
+            ctx.install_image_engine = True
+            ctx.home = Path(home)
+            ctx.free_bytes_override = free
+            ctx.which = lambda _name: "/usr/bin/" + _name
+            # The download itself is stubbed to fail: the check
+            # under test is the disk check, which runs before it.
+            ctx.run = lambda _cmd, timeout=None: 1
+            ctx.run_admin = lambda _script, timeout=None: 0
+            with mock.patch.object(
+                    imagegen, "find_engine",
+                    return_value=Path("/opt/sd.cpp/bin/sd-cli")), \
+                    mock.patch.object(imagegen, "find_model",
+                                      return_value=None):
+                return step_image_engine(ctx), lines
+
+        size = imagegen.MODEL_SIZE_BYTES
+        result, lines = _drive(size - 50)
+        self.assertIn("Disk space for the image model download",
+                      "\n".join(lines))
+        self.assertIn("OK", "\n".join(lines))
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("model download failed", result.detail)
+        result, _lines = _drive(size - 200)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("disk space", result.detail)
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 not available")
+class StepOrderTests(unittest.TestCase):
+    """Task 76 (2): cheap steps first, in the GUI installer."""
+
+    def test_cheap_steps_run_before_the_engine(self):
+        from pixel_forge.installer import STEPS
+
+        keys = [key for key, _title, _func in STEPS]
+        self.assertEqual(keys, ["network", "system", "venv",
+                                "packages", "ffmpeg", "image-engine",
+                                "files"])
+        self.assertLess(keys.index("venv"),
+                        keys.index("image-engine"))
+        self.assertLess(keys.index("packages"),
+                        keys.index("image-engine"))
+        self.assertEqual(keys[-1], "files")
+
+
+class InstallScriptOrderTests(unittest.TestCase):
+    """Task 76 (2): install.sh mirrors the GUI installer's order —
+    pinned by reading the script, like the other install.sh
+    mirror tests."""
+
+    def test_install_sh_runs_cheap_steps_before_the_engine(self):
+        text = _install_sh_text()
+        markers = ["if ! check_network; then",
+                   "Creating virtualenv at $VENV",
+                   "Installing packages (Pixel Forge, PySide6)",
+                   "# ffmpeg (optional",
+                   "# Image engine (stable-diffusion.cpp",
+                   "# Menu launcher"]
+        positions = [text.index(marker) for marker in markers]
+        self.assertEqual(positions, sorted(positions),
+                         "install.sh step order drifted from the "
+                         "GUI installer's")
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 not available")
+class ProgressMappingTests(unittest.TestCase):
+    """Task 76 (3): the progress bar moves within a step — cmake's
+    own percent, the download's bytes-so-far — never a timer."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def test_parse_cmake_fraction(self):
+        from pixel_forge.installer import parse_cmake_fraction
+
+        self.assertEqual(
+            parse_cmake_fraction("[ 83%] Building CXX object"),
+            0.83)
+        self.assertEqual(
+            parse_cmake_fraction("[100%] Built target sd-cli"), 1.0)
+        self.assertEqual(
+            parse_cmake_fraction("[  1%] Building C object"), 0.01)
+        self.assertIsNone(parse_cmake_fraction("Linking CXX exe"))
+        self.assertIsNone(parse_cmake_fraction("[101%] nonsense"))
+        self.assertIsNone(parse_cmake_fraction(""))
+
+    def test_download_fraction(self):
+        from pixel_forge.installer import download_fraction
+
+        home = tempfile.mkdtemp(prefix="pf-progress-")
+        path = Path(home) / "model.gguf"
+        path.write_bytes(b"x" * 100)
+        self.assertEqual(download_fraction(path, 1000), 0.1)
+        self.assertEqual(download_fraction(path, 50), 1.0)
+        self.assertIsNone(download_fraction(Path(home) / "missing",
+                                            1000))
+        self.assertIsNone(download_fraction(path, 0))
+
+    def test_report_progress_only_moves_forward(self):
+        from pixel_forge.installer import InstallContext
+
+        seen = []
+        ctx = InstallContext(lambda _m: None, dryrun=True)
+        ctx.progress_reporter = seen.append
+        ctx.report_progress(0.5)
+        ctx.report_progress(0.3)
+        ctx.report_progress(0.8)
+        self.assertEqual(seen, [0.5, 0.8])
+        ctx.reset_progress()
+        ctx.report_progress(0.1)
+        self.assertEqual(seen, [0.5, 0.8, 0.1])
+
+    def test_worker_maps_step_progress_into_the_bar(self):
+        import pixel_forge.installer as installer_mod
+        from PySide6.QtCore import QEventLoop, QTimer
+        from pixel_forge.installer import InstallWorker, StepResult
+
+        def half_done(ctx):
+            ctx.report_progress(0.5)
+            return StepResult(StepResult.DONE)
+
+        def done(_ctx):
+            return StepResult(StepResult.DONE)
+
+        steps = [("first", "First step", half_done),
+                 ("second", "Second step", done)]
+        old_steps = installer_mod.STEPS
+        installer_mod.STEPS = steps
+        self.addCleanup(setattr, installer_mod, "STEPS", old_steps)
+        progress, results = [], []
+        loop = QEventLoop()
+        worker = InstallWorker(dryrun=True)
+        worker.progress.connect(progress.append)
+        worker.finished.connect(
+            lambda r: (results.extend(r), loop.quit()))
+        worker.start()
+        QTimer.singleShot(60000, loop.quit)
+        loop.exec()
+        worker.wait(5000)
+        # Step 1 of 2 at half: (0 + 0.5) * 100 / 2 = 25.
+        self.assertIn(25, progress)
+        self.assertEqual(len(results), 2)
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 not available")
+class CancelTests(unittest.TestCase):
+    """Task 76 (4): Cancel stops the current step — the running
+    command is killed at once — and the install reports
+    cancelled, never success."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def test_run_kills_the_command_on_cancel(self):
+        import threading
+        import time
+
+        from pixel_forge.installer import CANCELLED_RC, InstallContext
+
+        ctx = InstallContext(lambda _m: None, dryrun=False)
+        result = {}
+
+        def _run():
+            result["rc"] = ctx.run(
+                [sys.executable, "-c",
+                 "import time; time.sleep(30)"])
+
+        thread = threading.Thread(target=_run, daemon=True)
+        started = time.monotonic()
+        thread.start()
+        time.sleep(1.0)
+        ctx.cancel()
+        thread.join(timeout=20)
+        self.assertFalse(thread.is_alive(),
+                         "run() did not return after cancel")
+        self.assertEqual(result["rc"], CANCELLED_RC)
+        self.assertLess(time.monotonic() - started, 10,
+                        "cancel waited out the sleep")
+
+    def test_run_times_out_a_quiet_command(self):
+        # The rewritten run() bounds the whole run, not just the
+        # final wait: a command that prints nothing still times
+        # out (the old loop only timed out after the stream
+        # ended).
+        import time
+
+        from pixel_forge.installer import InstallContext
+
+        ctx = InstallContext(lambda _m: None, dryrun=False)
+        started = time.monotonic()
+        rc = ctx.run([sys.executable, "-c",
+                      "import time; time.sleep(30)"], timeout=2)
+        self.assertEqual(rc, 124)
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_worker_reports_cancelled_not_success(self):
+        import time
+
+        import pixel_forge.installer as installer_mod
+        from PySide6.QtCore import QEventLoop, QTimer
+        from pixel_forge.installer import InstallWorker, StepResult
+
+        def slow(ctx):
+            for _ in range(200):
+                if ctx.cancelled:
+                    return StepResult(StepResult.DONE)
+                time.sleep(0.05)
+            return StepResult(StepResult.DONE)
+
+        def done(_ctx):
+            return StepResult(StepResult.DONE)
+
+        steps = [("slow", "Slow step", slow),
+                 ("second", "Second step", done),
+                 ("third", "Third step", done)]
+        old_steps = installer_mod.STEPS
+        installer_mod.STEPS = steps
+        self.addCleanup(setattr, installer_mod, "STEPS", old_steps)
+        results, progress = [], []
+        loop = QEventLoop()
+        worker = InstallWorker(dryrun=True)
+        worker.progress.connect(progress.append)
+        worker.finished.connect(
+            lambda r: (results.extend(r), loop.quit()))
+        worker.start()
+        QTimer.singleShot(500, worker.cancel)
+        QTimer.singleShot(60000, loop.quit)
+        loop.exec()
+        worker.wait(5000)
+        self.assertEqual(len(results), len(steps))
+        self.assertEqual(results[0].status, StepResult.CANCELLED)
+        self.assertTrue(all(r.status == StepResult.SKIPPED
+                            for r in results[1:]))
+        self.assertNotIn(100, progress,
+                         "a cancelled install jumped the bar to 100")
+
+    def test_window_cancel_leaves_the_install_re_runnable(self):
+        import time
+
+        import pixel_forge.installer as installer_mod
+        from PySide6.QtCore import QEventLoop, QTimer
+        from pixel_forge.installer import InstallerWindow, StepResult
+
+        def slow(ctx):
+            for _ in range(200):
+                if ctx.cancelled:
+                    return StepResult(StepResult.DONE)
+                time.sleep(0.05)
+            return StepResult(StepResult.DONE)
+
+        def done(_ctx):
+            return StepResult(StepResult.DONE)
+
+        steps = [("slow", "Slow step", slow),
+                 ("second", "Second step", done)]
+        old_steps = installer_mod.STEPS
+        installer_mod.STEPS = steps
+        self.addCleanup(setattr, installer_mod, "STEPS", old_steps)
+        win = InstallerWindow(dryrun=True)
+        win.show()
+        self.app.processEvents()
+        loop = QEventLoop()
+        win._start_install()
+        win._worker.finished.connect(lambda _r: loop.quit())
+        QTimer.singleShot(500, win._cancel_install)
+        QTimer.singleShot(60000, loop.quit)
+        loop.exec()
+        self.app.processEvents()
+        self.assertIn("Cancelled",
+                      win.statusBar().currentMessage())
+        self.assertLess(win.progress_bar.value(), 100)
+        self.assertIn("cancelled", win.steps_list.item(0).text())
+        self.assertTrue(win.install_btn.isEnabled())
+        win.close()
+
+    def test_cancel_before_the_first_step_reports_cancelled(self):
+        # A cancel pressed before the first step starts leaves
+        # every step SKIPPED with detail "cancelled" and no
+        # CANCELLED result — the window must still report a
+        # cancel, not "Every step passed" with the bar at 100.
+        from pixel_forge.installer import InstallerWindow, StepResult
+
+        win = InstallerWindow(dryrun=True)
+        win.show()
+        self.app.processEvents()
+        win.progress_bar.setValue(0)
+        win._on_finished([StepResult(StepResult.SKIPPED,
+                                     "cancelled"),
+                          StepResult(StepResult.SKIPPED,
+                                     "cancelled")])
+        self.app.processEvents()
+        self.assertEqual(win.statusBar().currentMessage(),
+                         "Cancelled. Press Install to resume.")
+        self.assertEqual(win.progress_bar.value(), 0)
+        log = win.log_view.toPlainText()
+        self.assertEqual(
+            log.count("Nothing was left half-installed"), 1)
+        self.assertNotIn("Every step passed", log)
+        self.assertTrue(win.install_btn.isEnabled())
+        win.close()
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 not available")
+class AptTailTests(unittest.TestCase):
+    """Task 76 (5): a failed apt or pip step shows the last 20
+    lines of its output at the failure."""
+
+    def test_log_tail_reprints_the_last_lines(self):
+        from pixel_forge.installer import InstallContext
+
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.run([sys.executable, "-c",
+                 "print('apt-line-one'); print('apt-line-two')"])
+        ctx.log_tail("apt")
+        log = "\n".join(lines)
+        self.assertIn("Last lines of the apt output:", log)
+        self.assertIn("apt-line-one", log)
+        self.assertIn("apt-line-two", log)
+
+    def test_log_tail_keeps_only_twenty_lines(self):
+        from pixel_forge.installer import InstallContext
+
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.run([sys.executable, "-c",
+                 "for i in range(30): print('line-%02d' % i)"])
+        ctx.log_tail("pip")
+        log = "\n".join(lines)
+        tail = log.split("Last lines of the pip output:")[1]
+        self.assertIn("line-29", tail)
+        self.assertIn("line-10", tail)
+        self.assertNotIn("line-09", tail)
+        self.assertNotIn("line-00", tail)
+
+    def test_log_tail_says_so_when_nothing_was_captured(self):
+        from pixel_forge.installer import InstallContext
+
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.log_tail("apt")
+        self.assertIn("(no output captured)", "\n".join(lines))
+
+    def test_failed_apt_step_shows_the_tail(self):
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_system)
+
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.which = lambda _name: None
+        ctx.run_admin = lambda _script, timeout=None: 100
+        ctx.run_output = lambda _cmd, timeout=60: (1, "")
+        result = step_system(ctx)
+        self.assertEqual(result.status, StepResult.FAIL)
+        self.assertIn("Last lines of the apt output:",
+                      "\n".join(lines))
+
+    def test_failed_pip_step_shows_the_tail(self):
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_packages)
+
+        home = tempfile.mkdtemp(prefix="pf-install-pkg-")
+        venv_bin = os.path.join(home, ".local", "share", "pixel-forge",
+                                "venv", "bin")
+        os.makedirs(venv_bin)
+        open(os.path.join(venv_bin, "python"), "w").close()
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.home = Path(home)
+        ctx.run = lambda _cmd, timeout=None: 1
+        ctx.run_output = lambda _cmd, timeout=60: (1, "")
+        result = step_packages(ctx)
+        self.assertEqual(result.status, StepResult.FAIL)
+        self.assertIn("Last lines of the pip output:",
+                      "\n".join(lines))
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 not available")
+class VersionDisplayTests(unittest.TestCase):
+    """Task 76 (6): the installer window shows the version it
+    installs, from the package."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def test_window_shows_the_package_version(self):
+        from pixel_forge import __version__
+        from pixel_forge.installer import InstallerWindow
+
+        win = InstallerWindow(dryrun=True)
+        self.assertEqual(win.version_label.text(),
+                         "Version %s" % __version__)
+        self.assertTrue(win.version_label.toolTip())
+        self.assertNotIn("&", win.version_label.text())
+        self.assertIn(__version__, win.windowTitle())
+        win.close()
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash not available")
+class InstallScriptVersionTests(unittest.TestCase):
+    """Task 76 (6): install.sh prints the version it installs, from
+    the package."""
+
+    def test_install_sh_reads_the_version_from_the_package(self):
+        text = _install_sh_text()
+        self.assertIn("from pixel_forge import __version__", text)
+        self.assertIn('echo "Installing Pixel Forge $PF_VERSION', text)
+
+    def test_install_sh_version_matches_the_package(self):
+        text = _install_sh_text()
+        start = text.index('PF_VERSION="$(python3')
+        end = text.index("\n", start)
+        line = text[start:end]
+        script = ("DIR=%s\n%s\necho \"VERSION=$PF_VERSION\"\n"
+                  % (shlex.quote(os.path.abspath(ROOT)), line))
+        proc = subprocess.run(["bash", "-c", script],
+                              capture_output=True, text=True,
+                              timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("VERSION=%s" % _package_version(), proc.stdout)
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 not available")
+class UninstallEntryTests(unittest.TestCase):
+    """Task 76 (7): the uninstall entry — a menu entry that runs
+    the uninstaller, written by both installers."""
+
+    def test_step_files_writes_the_uninstall_entry(self):
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_files)
+
+        home = tempfile.mkdtemp(prefix="pf-install-uninstall-")
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.home = Path(home)
+        result = step_files(ctx)
+        self.assertEqual(result.status, StepResult.DONE)
+        prefix = Path(home) / ".local" / "share" / "pixel-forge"
+        script = prefix / "uninstall.sh"
+        self.assertTrue(script.is_file())
+        self.assertTrue(os.access(script, os.X_OK),
+                        "the copied uninstall script is not executable")
+        desktop = (Path(home) / ".local" / "share" / "applications"
+                   / "pixel-forge-uninstall.desktop")
+        self.assertTrue(desktop.is_file())
+        text = desktop.read_text()
+        self.assertIn("Name=Uninstall Pixel Forge", text)
+        self.assertIn("Exec=%s" % script, text)
+        self.assertIn("Terminal=true", text)
+        self.assertIn("Icon=pixel-forge", text)
+        # No nested escaped quotes: GLib rejects them and the whole
+        # desktop file fails to parse.
+        self.assertNotIn('\\"', text)
+        self.assertNotIn("%k", text)
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash not available")
+class DiskSpaceScriptTests(unittest.TestCase):
+    """Task 76 (1), terminal installer: install.sh's disk-space
+    helpers, run verbatim. Bash runs use a stubbed df — never a
+    real disk."""
+
+    def _run_bash(self, script, env=None):
+        full_env = dict(os.environ)
+        if env:
+            full_env.update(env)
+        return subprocess.run(["bash", "-c", script],
+                              capture_output=True, text=True,
+                              timeout=60, env=full_env)
+
+    def _helpers(self):
+        return (_install_sh_function("format_bytes")
+                + _install_sh_function("free_bytes_for")
+                + _install_sh_function("check_disk_space"))
+
+    def test_free_bytes_for_uses_the_override(self):
+        script = (_install_sh_function("free_bytes_for")
+                  + "free_bytes_for /tmp\n")
+        proc = self._run_bash(
+            script, env={"PIXELFORGE_FREE_BYTES": "12345"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "12345")
+
+    def test_free_bytes_for_reads_a_real_filesystem(self):
+        script = (_install_sh_function("free_bytes_for")
+                  + "free_bytes_for /tmp\n")
+        proc = self._run_bash(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertRegex(proc.stdout.strip(), r"^[0-9]+$")
+
+    def test_check_disk_space_passes_when_it_fits(self):
+        script = (self._helpers()
+                  + "check_disk_space \"the install\" /tmp 100 "
+                  "&& echo FITS\n")
+        proc = self._run_bash(
+            script, env={"PIXELFORGE_FREE_BYTES": "1000000"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("FITS", proc.stdout)
+        self.assertIn("OK", proc.stdout)
+
+    def test_check_disk_space_refuses_and_names_free_vs_needed(self):
+        script = (self._helpers()
+                  + "check_disk_space \"the install\" /tmp "
+                  "2147483648 || echo REFUSED\n")
+        proc = self._run_bash(
+            script, env={"PIXELFORGE_FREE_BYTES": "104857600"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("REFUSED", proc.stdout)
+        self.assertIn("Not enough disk space", proc.stdout)
+        self.assertIn("100 MB", proc.stdout)
+        self.assertIn("2.0 GB", proc.stdout)
+
+    def test_check_disk_space_carries_on_when_unreadable(self):
+        script = ("df() { return 1; }\n" + self._helpers()
+                  + "check_disk_space \"the install\" /tmp "
+                  "2147483648 && echo CARRIED-ON\n")
+        proc = self._run_bash(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("CARRIED-ON", proc.stdout)
+        self.assertIn("Could not read", proc.stdout)
+
+    def test_install_bytes_match_the_gui_installer(self):
+        match = re.search(r"^PF_INSTALL_BYTES=([0-9]+)$",
+                          _install_sh_text(), re.MULTILINE)
+        self.assertIsNotNone(match, "install.sh has no PF_INSTALL_BYTES")
+        self.assertEqual(int(match.group(1)),
+                         _installer_constant("INSTALL_BYTES"))
+
+    def test_engine_build_bytes_match_the_gui_installer(self):
+        match = re.search(r"^SD_ENGINE_BUILD_BYTES=([0-9]+)$",
+                          _install_sh_text(), re.MULTILINE)
+        self.assertIsNotNone(
+            match, "install.sh has no SD_ENGINE_BUILD_BYTES")
+        self.assertEqual(int(match.group(1)),
+                         _installer_constant("ENGINE_BUILD_BYTES"))
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash not available")
+class ProgressScriptTests(unittest.TestCase):
+    """Task 76 (3), terminal installer: the cmake wrappers print
+    progress and show the tail on failure; the download poll
+    reports bytes-so-far. Bash runs use stubbed commands — never
+    a real build or download."""
+
+    def _run_bash(self, script, env=None):
+        full_env = dict(os.environ)
+        if env:
+            full_env.update(env)
+        return subprocess.run(["bash", "-c", script],
+                              capture_output=True, text=True,
+                              timeout=60, env=full_env)
+
+    def test_cmake_build_prints_percent_lines(self):
+        script = (
+            _install_sh_function("cmake_build")
+            + "cmake() { echo '[  7%] x'; echo '[ 83%] y'; "
+            "echo '[100%] z'; return 0; }\n"
+            "cmake_build /tmp/fake-build 2; echo \"RC=$?\"\n")
+        proc = self._run_bash(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Build: 7%", proc.stdout)
+        self.assertIn("Build: 83%", proc.stdout)
+        self.assertIn("Build: 100%", proc.stdout)
+        self.assertIn("RC=0", proc.stdout)
+
+    def test_cmake_build_shows_the_tail_on_failure(self):
+        script = (
+            _install_sh_function("cmake_build")
+            + "cmake() { echo 'error: something broke'; "
+            "echo 'fatal: no compiler'; return 1; }\n"
+            "cmake_build /tmp/fake-build 2; echo \"RC=$?\"\n")
+        proc = self._run_bash(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("The engine build failed", proc.stdout)
+        self.assertIn("error: something broke", proc.stdout)
+        self.assertIn("fatal: no compiler", proc.stdout)
+        self.assertIn("RC=1", proc.stdout)
+
+    def test_cmake_configure_is_quiet_on_success(self):
+        script = (
+            _install_sh_function("cmake_configure")
+            + "cmake() { echo 'config noise'; return 0; }\n"
+            "cmake_configure /tmp/fake-src /tmp/fake-build; "
+            "echo \"RC=$?\"\n")
+        proc = self._run_bash(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("config noise", proc.stdout)
+        self.assertIn("RC=0", proc.stdout)
+
+    def test_cmake_configure_shows_the_tail_on_failure(self):
+        script = (
+            _install_sh_function("cmake_configure")
+            + "cmake() { echo 'config error: no C compiler'; "
+            "return 1; }\n"
+            "cmake_configure /tmp/fake-src /tmp/fake-build; "
+            "echo \"RC=$?\"\n")
+        proc = self._run_bash(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("The engine setup failed", proc.stdout)
+        self.assertIn("config error: no C compiler", proc.stdout)
+        self.assertIn("RC=1", proc.stdout)
+
+    def test_download_poll_reports_bytes_so_far(self):
+        # The shipped download block with a slow stub curl: 600 of
+        # 1000 bytes land, the download pauses 3 seconds, then the
+        # rest lands. The poll must print the 60% it sees.
+        first = "a" * 600
+        rest = "b" * 400
+        sha = hashlib.sha256(
+            (first + rest).encode()).hexdigest()
+        home = tempfile.mkdtemp()
+        self.addCleanup(
+            lambda: shutil.rmtree(home, ignore_errors=True))
+        script = (
+            "set -euo pipefail\n"
+            "SD_MODEL_HOME=%s\n"
+            "SD_MODEL_FILE=LCM_Dreamshaper_v7-f16.gguf\n"
+            "SD_MODEL_URL=https://example.invalid/model.gguf\n"
+            "SD_MODEL_SHA256=%s\n"
+            "SD_MODEL_SIZE=1000\n"
+            "curl() { while [ $# -gt 0 ]; do case \"$1\" in "
+            "-o) _o=\"$2\"; shift 2;; *) shift;; esac; done; "
+            "printf '%%s' %s > \"$_o\"; sleep 3; "
+            "printf '%%s' %s >> \"$_o\"; }\n"
+            % (shlex.quote(home), sha, shlex.quote(first),
+               shlex.quote(rest))
+            + _model_download_block()
+        )
+        proc = subprocess.run(["bash", "-c", script],
+                              capture_output=True, text=True,
+                              timeout=30)
+        self.assertEqual(proc.returncode, 0,
+                         proc.stdout + proc.stderr)
+        self.assertIn("Model: 60%", proc.stdout)
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash not available")
+class InterruptTrapTests(unittest.TestCase):
+    """Task 76 (4), terminal installer: Ctrl-C stops cleanly — the
+    child is killed, the message is plain, and the ERR trap does
+    not also fire."""
+
+    def test_ctrl_c_stops_cleanly(self):
+        import signal
+        import time
+
+        script = (_install_sh_summary_prelude()
+                  + _install_sh_trap_line() + "\n"
+                  + _interrupt_trap_block()
+                  + "sleep 30 & CURRENT_PID=$!\n"
+                  + "wait \"$CURRENT_PID\"\n")
+        proc = subprocess.Popen(
+            ["bash", "-c", script],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, start_new_session=True)
+        try:
+            time.sleep(1.0)
+            os.killpg(proc.pid, signal.SIGINT)
+            out, _ = proc.communicate(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        self.assertEqual(proc.returncode, 130)
+        self.assertIn("Cancelled", out)
+        self.assertIn("safe to run the installer again", out)
+        self.assertNotIn("ERROR: the install stopped early", out)
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash not available")
+class InstallScriptUninstallEntryTests(unittest.TestCase):
+    """Task 76 (7), terminal installer: install.sh writes the same
+    uninstall entry as the GUI installer."""
+
+    def test_install_sh_writes_the_uninstall_entry(self):
+        home = tempfile.mkdtemp(prefix="pf-sh-uninstall-")
+        self.addCleanup(
+            lambda: shutil.rmtree(home, ignore_errors=True))
+        src_dir = os.path.join(home, "extracted")
+        os.makedirs(src_dir)
+        with open(os.path.join(src_dir, "uninstall.sh"), "w") as fh:
+            fh.write("#!/usr/bin/env bash\necho fake uninstall\n")
+        prefix = os.path.join(home, ".local", "share", "pixel-forge")
+        apps = os.path.join(home, ".local", "share", "applications")
+        script = (
+            "set -euo pipefail\n"
+            "HOME=%s\n"
+            "DIR=%s\n"
+            "PREFIX=%s\n"
+            "mkdir -p \"$PREFIX\" \"$HOME/.local/share/applications\"\n"
+            % (shlex.quote(home), shlex.quote(src_dir),
+               shlex.quote(prefix))
+            + _install_sh_summary_prelude()
+            + _uninstall_entry_block()
+        )
+        proc = subprocess.run(["bash", "-c", script],
+                              capture_output=True, text=True,
+                              timeout=30)
+        self.assertEqual(proc.returncode, 0,
+                         proc.stdout + proc.stderr)
+        script_path = os.path.join(prefix, "uninstall.sh")
+        self.assertTrue(os.path.isfile(script_path))
+        self.assertTrue(os.access(script_path, os.X_OK),
+                        "the copied uninstall script is not executable")
+        desktop = os.path.join(apps, "pixel-forge-uninstall.desktop")
+        self.assertTrue(os.path.isfile(desktop))
+        with open(desktop) as fh:
+            text = fh.read()
+        self.assertIn("Name=Uninstall Pixel Forge", text)
+        self.assertIn("Exec=%s" % script_path, text)
+        self.assertIn("Terminal=true", text)
+        self.assertIn("Icon=pixel-forge", text)
+        self.assertNotIn('\\"', text)
+        self.assertNotIn("%k", text)
 
 if __name__ == "__main__":
     unittest.main()

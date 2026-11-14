@@ -1,5 +1,36 @@
 # Pixel Forge changelog
 
+## 0.53 — 2026-11-13
+
+Installer hardening, round 2 (task 76) — the GUI installer and
+install.sh, kept in step. Disk space is checked before the big
+writes: the venv step refuses when the disk cannot hold the
+install, and the image-engine step refuses before the 30-minute
+build and the 2.1 GB model download, naming how much is free
+against how much is needed; a disk whose free space cannot be
+read never refuses. The cheap steps now run first (venv,
+packages) and the image engine runs last among the heavy work,
+so a failure shows up in minutes, not after a half-hour build.
+The progress bar moves within a step: cmake's own percent
+output drives it during the build, and the model download's
+bytes-so-far drives it during the download — no faked
+percentages, no timer. Cancel stops the current step (the
+running command is killed at once) and the install reports
+cancelled, never success; the engine build and the model
+download still resume on the next run, and Ctrl-C in install.sh
+stops cleanly the same way. A failed apt or pip step now shows
+the last 20 lines of its output at the failure, so it can be
+diagnosed. The installer window shows the version it installs
+(0.53, from the package), and install.sh prints it at the
+start. And there is an Uninstall entry in the app menu: both
+installers copy uninstall.sh into the install folder and write
+a menu entry that runs it in a terminal (a menu entry, not a
+button in the installer window, so install.sh users get the
+same entry point). The v0.51 resume behavior is unchanged —
+persistent build folder, checkout reuse, partial-model
+detection — and the engine build, the job cap, and the model
+download command are untouched.
+
 ## 0.52 — 2026-11-13
 
 Library export of a sheet no longer produces a stale pair (task

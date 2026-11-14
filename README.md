@@ -43,7 +43,16 @@ If the engine build or the model download is interrupted (a
 freeze, a lost connection, a closed window), just run the
 installer again — it resumes from where it stopped instead of
 starting over. On a machine with under 16 GB of memory the build
-runs with 2 parallel jobs so the desktop stays usable.
+runs with 2 parallel jobs so the desktop stays usable. The
+installer checks disk space before the big writes (the venv,
+the engine build, the 2.1 GB model) and says plainly how much
+is free against how much is needed when the disk cannot hold
+it. The progress bar moves during the build and the download —
+it follows cmake's own percent output and the download's
+bytes-so-far — and Cancel stops the current step at once
+(Ctrl-C in the terminal installer does the same), leaving the
+install safe to resume. A failed apt or pip step shows the last
+lines of its output, so the failure can be diagnosed.
 
 The engine is a source build because the prebuilt binary needs a
 newer system library than Mint ships. Building it needs git, cmake,
@@ -67,7 +76,8 @@ and a failed icon render is reported in the log and the summary
 (the install continues and the menu entry is still created)
 instead of leaving a silently icon-less menu entry.
 
-To remove it later:
+To remove it later, open **Uninstall Pixel Forge** from the app
+menu — or, from a terminal:
 
 ```sh
 bash uninstall.sh

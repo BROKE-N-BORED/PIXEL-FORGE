@@ -14,6 +14,7 @@ SD_INSTALL_DIR="${PIXELFORGE_SD_INSTALL_DIR:-/opt/sd.cpp}"
 rm -rf "$PREFIX/venv"
 rm -f "$HOME/.local/bin/pixel-forge" "$HOME/.local/bin/pixel-forge-gui"
 rm -f "$HOME/.local/share/applications/pixel-forge.desktop"
+rm -f "$HOME/.local/share/applications/pixel-forge-uninstall.desktop"
 rm -f "$HOME/.local/share/icons/hicolor/48x48/apps/pixel-forge.png"
 rm -f "$HOME/.local/share/icons/hicolor/128x128/apps/pixel-forge.png"
 rm -f "$HOME/.local/share/icons/hicolor/256x256/apps/pixel-forge.png"
@@ -63,4 +64,11 @@ else
   echo "Pixel Forge removed."
   echo "Kept: your sprite library, image models, the image engine, and $PREFIX."
   echo "To remove those too, run: bash uninstall.sh --purge"
+fi
+
+# The menu entry runs this in a terminal — pause so the result
+# is readable before the window closes (install.sh ends the same
+# way). Non-terminal runs skip it.
+if [ -t 0 ]; then
+  read -rp "Press Enter to close." _dummy || true
 fi

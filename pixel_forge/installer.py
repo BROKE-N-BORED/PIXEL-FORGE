@@ -22,11 +22,16 @@ step log what it would do without running anything privileged or
 writing anything. The shipped installer always does the real steps.
 """
 
+import collections
 import os
+import re
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent          # pixel_forge/
@@ -43,10 +48,34 @@ from PySide6.QtWidgets import (  # noqa: E402
     QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
 
+from . import __version__  # noqa: E402
 from .pixelize import PixelForgeError, plural  # noqa: E402
 
 NETWORK_CHECK_URL = "https://pypi.org/simple/"
 NETWORK_CHECK_TIMEOUT = 10  # seconds — a dead connection must fail fast
+
+# Exit code run() returns when a command was killed by Cancel
+# (distinct from 124 timeout and 127 could-not-start).
+CANCELLED_RC = 125
+
+# Disk-space allowances for the pre-checks (task 76), in bytes —
+# 2 GiB each, as plain literals so the installer tests can pin
+# them with ast.literal_eval (the SD_MODEL_SIZE pattern).
+# INSTALL_BYTES covers the venv plus PySide6 (694 MB installed,
+# measured in the test venv 2026-11-13) plus pip's download cache
+# and headroom. ENGINE_BUILD_BYTES covers the engine checkout
+# plus its build objects (931 MB measured in the live-proof
+# build, 2026-11-12) with headroom. Both are allowances, not
+# exact sizes: the check refuses only when the disk cannot hold
+# the allowance, and an unreadable disk never refuses.
+INSTALL_BYTES = 2147483648
+ENGINE_BUILD_BYTES = 2147483648
+
+# How many lines of a failed command's output the installer
+# re-prints at the failure (task 76): the tail is what diagnoses
+# an apt or pip failure, and the full output has scrolled away
+# by the time the step reports.
+OUTPUT_TAIL_LINES = 20
 
 # Where the image-engine source build lives (task 85), relative
 # to the user's home: a persistent folder under the install home,
@@ -99,6 +128,133 @@ def venv_package_name(python=None):
         return "python3-venv"
 
 
+# ---------------------------------------------------------------- disk space
+
+def free_bytes_for(path):
+    """Free bytes on the filesystem holding `path` — the nearest
+    existing parent when `path` itself does not exist yet (the
+    model and build folders are created by the install). None
+    when the free space cannot be read: callers treat None as
+    "unknown, proceed", never as zero."""
+    current = Path(path)
+    while not current.exists():
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+    try:
+        return shutil.disk_usage(current).free
+    except OSError:
+        return None
+
+
+def disk_space_ok(path, needed_bytes, free_override=None):
+    """True when `path`'s filesystem has at least `needed_bytes`
+    free, or when the free space cannot be read (unknown means
+    proceed — never a refusal on what cannot be measured).
+    `free_override` is a test hook: an int of free bytes that
+    applies to every path, or a dict mapping path strings to
+    free bytes. install.sh's check_disk_space mirrors this rule
+    in shell (PIXELFORGE_FREE_BYTES)."""
+    if isinstance(free_override, dict):
+        free = free_override.get(str(path))
+        if free is None:
+            free = free_bytes_for(path)
+    elif free_override is not None:
+        free = free_override
+    else:
+        free = free_bytes_for(path)
+    if free is None:
+        return True
+    return free >= needed_bytes
+
+
+def _dir_size(path):
+    """Bytes under `path`, walked (a build folder that already
+    holds objects needs less new room than a fresh one). 0 when
+    the folder is missing or cannot be read."""
+    total = 0
+    try:
+        for dirpath, _dirnames, filenames in os.walk(path):
+            for name in filenames:
+                try:
+                    total += os.path.getsize(
+                        os.path.join(dirpath, name))
+                except OSError:
+                    pass
+    except OSError:
+        return 0
+    return total
+
+
+def check_disk_space(ctx, label, path, needed_bytes):
+    """The disk-space pre-check as a step sees it: log the check,
+    and when the disk cannot hold `needed_bytes`, log a plain
+    refusal naming how much is free against how much is needed
+    and return False. True when there is room, or when the free
+    space cannot be read. The free-space override lives on the
+    context (ctx.free_bytes_override, tests only) so the steps
+    need no extra parameter."""
+    from .imagegen import format_bytes
+
+    override = getattr(ctx, "free_bytes_override", None)
+    if isinstance(override, dict):
+        free = override.get(str(path))
+        if free is None:
+            free = free_bytes_for(path)
+    elif override is not None:
+        free = override
+    else:
+        free = free_bytes_for(path)
+    if free is None:
+        ctx.log("Could not read the free disk space for %s — "
+                "carrying on without the check." % label)
+        return True
+    if free >= needed_bytes:
+        ctx.log("Disk space for %s: %s free, %s needed — OK"
+                % (label, format_bytes(free),
+                   format_bytes(needed_bytes)))
+        return True
+    ctx.log("Not enough disk space for %s: %s free, but %s is "
+            "needed. Free some space and press Install again."
+            % (label, format_bytes(free),
+               format_bytes(needed_bytes)))
+    return False
+
+
+# ---------------------------------------------------------------- progress
+
+def parse_cmake_fraction(line):
+    """The build fraction from a cmake --build output line like
+    "[ 83%] Building CXX object ..." — 0.83 for that line. None
+    for any other line. The bar moves on cmake's own numbers,
+    never on a timer."""
+    match = re.search(r"\[\s*(\d{1,3})%\]", line)
+    if not match:
+        return None
+    value = int(match.group(1))
+    if value < 0 or value > 100:
+        return None
+    return value / 100.0
+
+
+def download_fraction(path, total_bytes):
+    """The download fraction from the bytes on disk: how much of
+    `total_bytes` the file at `path` already holds. None when the
+    file is missing or cannot be read. The download's own
+    progress meter never reaches the installer (curl prints it
+    only to a terminal), so the bytes on disk are the honest
+    measure — and a resumed download starts at its partial size
+    instead of 0."""
+    try:
+        size = Path(path).stat().st_size
+    except OSError:
+        return None
+    if total_bytes <= 0:
+        return None
+    return max(0.0, min(1.0, size / total_bytes))
+
+
 # ---------------------------------------------------------------- context
 
 class InstallContext:
@@ -120,6 +276,30 @@ class InstallContext:
         self.install_ffmpeg = False
         self.install_image_engine = False
         self.home = Path(os.path.expanduser("~"))
+        # Per-step progress (task 76): a step sets progress_parser
+        # (line -> fraction 0..1 or None) while a command that
+        # reports its own progress runs — the cmake build — and
+        # progress_poll (() -> fraction or None) while a command
+        # that prints nothing runs — the curl download, polled
+        # against the bytes on disk. The worker sets
+        # progress_reporter per step to map the fraction into
+        # the step's slice of the bar. All three are plain
+        # attributes, like install_ffmpeg above, so the step
+        # tests' stubbed run() never sees a new parameter.
+        self.progress_parser = None
+        self.progress_poll = None
+        self.progress_reporter = None
+        self._last_progress_frac = None
+        # The tail of the last command run() ran (last 20 lines):
+        # what log_tail re-prints when a step fails, so an apt or
+        # pip failure is diagnosable at the failure instead of
+        # scrolled away. run_output leaves it alone — the
+        # verification checks after an apt install must not wipe
+        # the apt output they follow.
+        self.last_tail = collections.deque(maxlen=OUTPUT_TAIL_LINES)
+        # The process run() currently has going, if any — cancel()
+        # kills it at once instead of waiting for the step to end.
+        self._proc = None
 
     def log(self, message):
         self._log(message)
@@ -127,32 +307,186 @@ class InstallContext:
     def which(self, name):
         return shutil.which(name)
 
+    # -- cancel -------------------------------------------------------
+
+    def cancel(self):
+        """Stop the install: the worker loop stops after the
+        current step, and a command running right now is killed
+        at once (its whole process group — a cmake build's
+        compiler children die with it). A cancelled download
+        keeps its partial file, so curl -C - resumes it on the
+        next run, and a cancelled build keeps its checkout and
+        objects in the persistent build folder (v0.51 resume)."""
+        self.cancelled = True
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            self._kill_proc(proc)
+
+    def _kill_proc(self, proc):
+        """Stop a running command and its children: SIGTERM to
+        the process group, SIGKILL if it is still alive after 5
+        seconds. The command runs in its own session
+        (start_new_session in run), so the group is the
+        command's whole tree."""
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            proc.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+    # -- progress -----------------------------------------------------
+
+    def report_progress(self, frac):
+        """Report within-step progress (0..1) to the worker, if
+        one is listening. Only forward movement counts: a noisy
+        command — or a build retried from clean — can never drag
+        the bar backwards."""
+        if self.progress_reporter is None:
+            return
+        try:
+            frac = max(0.0, min(1.0, float(frac)))
+        except (TypeError, ValueError):
+            return
+        if (self._last_progress_frac is not None
+                and frac <= self._last_progress_frac):
+            return
+        self._last_progress_frac = frac
+        self.progress_reporter(frac)
+
+    def reset_progress(self):
+        """A new step starts at 0 — the previous step's high-water
+        mark must not swallow the new step's early progress."""
+        self._last_progress_frac = None
+
+    # -- failure diagnostics ------------------------------------------
+
+    def log_tail(self, label):
+        """Re-print the tail of the last command run() ran (up to
+        20 lines) under a header, so a failure is diagnosable
+        where it is reported instead of scrolled away in the log
+        above. Prints "(no output captured)" when the command
+        printed nothing — a failed apt with no output is itself
+        a fact worth seeing."""
+        self.log("Last lines of the %s output:" % label)
+        if not self.last_tail:
+            self.log("  (no output captured)")
+            return
+        for line in self.last_tail:
+            self.log("  " + line)
+
     # -- commands ---------------------------------------------------
 
     def run(self, cmd, timeout=None):
         """Run a command, streaming its output to the log.
-        Returns the exit code (0 in dry-run)."""
+        Returns the exit code (0 in dry-run, 124 on timeout,
+        125 when cancelled, 127 when the command could not
+        start).
+
+        The command runs in its own process group, so a cancel
+        or a timeout kills the whole tree (cmake plus its
+        compiler children), not just the parent. The output is
+        read with a select loop instead of a blocking readline:
+        a quiet command (curl with its output piped prints
+        nothing for 2.1 GB) must still answer to Cancel, and the
+        timeout bounds the whole run, not just the final wait.
+        While it runs, a step-set progress_parser turns output
+        lines into progress fractions and a step-set
+        progress_poll is called every second for commands that
+        print nothing."""
         self.log("  $ %s" % " ".join(str(c) for c in cmd))
+        self.last_tail.clear()
         if self.dryrun:
             return 0
         try:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1)
+                text=True, bufsize=1, start_new_session=True)
         except OSError as exc:
             self.log("  !! could not start: %s" % exc)
             return 127
+        self._proc = proc
+        deadline = (None if timeout is None
+                    else time.monotonic() + timeout)
+        last_poll = time.monotonic()
         try:
-            for line in proc.stdout:
-                self.log("  | " + line.rstrip("\n"))
-        except Exception:  # noqa: BLE001 - stream hiccups are not fatal
-            pass
-        try:
-            return proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            self.log("  !! timed out")
-            return 124
+            while True:
+                if self.cancelled:
+                    self._kill_proc(proc)
+                    self.log("  !! cancelled")
+                    return CANCELLED_RC
+                if (deadline is not None
+                        and time.monotonic() >= deadline):
+                    self._kill_proc(proc)
+                    self.log("  !! timed out")
+                    return 124
+                try:
+                    ready, _, _ = select.select(
+                        [proc.stdout], [], [], 0.5)
+                except (OSError, ValueError):
+                    ready = []
+                if ready:
+                    line = proc.stdout.readline()
+                    if not line:
+                        break
+                    line = line.rstrip("\n")
+                    self.log("  | " + line)
+                    self.last_tail.append(line)
+                    parser = self.progress_parser
+                    if parser is not None:
+                        try:
+                            frac = parser(line)
+                        except Exception:  # noqa: BLE001 - a bad
+                            frac = None  # parser must not kill a step
+                        if frac is not None:
+                            self.report_progress(frac)
+                elif proc.poll() is not None:
+                    break
+                if (self.progress_poll is not None
+                        and time.monotonic() - last_poll >= 1.0):
+                    last_poll = time.monotonic()
+                    try:
+                        frac = self.progress_poll()
+                    except Exception:  # noqa: BLE001 - a failed
+                        frac = None  # poll just means no progress
+                    if frac is not None:
+                        self.report_progress(frac)
+            # Drain whatever the process printed after its last
+            # line (the poll()-not-None break can leave buffered
+            # output behind).
+            try:
+                for line in proc.stdout:
+                    line = line.rstrip("\n")
+                    self.log("  | " + line)
+                    self.last_tail.append(line)
+            except Exception:  # noqa: BLE001 - stream hiccups
+                pass  # are not fatal
+            # A cancel that landed while the loop was breaking
+            # out (the killed command's pipe closing reads as
+            # end-of-stream) still counts as a cancel — the
+            # command's own -15 must not leak out as the result.
+            if self.cancelled:
+                self.log("  !! cancelled")
+                return CANCELLED_RC
+            try:
+                return proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                self._kill_proc(proc)
+                self.log("  !! timed out")
+                return 124
+        finally:
+            self._proc = None
 
     def run_output(self, cmd, timeout=60):
         """Run a command, return (exit code, stdout). Dry-run
@@ -237,6 +571,19 @@ class InstallContext:
             self.log("  !! could not link %s: %s" % (link_path, exc))
             return False
 
+    def chmod(self, path, mode):
+        """Set the permission bits on `path` (the copied
+        uninstall.sh must be executable for its menu entry)."""
+        if self.dryrun:
+            self.log("  would chmod %s %o" % (path, mode))
+            return True
+        try:
+            os.chmod(path, mode)
+            return True
+        except OSError as exc:
+            self.log("  !! could not chmod %s: %s" % (path, exc))
+            return False
+
 
 # ---------------------------------------------------------------- step results
 
@@ -247,6 +594,10 @@ class StepResult:
     # The step was deliberately not run (the files step, when the
     # packages step failed) — not a failure of the step itself.
     SKIPPED = "skipped"
+    # The step was running when Cancel was pressed — not a
+    # failure of the step, and the install reports "cancelled",
+    # never success, when one of these is present.
+    CANCELLED = "cancelled"
 
     def __init__(self, status, detail=""):
         self.status = status
@@ -341,6 +692,10 @@ def step_system(ctx):
     if venv_rc == 0 and pip_rc == 0:
         ctx.log("OK: python3-venv and pip installed")
         return StepResult(StepResult.DONE)
+    # The apt output is what says why the install failed — show
+    # its tail here, at the failure, instead of leaving it
+    # scrolled away in the log above.
+    ctx.log_tail("apt")
     ctx.log("WARNING: python3-venv or pip is still missing (apt step "
             "exited %s) — the install cannot continue without them. "
             "Install them from the Software Manager (%s, "
@@ -377,6 +732,7 @@ def step_ffmpeg(ctx):
     if ctx.which("ffmpeg"):
         ctx.log("OK: ffmpeg installed")
         return StepResult(StepResult.DONE)
+    ctx.log_tail("apt")
     ctx.log("WARNING: ffmpeg could not be installed (apt step exited "
             "%s) — video import will be unavailable until you install "
             "it (sudo apt install ffmpeg). Image import still works."
@@ -465,7 +821,12 @@ def _build_engine(ctx, src, build_dir, jobs):
     so the folder is wiped and the build is tried once from
     clean before giving up. A failed build never installs
     anything: the install step runs only after this returns True,
-    and the build folder is left in place for the next run."""
+    and the build folder is left in place for the next run.
+
+    While the build runs, cmake's own "[ NN%]" lines move the
+    progress bar (task 76): the bar used to sit still for the
+    whole half hour, which is what made the install look
+    frozen."""
     resumed = (build_dir / "CMakeCache.txt").is_file()
     if build_dir.is_dir() and not resumed:
         ctx.log("The engine build folder has no finished setup — "
@@ -473,18 +834,24 @@ def _build_engine(ctx, src, build_dir, jobs):
         shutil.rmtree(build_dir, ignore_errors=True)
     if resumed:
         ctx.log("Resuming the engine build in %s…" % build_dir)
-    code = _configure_and_build(ctx, src, build_dir, jobs,
-                                configure=not resumed)
-    if code == 0:
-        return True
-    if resumed:
-        ctx.log("The resumed build failed — clearing the build "
-                "folder and rebuilding once from clean…")
-        shutil.rmtree(build_dir, ignore_errors=True)
+    ctx.progress_parser = parse_cmake_fraction
+    try:
         code = _configure_and_build(ctx, src, build_dir, jobs,
-                                    configure=True)
+                                    configure=not resumed)
         if code == 0:
             return True
+        if resumed:
+            ctx.log("The resumed build failed — clearing the "
+                    "build folder and rebuilding once from "
+                    "clean…")
+            shutil.rmtree(build_dir, ignore_errors=True)
+            code = _configure_and_build(ctx, src, build_dir, jobs,
+                                        configure=True)
+            if code == 0:
+                return True
+    finally:
+        ctx.progress_parser = None
+    ctx.log_tail("build")
     ctx.log("WARNING: the image engine build failed — prompt "
             "import will stay unavailable. Try ./install.sh "
             "--with-image-engine in a terminal to see the build "
@@ -555,6 +922,33 @@ def step_image_engine(ctx):
         ctx.log("Would build the image engine from source and "
                 "download the model (about 2.1 GB)…")
         return StepResult(StepResult.DONE, "dry-run")
+    # Disk space first (task 76): the build and the model are
+    # gigabytes, and a disk that fills up halfway through a
+    # 30-minute build fails obscurely. Refuse plainly now,
+    # naming free vs needed, instead of failing mid-build. A
+    # resumed build or download only needs what is left: the
+    # objects already on disk and the partial bytes already
+    # downloaded count against the allowance.
+    build_root = ctx.home / SD_BUILD_SUBDIR
+    model_home = ctx.home / "design-shell-models"
+    if engine is None:
+        needed = ENGINE_BUILD_BYTES - _dir_size(build_root)
+        if not check_disk_space(ctx, "the image-engine build",
+                                build_root, max(0, needed)):
+            return StepResult(StepResult.WARN,
+                              "not enough disk space for the "
+                              "image-engine build — prompt import "
+                              "unavailable")
+    if model is None:
+        partial = model_home / MODEL_FILENAME
+        have = partial.stat().st_size if partial.is_file() else 0
+        if not check_disk_space(ctx, "the image model download",
+                                model_home,
+                                max(0, MODEL_SIZE_BYTES - have)):
+            return StepResult(StepResult.WARN,
+                              "not enough disk space for the image "
+                              "model download — prompt import "
+                              "unavailable")
     # Build tools first: the source build needs git, cmake, g++.
     missing = [t for t in ("git", "cmake", "g++") if not ctx.which(t)]
     if missing:
@@ -567,6 +961,7 @@ def step_image_engine(ctx):
         missing = [t for t in ("git", "cmake", "g++")
                    if not ctx.which(t)]
         if missing:
+            ctx.log_tail("apt")
             ctx.log("WARNING: build tools still missing (%s) — the "
                     "image engine cannot be built. Install them "
                     "with: sudo apt install git cmake "
@@ -588,8 +983,8 @@ def step_image_engine(ctx):
         # 85), not a temp dir: a freeze or failure mid-build
         # resumes from here on the next run. The job count is
         # capped on low-memory machines (task 84) so the desktop
-        # stays usable while the build runs.
-        build_root = ctx.home / SD_BUILD_SUBDIR
+        # stays usable while the build runs. (build_root is set
+        # above, by the disk-space check.)
         src = build_root / "sd"
         build_dir = src / "build"
         available = available_ram_bytes()
@@ -649,11 +1044,20 @@ def step_image_engine(ctx):
         # Shared with the Design Shell: one download serves both.
         ctx.log("Downloading the image model (%s, about 2.1 GB)…"
                 % MODEL_FILENAME)
-        model_home = ctx.home / "design-shell-models"
+        # (model_home is set above, by the disk-space check.)
         ctx.mkdir(model_home)
         model_path = model_home / MODEL_FILENAME
-        code = ctx.run(model_download_command(model_path),
-                       timeout=3600)
+        # The download's progress comes from the bytes on disk,
+        # polled while curl runs (curl prints its own meter only
+        # to a terminal — piped, it prints nothing). A resumed
+        # download starts the bar at its partial size, not 0.
+        ctx.progress_poll = lambda: download_fraction(
+            model_path, MODEL_SIZE_BYTES)
+        try:
+            code = ctx.run(model_download_command(model_path),
+                           timeout=3600)
+        finally:
+            ctx.progress_poll = None
         if code != 0 or not model_path.is_file():
             # A failed download leaves any partial file in place:
             # the next run resumes it (-C -) instead of starting
@@ -697,6 +1101,13 @@ def step_venv(ctx):
     if not ctx.dryrun and (venv / "bin" / "python").is_file():
         ctx.log("OK: virtual environment already exists at %s" % venv)
         return StepResult(StepResult.DONE, "already exists")
+    # Disk space (task 76): the venv plus PySide6 is the first
+    # big write, so refuse here — before anything is downloaded
+    # — when the disk cannot hold it. A dry run never refuses.
+    if not ctx.dryrun and not check_disk_space(
+            ctx, "the install", venv, INSTALL_BYTES):
+        return StepResult(StepResult.FAIL,
+                          "not enough disk space")
     code = ctx.run([sys.executable, "-m", "venv", str(venv)],
                    timeout=300)
     if code == 0:
@@ -724,6 +1135,9 @@ def step_packages(ctx):
     if code == 0 and rc == 0:
         ctx.log("OK: Pixel Forge installed in the venv")
         return StepResult(StepResult.DONE)
+    # The pip output is what says why the install failed — show
+    # its tail here, at the failure (task 76).
+    ctx.log_tail("pip")
     ctx.log("WARNING: the pip install failed — Pixel Forge is not "
             "installed yet. The download may have been interrupted, "
             "or the package index may be unreachable. Check your "
@@ -797,6 +1211,40 @@ def step_files(ctx):
         "StartupNotify=true\n"
     )
     ok = ctx.write_text(apps_dir / "pixel-forge.desktop", launcher) and ok
+    # Uninstall entry (task 76): the uninstaller already exists
+    # (uninstall.sh); what was missing was the entry point. The
+    # script is copied into the install prefix — the extracted
+    # folder the installer ran from may be deleted afterwards —
+    # and a menu entry runs it in a terminal. A menu entry, not
+    # a button in this window: install.sh users get the same
+    # entry, and it is there whenever it is needed, not only
+    # while the installer happens to be open. The Exec path is
+    # baked in, like the menu launcher above — no quotes, no %k.
+    uninstall_src = SRC_DIR / "uninstall.sh"
+    uninstall_dest = prefix / "uninstall.sh"
+    # The prefix exists in a real install (the venv step made
+    # it), but the files step must not assume it.
+    ctx.mkdir(prefix)
+    if ctx.copy(uninstall_src, uninstall_dest):
+        if ctx.chmod(uninstall_dest, 0o755):
+            uninstall_entry = (
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                "Name=Uninstall Pixel Forge\n"
+                "Comment=Remove Pixel Forge from this computer\n"
+                "Exec=%s\n" % uninstall_dest +
+                "Icon=pixel-forge\n"
+                "Terminal=true\n"
+                "Categories=Graphics;\n"
+                "StartupNotify=false\n"
+            )
+            ok = ctx.write_text(apps_dir / "pixel-forge-uninstall.desktop",
+                                uninstall_entry) and ok
+        else:
+            warnings.append("uninstall script could not be made "
+                            "executable")
+    else:
+        warnings.append("uninstall script could not be copied")
     if ctx.which("update-desktop-database"):
         code = ctx.run(["update-desktop-database", str(apps_dir)])
         if code != 0:
@@ -848,14 +1296,20 @@ def venv_gui_imports(home):
     return proc.returncode == 0
 
 
+# Cheap steps first (task 76): the venv, the packages, and the
+# files run before the expensive work — ffmpeg's apt install and
+# the image engine's 30-minute build. A failure in a cheap step
+# then shows up in minutes, not after a half-hour build, and a
+# user who cancels early still has a working install. install.sh
+# mirrors this order.
 STEPS = [
     ("network", "Internet connection", step_network),
     ("system", "System packages (python3-venv and pip)", step_system),
+    ("venv", "Virtual environment", step_venv),
+    ("packages", "Pixel Forge + PySide6 (pip install)", step_packages),
     ("ffmpeg", "ffmpeg for video import (optional)", step_ffmpeg),
     ("image-engine", "Image engine for prompt import (optional)",
      step_image_engine),
-    ("venv", "Virtual environment", step_venv),
-    ("packages", "Pixel Forge + PySide6 (pip install)", step_packages),
     ("files", "Shortcuts, icons and menu launcher", step_files),
 ]
 
@@ -900,8 +1354,12 @@ class InstallWorker(QThread):
         self._ctx = None
 
     def cancel(self):
+        # Cancel stops the CURRENT step, not just the next one:
+        # ctx.cancel() kills the running command at once (task
+        # 76). The loop below sees ctx.cancelled after the step
+        # returns and reports the install as cancelled.
         if self._ctx is not None:
-            self._ctx.cancelled = True
+            self._ctx.cancel()
 
     def run(self):
         ctx = InstallContext(self.log_line.emit, dryrun=self._dryrun)
@@ -949,8 +1407,17 @@ class InstallWorker(QThread):
                     return
         for index, (key, title, func) in enumerate(STEPS):
             if ctx.cancelled:
+                # Cancel pressed between steps (the mid-step case
+                # is handled below, after the step returns). The
+                # remaining steps are marked skipped so the
+                # results list has one entry per step, as always.
                 ctx.log("Cancelled — stopping after %d of %d steps"
                         % (index, total))
+                for later in range(index, total):
+                    skipped = StepResult(StepResult.SKIPPED,
+                                         "cancelled")
+                    results.append(skipped)
+                    self.step_status.emit(later, skipped.status)
                 break
             if network_failed:
                 # The network step failed: every remaining step
@@ -988,11 +1455,44 @@ class InstallWorker(QThread):
             ctx.log("")
             ctx.log("=== Step %d of %d: %s ===" % (index + 1, total,
                                                    title))
+            # Within-step progress (task 76): a step reports its
+            # own fraction (cmake's percent, the download's bytes
+            # so far) and the worker maps it into the step's slice
+            # of the bar, so the bar moves during a 30-minute
+            # build instead of sitting at the step boundary.
+            ctx.reset_progress()
+            ctx.progress_reporter = (
+                lambda frac, index=index: self.progress.emit(
+                    int((index + frac) * 100 / total)))
             try:
                 result = func(ctx)
             except Exception as exc:  # noqa: BLE001 - warn, carry on
                 ctx.log("WARNING: step failed with an error: %s" % exc)
                 result = StepResult(StepResult.FAIL, str(exc))
+            finally:
+                ctx.progress_reporter = None
+            if ctx.cancelled:
+                # Cancelled mid-step: the step's own result (a
+                # killed build reads as a failure) is replaced by
+                # "cancelled", the rest are skipped, and the
+                # install reports cancelled — never success, never
+                # a failure. The bar stays where it stopped; the
+                # window does not jump it to 100 on a cancel.
+                result = StepResult(StepResult.CANCELLED,
+                                    "cancelled")
+                results.append(result)
+                self.step_status.emit(index, result.status)
+                ctx.log("Cancelled — stopping after %d of %d steps"
+                        % (index, total))
+                # The resume line is logged once by the window's
+                # finish handler (it covers every cancel path) —
+                # logging it here too printed it twice.
+                for later in range(index + 1, total):
+                    skipped = StepResult(StepResult.SKIPPED,
+                                         "cancelled")
+                    results.append(skipped)
+                    self.step_status.emit(later, skipped.status)
+                break
             if key == "packages" and result.status == StepResult.FAIL:
                 packages_failed = True
             if key == "network" and result.status == StepResult.FAIL:
@@ -1014,6 +1514,7 @@ STATUS_LABEL = {
     StepResult.WARN: "warning",
     StepResult.FAIL: "failed",
     StepResult.SKIPPED: "skipped",
+    StepResult.CANCELLED: "cancelled",
 }
 
 
@@ -1024,7 +1525,10 @@ class InstallerWindow(QMainWindow):
         self._worker = None
         self._results = None
         self._installing = False
-        self.setWindowTitle("Install Pixel Forge")
+        # The version this installer installs, from the package —
+        # never hardcoded twice (task 76).
+        self._running_index = None
+        self.setWindowTitle("Install Pixel Forge %s" % __version__)
         self.resize(720, 560)
         if ICON_PATH.is_file():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
@@ -1049,6 +1553,11 @@ class InstallerWindow(QMainWindow):
         title.setWordWrap(True)
         header.addWidget(title, 1)
         layout.addLayout(header)
+
+        self.version_label = QLabel("Version %s" % __version__)
+        self.version_label.setToolTip(
+            "The version of Pixel Forge this installer installs.")
+        layout.addWidget(self.version_label)
 
         self.ffmpeg_check = QCheckBox(
             "Install ffmpeg for video support (needs your password)")
@@ -1146,21 +1655,35 @@ class InstallerWindow(QMainWindow):
             parent=self)
         self._worker.log_line.connect(self._log)
         self._worker.step_status.connect(self._on_step_status)
-        self._worker.progress.connect(self.progress_bar.setValue)
+        self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)
         self._worker.start()
 
     def _cancel_install(self):
         if self._worker is not None:
             self._worker.cancel()
-            self.statusBar().showMessage(
-                "Cancelling after the current step…")
+            self.statusBar().showMessage("Cancelling…")
             self.cancel_btn.setEnabled(False)
 
     def _on_step_status(self, index, status):
         _key, title, _func = STEPS[index]
         label = STATUS_LABEL.get(status, status)
         self.steps_list.item(index).setText("%s  —  %s" % (title, label))
+        if status == "running…":
+            self._running_index = index
+        elif self._running_index == index:
+            self._running_index = None
+
+    def _on_progress(self, value):
+        # The bar moves within a step (cmake's percent, the
+        # download's bytes), and the running step's list label
+        # carries the overall percent with it — so the window
+        # shows which step is moving, not just a number.
+        self.progress_bar.setValue(value)
+        if self._running_index is not None:
+            _key, title, _func = STEPS[self._running_index]
+            self.steps_list.item(self._running_index).setText(
+                "%s  —  running… %d%%" % (title, value))
 
     def _on_finished(self, results):
         self._installing = False
@@ -1171,6 +1694,37 @@ class InstallerWindow(QMainWindow):
         self.install_btn.setEnabled(True)
         failed = [r for r in results if r.status == StepResult.FAIL]
         warned = [r for r in results if r.status == StepResult.WARN]
+        # A cancel pressed before the first step starts leaves
+        # every step SKIPPED with detail "cancelled" and no
+        # CANCELLED result at all — that is still a cancel, not
+        # a pass: without this the window reported "Every step
+        # passed" and jumped the bar to 100 for an install the
+        # user had just stopped.
+        cancelled = [r for r in results
+                     if r.status == StepResult.CANCELLED
+                     or (r.status == StepResult.SKIPPED
+                         and r.detail == "cancelled")]
+        if cancelled:
+            # The bar stays where it stopped — a cancelled install
+            # must not read as complete. Launch follows the import
+            # check as always: a previous install may still work.
+            self.statusBar().showMessage(
+                "Cancelled. Press Install to resume.")
+            self._log("")
+            self._log("Cancelled. Nothing was left half-installed — "
+                      "press Install again to pick up where it "
+                      "stopped (the engine build and the model "
+                      "download both resume).")
+            if self._dryrun:
+                can_launch = not failed
+            else:
+                can_launch = venv_gui_imports(
+                    os.path.expanduser("~"))
+            if can_launch:
+                self.launch_btn.setEnabled(True)
+                self._log("A previous install still works — Launch "
+                          "is available.")
+            return
         self.progress_bar.setValue(100)
         # Launch trusts only a real import check: the venv's own
         # Python importing pixel_forge.gui. A symlink check is not
@@ -1246,8 +1800,7 @@ class InstallerWindow(QMainWindow):
     def closeEvent(self, event):
         if self._installing:
             self.statusBar().showMessage(
-                "Install in progress — press Cancel to stop after "
-                "the current step.")
+                "Install in progress — press Cancel to stop it.")
             event.ignore()
             return
         event.accept()

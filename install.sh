@@ -32,6 +32,18 @@ SD_MODEL_SHA256="0642060766117fdeb8cae0ccdc73ee974ac5779be1112d0a82f2b965bbd00e1
 # tests check they agree). A file named SD_MODEL_FILE at any
 # other size is a partial download, never the model.
 SD_MODEL_SIZE=2134675232
+# Disk-space allowances for the pre-checks (task 76), in bytes —
+# MUST match INSTALL_BYTES / ENGINE_BUILD_BYTES in
+# pixel_forge/installer.py (the installer tests check they
+# agree). PF_INSTALL_BYTES covers the venv plus PySide6 (694 MB
+# installed, measured 2026-11-13) plus pip's download cache and
+# headroom; SD_ENGINE_BUILD_BYTES covers the engine checkout
+# plus its build objects (931 MB measured in the live-proof
+# build, 2026-11-12) with headroom. Allowances, not exact sizes:
+# the check refuses only when the disk cannot hold the allowance,
+# and an unreadable disk never refuses.
+PF_INSTALL_BYTES=2147483648
+SD_ENGINE_BUILD_BYTES=2147483648
 # Shared with the Design Shell: one download serves both programs.
 SD_MODEL_HOME="$HOME/design-shell-models"
 # Where the built engine is installed (root-owned). Override with
@@ -98,6 +110,31 @@ print_summary() {
 # already aborts on the first failure, so the trap is the one
 # place the summary is guaranteed to run.)
 trap 'record_failure "install step" "$BASH_COMMAND failed — see the error above"; echo; echo "ERROR: the install stopped early while running: $BASH_COMMAND"; print_summary; echo "Pixel Forge is NOT installed — fix the failed step above and run the installer again."; exit 1' ERR
+
+# Ctrl-C (task 76): stop cleanly instead of dying mid-step with
+# nothing said. CURRENT_PID holds the child of a long-running
+# step while it runs (the model download); the handler kills it,
+# says plainly that the install stopped and is safe to re-run
+# (the build and the download both resume), and exits 130 — the
+# standard exit code for a SIGINT stop. The ERR trap is cleared
+# first so the interrupted command does not also print its
+# mid-way-abort message. The trap is cleared again before the
+# success message at the end, so Ctrl-C at the final "Press
+# Enter" prompt does not print "Cancelled" after a good install.
+CURRENT_PID=""
+on_interrupt() {
+  trap - ERR INT TERM
+  if [ -n "$CURRENT_PID" ] && kill -0 "$CURRENT_PID" 2>/dev/null; then
+    kill "$CURRENT_PID" 2>/dev/null || true
+    wait "$CURRENT_PID" 2>/dev/null || true
+  fi
+  echo
+  echo "Cancelled — the install stopped."
+  echo "It is safe to run the installer again; it resumes where it stopped."
+  print_summary
+  exit 130
+}
+trap on_interrupt INT TERM
 
 check_network() {
   # One quick HEAD request to the package index — the install
@@ -170,6 +207,106 @@ build_jobs() {
   echo "$jobs"
 }
 
+format_bytes() {  # $1 = bytes — "2.1 GB", "694 MB", "512 B".
+  awk -v b="$1" 'BEGIN {
+    if (b >= 1073741824) printf "%.1f GB", b / 1073741824
+    else if (b >= 1048576) printf "%.0f MB", b / 1048576
+    else if (b >= 1024) printf "%.0f KB", b / 1024
+    else printf "%d B", b
+  }'
+}
+
+free_bytes_for() {  # $1 = path — free bytes on the filesystem
+  # holding it (the nearest existing parent when the path does
+  # not exist yet), or nothing when it cannot be read.
+  # PIXELFORGE_FREE_BYTES overrides the answer (tests only).
+  local _path _parent _free
+  if [ -n "${PIXELFORGE_FREE_BYTES:-}" ]; then
+    echo "$PIXELFORGE_FREE_BYTES"
+    return
+  fi
+  _path="$1"
+  while [ ! -e "$_path" ]; do
+    _parent="$(dirname "$_path")"
+    if [ "$_parent" = "$_path" ]; then
+      return
+    fi
+    _path="$_parent"
+  done
+  _free="$(df --output=avail -B1 "$_path" 2>/dev/null \
+           | awk 'NR==2 {print $1}')"
+  case "$_free" in
+    ''|*[!0-9]*) return ;;
+    *) echo "$_free" ;;
+  esac
+}
+
+check_disk_space() {  # $1 = label, $2 = path, $3 = needed bytes —
+  # true when the disk holds `needed`, or when the free space
+  # cannot be read (unknown means proceed — never a refusal on
+  # what cannot be measured). On a refusal, prints a plain
+  # message naming how much is free against how much is needed
+  # and returns 1. Mirrors installer.py's check_disk_space.
+  local _free
+  _free="$(free_bytes_for "$2")"
+  if [ -z "$_free" ]; then
+    echo "Could not read the free disk space for $1 — carrying on without the check."
+    return 0
+  fi
+  if [ "$_free" -ge "$3" ]; then
+    echo "Disk space for $1: $(format_bytes "$_free") free, $(format_bytes "$3") needed — OK"
+    return 0
+  fi
+  echo "Not enough disk space for $1: $(format_bytes "$_free") free, but $(format_bytes "$3") is needed. Free some space and run the installer again."
+  return 1
+}
+
+cmake_configure() {  # $1 = source dir, $2 = build dir — configures
+  # quietly on success (its output is noise), and prints the last
+  # 20 lines of the setup output when it fails (task 76: the
+  # output used to go to /dev/null, so a failed setup said nothing
+  # about why). Returns cmake's exit code.
+  local _log _rc
+  _log="$(mktemp)"
+  if cmake -S "$1" -B "$2" -DCMAKE_BUILD_TYPE=Release >"$_log" 2>&1; then
+    _rc=0
+  else
+    _rc=$?
+    echo "The engine setup failed. Last lines of the setup output:"
+    tail -20 "$_log" | sed 's/^/  /'
+  fi
+  rm -f "$_log"
+  return "$_rc"
+}
+
+cmake_build() {  # $1 = build dir, $2 = jobs — builds, printing
+  # "Build: N%" as cmake's own percent climbs (throttled to
+  # 5-point steps, plus 100%), and the last 20 lines of the build
+  # log when the build fails (task 76: the output used to go to
+  # /dev/null, so a failed build said nothing about why, and the
+  # terminal sat silent for half an hour). Returns cmake's exit
+  # code — PIPESTATUS, not the pipeline's, so a failure is never
+  # masked by tee or awk.
+  local _log _rc
+  _log="$(mktemp)"
+  cmake --build "$1" -j"$2" 2>&1 | tee "$_log" | awk '
+    /\[ *[0-9]+%\]/ {
+      pct = $0
+      sub(/^.*\[ */, "", pct)
+      sub(/%\].*$/, "", pct)
+      pct += 0
+      if (pct >= last + 5 || pct == 100) { print "Build: " pct "%"; fflush(); last = pct }
+    }
+  '
+  _rc="${PIPESTATUS[0]}"
+  if [ "$_rc" -ne 0 ]; then
+    echo "The engine build failed. Last lines of the build output:"
+    tail -20 "$_log" | sed 's/^/  /'
+  fi
+  rm -f "$_log"
+  return "$_rc"
+}
+
 verify_install() {
   # Prove the install works before claiming it: the venv exists,
   # the CLI runs, and the GUI imports. The import runs from a fresh
@@ -201,7 +338,11 @@ verify_install() {
   [ "$ok" = "1" ]
 }
 
-echo "Installing Pixel Forge…"
+# The version this installer installs, from the package — never
+# hardcoded twice (task 76). Falls back to "unknown" when the
+# package cannot be read (a missing python3 is reported below).
+PF_VERSION="$(python3 -c "import sys; sys.path.insert(0, '$DIR'); from pixel_forge import __version__; print(__version__)" 2>/dev/null || echo unknown)"
+echo "Installing Pixel Forge $PF_VERSION…"
 echo
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -238,6 +379,43 @@ if ! check_network; then
   echo "Check your connection and run the installer again."
   exit 1
 fi
+
+mkdir -p "$PREFIX" "$BIN"
+
+if [ ! -x "$VENV/bin/python" ]; then
+  echo "Creating virtualenv at $VENV …"
+  # Disk space (task 76): the venv plus PySide6 is the first big
+  # write, so refuse here — before anything is downloaded — when
+  # the disk cannot hold it.
+  if ! check_disk_space "the install" "$VENV" "$PF_INSTALL_BYTES"; then
+    exit 1
+  fi
+  python3 -m venv "$VENV"
+fi
+
+echo "Installing packages (Pixel Forge, PySide6)…"
+# pip's output goes to a log, not /dev/null: on a failure the
+# tail is printed, so the failure is diagnosable (task 76). The
+# pip upgrade is best-effort — the GUI installer ignores its
+# result too, and an old pip still installs packages — so a
+# failed upgrade warns and carries on. The main install failing
+# is fatal, as before, but now with the output shown.
+_pip_log="$(mktemp)"
+if ! "$VENV/bin/pip" install --quiet --upgrade pip >"$_pip_log" 2>&1; then
+  echo "WARNING: the pip upgrade failed — carrying on with the pip that is there. Last lines of the pip output:"
+  tail -20 "$_pip_log" | sed 's/^/  /'
+  record_warning "the pip upgrade failed (see the log above)"
+fi
+if ! "$VENV/bin/pip" install --quiet "$DIR" >"$_pip_log" 2>&1; then
+  echo "ERROR: the pip install failed. Last lines of the pip output:"
+  tail -20 "$_pip_log" | sed 's/^/  /'
+  rm -f "$_pip_log"
+  record_failure "Pixel Forge packages" "the pip install failed — check your connection and run the installer again"
+  print_summary
+  echo "Pixel Forge is NOT installed — fix the failed step above and run the installer again."
+  exit 1
+fi
+rm -f "$_pip_log"
 
 # ffmpeg (optional — only needed for video import; image import
 # works without it). Warn-never-refuse: a failed install just means
@@ -292,6 +470,18 @@ if [ "$WITH_IMAGE" = "1" ]; then
     # Mint ships 2.39, so the engine is built from source here.
     # The clone MUST be --recursive: ggml is a submodule, and a
     # non-recursive clone fails the build.
+    # Disk space (task 76): refuse now, before the ~30-minute
+    # build, when the disk cannot hold it. A resumed build only
+    # needs what is left — the objects already on disk count
+    # against the allowance.
+    _build_have=0
+    if [ -d "$SD_BUILD_ROOT" ]; then
+      _build_have="$(du -sb "$SD_BUILD_ROOT" 2>/dev/null | cut -f1)"
+      case "$_build_have" in ''|*[!0-9]*) _build_have=0 ;; esac
+    fi
+    if ! check_disk_space "the image-engine build" "$SD_BUILD_ROOT" "$((SD_ENGINE_BUILD_BYTES - _build_have))"; then
+      exit 1
+    fi
     for tool in git cmake g++; do
       if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ERROR: building the image engine needs $tool." >&2
@@ -343,15 +533,15 @@ if [ "$WITH_IMAGE" = "1" ]; then
     fi
     if [ -f "$SD_BUILD_DIR/CMakeCache.txt" ]; then
       echo "Resuming the engine build in $SD_BUILD_DIR…"
-      if ! cmake --build "$SD_BUILD_DIR" -j"$JOBS" >/dev/null; then
+      if ! cmake_build "$SD_BUILD_DIR" "$JOBS"; then
         echo "The resumed build failed — clearing the build folder and rebuilding once from clean…"
         rm -rf "$SD_BUILD_DIR"
-        cmake -S "$SD_SRC" -B "$SD_BUILD_DIR" -DCMAKE_BUILD_TYPE=Release >/dev/null
-        cmake --build "$SD_BUILD_DIR" -j"$JOBS" >/dev/null
+        cmake_configure "$SD_SRC" "$SD_BUILD_DIR"
+        cmake_build "$SD_BUILD_DIR" "$JOBS"
       fi
     else
-      cmake -S "$SD_SRC" -B "$SD_BUILD_DIR" -DCMAKE_BUILD_TYPE=Release >/dev/null
-      cmake --build "$SD_BUILD_DIR" -j"$JOBS" >/dev/null
+      cmake_configure "$SD_SRC" "$SD_BUILD_DIR"
+      cmake_build "$SD_BUILD_DIR" "$JOBS"
     fi
     # The build succeeded — only now is the old engine touched, and
     # it is moved aside (backup_sd_cpp), never wiped. If the backup
@@ -389,8 +579,49 @@ if [ "$WITH_IMAGE" = "1" ]; then
   fi
   if [ -z "$SD_MODEL_FOUND" ]; then
     echo "Downloading the image model ($SD_MODEL_FILE, about 2.1 GB)..."
+    # Disk space (task 76): refuse now, before the 2.1 GB
+    # download, when the disk cannot hold it. A resumed download
+    # only needs what is left — the partial bytes already on disk
+    # count against the model size.
+    _model_have=0
+    if [ -f "$SD_MODEL_HOME/$SD_MODEL_FILE" ]; then
+      _model_have="$(stat -c%s "$SD_MODEL_HOME/$SD_MODEL_FILE" 2>/dev/null || echo 0)"
+      case "$_model_have" in ''|*[!0-9]*) _model_have=0 ;; esac
+    fi
+    if ! check_disk_space "the image model download" "$SD_MODEL_HOME" "$((SD_MODEL_SIZE - _model_have))"; then
+      exit 1
+    fi
     mkdir -p "$SD_MODEL_HOME"
-    curl -fSL -C - "$SD_MODEL_URL" -o "$SD_MODEL_HOME/$SD_MODEL_FILE"
+    # The download runs in the background so the terminal can
+    # show its progress: curl prints its own meter only to a
+    # terminal, and piped it prints nothing — so the bytes on
+    # disk are polled every 2 seconds against the model size
+    # (task 76). A resumed download starts at its partial size,
+    # not 0. CURRENT_PID is the Ctrl-C handler's handle on the
+    # download (it kills curl, and the partial file stays for
+    # curl -C - to resume on the next run).
+    curl -fSL -C - "$SD_MODEL_URL" -o "$SD_MODEL_HOME/$SD_MODEL_FILE" &
+    CURRENT_PID=$!
+    _last_pct=-1
+    while kill -0 "$CURRENT_PID" 2>/dev/null; do
+      if [ -f "$SD_MODEL_HOME/$SD_MODEL_FILE" ]; then
+        _have="$(stat -c%s "$SD_MODEL_HOME/$SD_MODEL_FILE" 2>/dev/null || echo 0)"
+        case "$_have" in ''|*[!0-9]*) _have=0 ;; esac
+        _pct=$(( _have * 100 / SD_MODEL_SIZE ))
+        if [ "$_pct" -ge "$((_last_pct + 5))" ] || [ "$_pct" -ge 100 ]; then
+          echo "Model: ${_pct}%"
+          _last_pct="$_pct"
+        fi
+      fi
+      sleep 2
+    done
+    wait "$CURRENT_PID" || _curl_rc=$?
+    CURRENT_PID=""
+    if [ "${_curl_rc:-0}" -ne 0 ]; then
+      echo "ERROR: the model download failed (exit $_curl_rc)." >&2
+      echo "       The partial file stays in $SD_MODEL_HOME/ — run ./install.sh --with-image-engine again to resume it." >&2
+      exit 1
+    fi
     # Prove the download is the pinned model before accepting it:
     # a mismatched file is deleted, never kept.
     _actual="$(sha256sum "$SD_MODEL_HOME/$SD_MODEL_FILE" | cut -d' ' -f1)"
@@ -408,16 +639,6 @@ if [ "$WITH_IMAGE" = "1" ]; then
   fi
 fi
 
-mkdir -p "$PREFIX" "$BIN"
-
-if [ ! -x "$VENV/bin/python" ]; then
-  echo "Creating virtualenv at $VENV …"
-  python3 -m venv "$VENV"
-fi
-
-echo "Installing packages (Pixel Forge, PySide6)…"
-"$VENV/bin/pip" install --quiet --upgrade pip
-"$VENV/bin/pip" install --quiet "$DIR"
 
 ln -sf "$VENV/bin/pixel-forge" "$BIN/pixel-forge"
 ln -sf "$VENV/bin/pixel-forge-gui" "$BIN/pixel-forge-gui"
@@ -489,6 +710,34 @@ StartupNotify=true
 EOF
 chmod 644 "$HOME/.local/share/applications/pixel-forge.desktop"
 
+# Uninstall entry (task 76): the uninstaller already exists
+# (uninstall.sh); what was missing was the entry point. The
+# script is copied into the install prefix — the extracted
+# folder this installer ran from may be deleted afterwards —
+# and a menu entry runs it in a terminal. A menu entry, not a
+# button in the GUI installer window: both installers write the
+# same entry, and it is there whenever it is needed, not only
+# while the installer happens to be open. The Exec path is baked
+# in, like the menu launcher above — no quotes, no %k.
+if cp "$DIR/uninstall.sh" "$PREFIX/uninstall.sh" 2>/dev/null \
+    && chmod +x "$PREFIX/uninstall.sh"; then
+  cat > "$HOME/.local/share/applications/pixel-forge-uninstall.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Uninstall Pixel Forge
+Comment=Remove Pixel Forge from this computer
+Exec=$PREFIX/uninstall.sh
+Icon=pixel-forge
+Terminal=true
+Categories=Graphics;
+StartupNotify=false
+EOF
+  chmod 644 "$HOME/.local/share/applications/pixel-forge-uninstall.desktop"
+else
+  echo "WARNING: the uninstall script could not be copied — the Uninstall menu entry was not created"
+  record_warning "the Uninstall menu entry could not be created"
+fi
+
 if command -v update-desktop-database >/dev/null 2>&1; then
   _db_err="$(update-desktop-database "$HOME/.local/share/applications" 2>&1)" || {
     echo "WARNING: update-desktop-database failed — the menu entry may not appear until you log out: $_db_err"
@@ -525,6 +774,10 @@ if [ "${#FAILURES[@]}" -gt 0 ]; then
   exit 1
 fi
 echo
+# The install is done — clear the Ctrl-C trap so pressing it at
+# the final prompt does not print "Cancelled" after a good
+# install (task 76).
+trap - INT TERM
 echo "Pixel Forge is installed."
 echo "  GUI:  open Pixel Forge from the menu, or run:  pixel-forge-gui"
 echo "  CLI:  pixel-forge convert photo.png --size 32 --colors 16"
