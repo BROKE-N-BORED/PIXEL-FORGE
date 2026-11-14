@@ -386,6 +386,95 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("Traceback", err)
 
 
+class NormalMapCliTests(unittest.TestCase):
+    """The normal-map subcommand (task 43). The CLI generates
+    from the source image directly (no pixelize), so the ramp
+    is exact and the center pixel is pinned numerically."""
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        from test_normalmap import ramp_horizontal
+        cls.ramp = write_image(ramp_horizontal(),
+                               os.path.join(cls.tmp, "ramp.png"))
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = main(argv)
+        except SystemExit as exc:
+            code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_normal_map_help(self):
+        code, out, _err = self._run(["normal-map", "--help"])
+        self.assertEqual(code, 0)
+        self.assertIn("--strength", out)
+        self.assertIn("--out", out)
+
+    def test_normal_map_happy_path(self):
+        out_path = os.path.join(self.tmp, "ramp-map.png")
+        code, out, err = self._run(
+            ["normal-map", self.ramp, "--out", out_path])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(out_path))
+        self.assertIn("32 x 8", out)
+        image = load_image(out_path)
+        self.assertEqual((image.width(), image.height()), (32, 8))
+        # The ramp's center pixel, worked out by hand in
+        # test_normalmap: red 123, green flat, blue full.
+        off = (4 * 32 + 16) * 4
+        self.assertEqual(tuple(image.data[off:off + 4]),
+                         (123, 128, 255, 255))
+
+    def test_normal_map_default_output_name(self):
+        code, _out, err = self._run(["normal-map", self.ramp])
+        self.assertEqual(code, 0, err)
+        expected = os.path.join(self.tmp, "ramp-normal.png")
+        self.assertTrue(os.path.isfile(expected))
+
+    def test_normal_map_strength(self):
+        low = os.path.join(self.tmp, "weak.png")
+        high = os.path.join(self.tmp, "strong.png")
+        code, _out, err = self._run(
+            ["normal-map", self.ramp, "--strength", "0.25",
+             "--out", low])
+        self.assertEqual(code, 0, err)
+        code, _out, err = self._run(
+            ["normal-map", self.ramp, "--strength", "4.0",
+             "--out", high])
+        self.assertEqual(code, 0, err)
+        off = (4 * 32 + 16) * 4
+        weak_red = load_image(low).data[off]
+        strong_red = load_image(high).data[off]
+        # Stronger strength tilts further from flat (128).
+        self.assertLess(strong_red, weak_red)
+        self.assertLess(weak_red, 128)
+
+    def test_normal_map_json(self):
+        out_path = os.path.join(self.tmp, "json-map.png")
+        code, out, err = self._run(
+            ["normal-map", self.ramp, "--out", out_path, "--json"])
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["output"], out_path)
+        self.assertEqual((data["width"], data["height"]), (32, 8))
+        self.assertEqual(data["strength"], 1.0)
+
+    def test_normal_map_missing_input_fails_cleanly(self):
+        code, _out, err = self._run(
+            ["normal-map", os.path.join(self.tmp, "missing.png")])
+        self.assertEqual(code, 1)
+        self.assertIn("not found", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_normal_map_folder_input_fails_cleanly(self):
+        code, _out, err = self._run(["normal-map", self.tmp])
+        self.assertEqual(code, 1)
+        self.assertIn("not a folder", err)
+        self.assertNotIn("Traceback", err)
+
+
 class SheetCliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

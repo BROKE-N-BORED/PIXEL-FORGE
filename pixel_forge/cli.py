@@ -8,6 +8,7 @@
     pixel-forge split-sheet SHEET.png [--meta sheet.json] [--out DIR]
     pixel-forge split-sheet SHEET.png --grid 32x32 [--out DIR]
     pixel-forge split-sheet SHEET.png --cols 4 --rows 3 [--out DIR]
+    pixel-forge normal-map INPUT [--strength 1.0] [--out OUT.png]
     pixel-forge library list [--tag TAG]
     pixel-forge library add FILE --name NAME [--tags a,b]
     pixel-forge library remove NAME
@@ -62,6 +63,7 @@ from .imagegen import (DEFAULT_NEGATIVE, DEFAULT_SIZE, LCM_CFG,
                        find_engine, find_model, format_bytes,
                        prompt_to_sprites, slugify)
 from .library import Library, normalize_tags
+from .normalmap import generate_normal_map
 from .palette_io import (PaletteStore, extract_palette_from_image)
 from .palettes import NAMED_PALETTES, PALETTE_LABELS
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
@@ -440,6 +442,23 @@ def build_parser():
                              help="blank border around the whole "
                              "grid (grid split only)")
     _add_output_args(split_sheet)
+
+    normal_map = sub.add_parser(
+        "normal-map", help="make a normal map from one image for "
+        "2D lighting (bright reads as high, dark as low)")
+    normal_map.add_argument("input", help="image to make a normal "
+                            "map from (PNG, JPG, BMP, WebP, GIF, "
+                            "and more)")
+    normal_map.add_argument("--strength", type=float, default=1.0,
+                            help="how strong the lighting relief "
+                            "is, 0.25-4.0 (default: 1.0, the "
+                            "true slope of the sprite; outside "
+                            "the range is clamped)")
+    normal_map.add_argument("--out", default=None,
+                            help="output PNG path (default: "
+                            "<input-stem>-normal.png next to the "
+                            "input)")
+    _add_output_args(normal_map)
 
     library = sub.add_parser(
         "library", help="manage the saved sprite library "
@@ -1018,6 +1037,30 @@ def cmd_split_sheet(args):
     return 0
 
 
+def cmd_normal_map(args):
+    src = Path(args.input)
+    if src.is_dir():
+        raise PixelForgeError(
+            "normal-map takes one image file, not a folder: %s"
+            % args.input)
+    if not src.is_file():
+        raise PixelForgeError("not found: %s" % args.input)
+    image = load_image(src)
+    result = generate_normal_map(image, strength=args.strength)
+    out = args.out
+    if out is None:
+        out = str(src.with_name(src.stem + "-normal.png"))
+    if not result.save(str(out), "PNG"):
+        raise PixelForgeError("could not write: %s" % out)
+    _emit_json(args, {"output": str(out),
+                      "width": result.width(),
+                      "height": result.height(),
+                      "strength": args.strength})
+    _info(args, "%s: %d x %d normal map"
+          % (out, result.width(), result.height()))
+    return 0
+
+
 def _warn_skipped(lib):
     """One stderr line when the index had malformed entries —
     the same warning the window shows in its status bar."""
@@ -1549,6 +1592,8 @@ def main(argv=None):
             return cmd_sheet(args)
         if args.command == "split-sheet":
             return cmd_split_sheet(args)
+        if args.command == "normal-map":
+            return cmd_normal_map(args)
         if args.command == "library":
             if args.library_command == "list":
                 return cmd_library_list(args)

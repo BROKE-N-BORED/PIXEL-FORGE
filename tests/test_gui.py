@@ -615,6 +615,243 @@ class GridSnapGuiTests(unittest.TestCase):
                       self.win.statusBar().currentMessage())
 
 
+class NormalMapGuiTests(unittest.TestCase):
+    """The Image tab's Normal map section (task 43).
+
+    Generation runs in a worker — the tests pump the event
+    loop until it finishes (the GridSnapGuiTests pattern).
+    The edge image is half black, half white: the pixelizer
+    keeps the hard edge exactly, so the map's tilt at the
+    edge is checkable, and the map is compared against the
+    module's own output on the same result.
+    """
+    @classmethod
+    def setUpClass(cls):
+        from pixel_forge.image import Image
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        edge = Image(32, 32)
+        for y in range(32):
+            for x in range(32):
+                value = 0 if x < 16 else 255
+                off = (y * 32 + x) * 4
+                edge.data[off:off + 4] = bytes(
+                    (value, value, value, 255))
+        cls.edge = write_image(edge,
+                               os.path.join(cls.tmp, "edge.png"))
+        cls.other = write_image(
+            make_solid_image(32, 32, 0, 0, 200),
+            os.path.join(cls.tmp, "blue.png"))
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = tempfile.mkdtemp()
+        self.win = MainWindow(library_dir=self.lib_dir)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.lib_dir, ignore_errors=True)
+
+    def _wait_normalmap(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while self.win.normalmap_worker is not None:
+            if time.monotonic() > deadline:
+                raise AssertionError(
+                    "normal map worker did not finish")
+            self.app.processEvents()
+            time.sleep(0.05)
+        self.app.processEvents()
+
+    def _generate(self):
+        self.assertTrue(self.win.load_image(self.edge))
+        self.win.normalmap_btn.click()
+        self._wait_normalmap()
+        return self.win.normal_map_image
+
+    def test_buttons_disabled_without_image(self):
+        self.assertFalse(self.win.normalmap_btn.isEnabled())
+        self.assertFalse(self.win.normalmap_show_btn.isEnabled())
+        self.assertFalse(self.win.normalmap_export_btn.isEnabled())
+        self.assertFalse(self.win.normalmap_cancel_btn.isEnabled())
+        self.assertFalse(self.win.normalmap_show_btn.isChecked())
+
+    def test_strength_spin_default_and_range(self):
+        spin = self.win.normalmap_strength_spin
+        self.assertEqual(spin.value(), 1.0)
+        self.assertEqual(spin.minimum(), 0.25)
+        self.assertEqual(spin.maximum(), 4.0)
+
+    def test_generate_enabled_after_load(self):
+        self.assertTrue(self.win.load_image(self.edge))
+        self.assertTrue(self.win.normalmap_btn.isEnabled())
+        self.assertFalse(self.win.normalmap_show_btn.isEnabled())
+        self.assertFalse(self.win.normalmap_export_btn.isEnabled())
+
+    def test_generate_shows_map_and_status(self):
+        from pixel_forge.normalmap import generate_normal_map
+
+        result = self._generate()
+        self.assertIsNotNone(result)
+        self.assertEqual((result.width(), result.height()),
+                         (self.win.result_image.width(),
+                          self.win.result_image.height()))
+        # The GUI's map is exactly the module's map on the
+        # same result, at the default strength.
+        self.assertEqual(
+            result,
+            generate_normal_map(self.win.result_image,
+                                strength=1.0))
+        # The hard edge tilts left: red well below flat.
+        off = (16 * result.width() + 16) * 4
+        self.assertLess(result.data[off], 100)
+        self.assertTrue(
+            self.win.statusBar().currentMessage().startswith(
+                "Normal map generated"))
+        self.assertTrue(self.win.normalmap_show_btn.isChecked())
+        self.assertEqual(self.win.normalmap_show_btn.text(),
+                         "Show sprite")
+        self.assertTrue(self.win.normalmap_export_btn.isEnabled())
+        self.assertTrue(self.win.normalmap_btn.isEnabled())
+        self.assertFalse(self.win.normalmap_cancel_btn.isEnabled())
+        # The editor tools go quiet while the map is showing.
+        for button in self.win.editor_tool_buttons.values():
+            self.assertFalse(button.isEnabled())
+
+    def test_generate_uses_the_strength_spin(self):
+        from pixel_forge.normalmap import generate_normal_map
+
+        self.assertTrue(self.win.load_image(self.edge))
+        self.win.normalmap_strength_spin.setValue(4.0)
+        self.win.normalmap_btn.click()
+        self._wait_normalmap()
+        self.assertEqual(
+            self.win.normal_map_image,
+            generate_normal_map(self.win.result_image,
+                                strength=4.0))
+
+    def test_show_toggle_switches_back_to_the_sprite(self):
+        self._generate()
+        # Pixel (0, 0) of the preview is the first sprite pixel
+        # at any zoom: the map's is blue, the sprite's is black.
+        shown = self.win.after_label.pixmap().toImage().pixel(0, 0)
+        self.win.normalmap_show_btn.click()
+        self.app.processEvents()
+        self.assertFalse(self.win._showing_normal_map)
+        self.assertFalse(self.win.normalmap_show_btn.isChecked())
+        self.assertEqual(self.win.normalmap_show_btn.text(),
+                         "Show normal map")
+        self.assertEqual(self.win.statusBar().currentMessage(),
+                         "Showing the sprite")
+        for button in self.win.editor_tool_buttons.values():
+            self.assertTrue(button.isEnabled())
+        # The preview really changed: the sprite's pixels are
+        # not the map's pixels.
+        sprite = self.win.after_label.pixmap().toImage().pixel(0, 0)
+        self.assertNotEqual(shown, sprite)
+
+    def test_export_writes_png(self):
+        from pixel_forge.pixelize import load_image
+
+        self._generate()
+        out = os.path.join(self.tmp, "edge-normal.png")
+        self.assertTrue(self.win.export_normal_map(out))
+        self.assertTrue(os.path.isfile(out))
+        image = load_image(out)
+        self.assertEqual((image.width(), image.height()), (32, 32))
+        self.assertEqual(image, self.win.normal_map_image)
+
+    def test_new_load_clears_the_map(self):
+        self._generate()
+        self.assertTrue(self.win.load_image(self.other))
+        self.assertIsNone(self.win.normal_map_image)
+        self.assertFalse(self.win._showing_normal_map)
+        self.assertFalse(self.win.normalmap_show_btn.isChecked())
+        self.assertEqual(self.win.normalmap_show_btn.text(),
+                         "Show normal map")
+        self.assertFalse(self.win.normalmap_show_btn.isEnabled())
+        self.assertFalse(self.win.normalmap_export_btn.isEnabled())
+        self.assertTrue(self.win.normalmap_btn.isEnabled())
+
+    def test_cancel_leaves_no_map(self):
+        import pixel_forge.normalmap as normalmap
+
+        self.win.load_image(self.edge)
+        # Captured before the patch: calling the module
+        # attribute inside the mock would recurse into the
+        # mock itself.
+        real_generate = normalmap.generate_normal_map
+
+        def blocking_generate(image, strength=1.0):
+            worker = self.win.normalmap_worker
+            while not worker._cancel_event.is_set():
+                time.sleep(0.05)
+            return real_generate(image, strength=strength)
+
+        with mock.patch.object(normalmap, "generate_normal_map",
+                               blocking_generate):
+            self.win.normalmap_btn.click()
+            deadline = time.monotonic() + 10
+            while not self.win.normalmap_cancel_btn.isEnabled():
+                if time.monotonic() > deadline:
+                    raise AssertionError("worker did not start")
+                self.app.processEvents()
+                time.sleep(0.05)
+            self.win.normalmap_cancel_btn.click()
+            self._wait_normalmap()
+        self.assertIsNone(self.win.normal_map_image)
+        self.assertEqual(self.win.statusBar().currentMessage(),
+                         "Cancelled, the normal map is unchanged")
+        self.assertTrue(self.win.normalmap_btn.isEnabled())
+
+    def test_worker_failure_warns(self):
+        import pixel_forge.normalmap as normalmap
+        from pixel_forge.pixelize import PixelForgeError
+
+        self.win.load_image(self.edge)
+        with mock.patch.object(
+                normalmap, "generate_normal_map",
+                side_effect=PixelForgeError("test failure")), \
+                mock.patch("pixel_forge.gui.warn_dialog") as warned:
+            self.win.normalmap_btn.click()
+            self._wait_normalmap()
+        self.assertEqual(warned.call_count, 1)
+        self.assertEqual(warned.call_args[0][1],
+                         "Could not generate the normal map")
+        self.assertIn("test failure", warned.call_args[0][2])
+        self.assertIsNone(self.win.normal_map_image)
+        self.assertEqual(self.win.statusBar().currentMessage(),
+                         "Normal map failed")
+        self.assertTrue(self.win.normalmap_btn.isEnabled())
+
+    def test_stale_result_is_ignored(self):
+        import pixel_forge.normalmap as normalmap
+
+        self.win.load_image(self.edge)
+        release = threading.Event()
+        real_generate = normalmap.generate_normal_map
+
+        def slow_generate(image, strength=1.0):
+            release.wait(timeout=30)
+            return real_generate(image, strength=strength)
+
+        with mock.patch.object(normalmap, "generate_normal_map",
+                               slow_generate):
+            self.win.normalmap_btn.click()
+            self.app.processEvents()
+            # A new image lands mid-run: the result changes
+            # under the worker.
+            self.assertTrue(self.win.load_image(self.other))
+            release.set()
+            self._wait_normalmap()
+        self.assertIsNone(self.win.normal_map_image)
+        self.assertIn("changed",
+                      self.win.statusBar().currentMessage())
+
+
 class VideoGuiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -1,5 +1,21 @@
 # Pixel Forge changelog
 
+## 0.65 — 2026-11-14
+
+Normal-map generation for 2D lighting (task 43): the Image tab
+has a Normal map section that makes a normal map from the
+pixelized sprite: bright reads as high, dark as low, and a Sobel
+filter reads the slope at every pixel, so a 2D game engine can
+light the sprite as if it had depth. Strength sets how strong
+the relief is (0.25 to 4.00, default 1.00, the true slope).
+Generation runs in the background with Cancel, the map shows in
+place of the sprite until the toggle switches back, and Export
+normal map saves it as a PNG. The map uses the green-up
+convention 2D lighting expects, keeps the sprite's transparency,
+and belongs to the result it was made from: a control change,
+an edit, or a new load clears it. Same step on the command line
+as `pixel-forge normal-map INPUT [--strength N] [--out OUT.png]`.
+
 ## 0.64 — 2026-11-14
 
 Code input expansion (task 46) — the Code tab now reads JSON

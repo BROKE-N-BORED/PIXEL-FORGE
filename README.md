@@ -131,7 +131,13 @@ it keeps them and prints the way to remove them by hand.
   photo or a grid too faint to read says so plainly and the image
   is left alone, and an already-clean sprite says so too. The same
   step is on the command line as `pixel-forge convert
-  --snap-to-grid`. The pixel preview is
+  --snap-to-grid`. **Generate normal map** makes a normal map from
+  the pixelized sprite for 2D lighting (see Normal maps below): it
+  runs in the background with Cancel, the map shows in place of the
+  sprite until the toggle switches back, and **Export normal map**
+  saves it as a PNG. The map belongs to the result it was made
+  from, so a control change, an edit, or a new load clears it and
+  the buttons go quiet until a new one is made. The pixel preview is
   also a canvas: pick a tool above it (Pencil, Eraser, Fill,
   Eyedropper, Line, Rectangle) and a color from the strip of swatches
   — one per color the sprite actually uses — and click or drag on
@@ -671,6 +677,43 @@ that share this rect. Durations and animation tags ride along
 from the Video tab, like the grid format. The atlas is an export
 format — there is no atlas loader, and the library still stores
 grid sheets.
+
+## Normal maps
+
+A normal map is an image where each pixel's color is a surface
+direction: red is left/right, green is up/down, blue is toward
+the viewer. A 2D game engine reads it alongside the sprite and
+lights the sprite as if it had depth: a torch swung past a
+brick wall lights each brick's edges, without any 3D geometry.
+Pixel Forge makes one from the sprite's brightness: bright reads
+as high, dark reads as low, and a Sobel filter reads the slope
+at every pixel.
+
+- **Image tab:** the Normal map section's **Generate normal map**
+  makes the map from the pixelized sprite at its current size, so
+  the map matches the sprite pixel for pixel. **Strength** (0.25
+  to 4.00, default 1.00) sets how strong the lighting relief is:
+  1.00 is the true slope of the sprite, lower is flatter, higher
+  is more dramatic. **Show normal map** shows the map in the pixel
+  preview instead of the sprite (the editor tools go quiet while
+  it is showing, since they paint on the sprite, not the map), and
+  **Export normal map** saves it as a PNG next to the sprite.
+- **Command line:** `pixel-forge normal-map INPUT [--strength N]
+  [--out OUT.png]` makes a map from one image file, defaulting to
+  `<input-stem>-normal.png` next to the input. It works from the
+  source image directly, not a pixelized version.
+- **Y convention:** green points up (OpenGL style). A slope that
+  rises toward the bottom of the image reads green above 128; a
+  slope that rises toward the top reads green below 128. This is the
+  convention 2D lighting in game engines expects, so a map made
+  here drops straight into a 2D light with no channel flip.
+- **Transparency:** transparent pixels read as height 0, the
+  background plane, and come out flat (128, 128, 255) with alpha
+  0; the output keeps the input's alpha. The sprite's outline
+  tilts outward in the map, the edge catching the light, because
+  the opaque pixels next to the transparent background sit on a
+  real height step. A flat or single-color sprite comes out all
+  flat (128, 128, 255).
 
 ## Engine-ready export
 

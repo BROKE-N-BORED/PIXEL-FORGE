@@ -63,6 +63,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup,
 from . import __version__
 from . import bgremove
 from . import gridsnap
+from . import normalmap
 from .atlas import (DEFAULT_MAX_SIZE, DEFAULT_PADDING,
                     build_atlas_metadata, pack_atlas, write_atlas)
 from .codeinput import CODE_EXTENSIONS, parse_paths
@@ -705,6 +706,51 @@ class GridSnapWorker(QThread):
             return
         self.done.emit({"image": result, "source": self.image,
                         "grid": grid})
+
+
+class NormalMapWorker(QThread):
+    """Generates one normal map off the GUI thread.
+
+    Pure-Python Sobel on a 512 x 512 image takes about a second
+    (measured) — too slow for the GUI thread, and the machine it
+    runs on is slower than the sandbox. Small sprites take
+    milliseconds, but the worker costs nothing there. Cancel is
+    checked when generation returns: the Sobel itself is one
+    call and cannot be interrupted mid-row, so a cancel during
+    generation lands a second or two later, like the pixel-grid
+    snap's cancel during detection. Only a buffer Image crosses
+    the thread boundary. The source result is carried along so
+    the done slot can tell a stale result from the current one
+    (a control change mid-run re-pixelizes, and the old
+    result's map must not be kept for the new result).
+    """
+    done = Signal(dict)   # image, source
+    failed = Signal(str)  # readable error message
+    cancelled = Signal()
+
+    def __init__(self, image, strength, parent=None):
+        super().__init__(parent)
+        self.image = image
+        self.strength = strength
+        self._cancel_event = threading.Event()
+
+    def cancel(self):
+        self._cancel_event.set()
+
+    def run(self):
+        try:
+            result = normalmap.generate_normal_map(
+                self.image, strength=self.strength)
+        except PixelForgeError as exc:
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - window must stay up
+            self.failed.emit("normal map failed: %s" % exc)
+            return
+        if self._cancel_event.is_set():
+            self.cancelled.emit()
+            return
+        self.done.emit({"image": result, "source": self.image})
 
 
 class SpritesheetDialog(QDialog):
@@ -2574,6 +2620,14 @@ class MainWindow(QMainWindow):
         # the prompt worker, both are stopped in closeEvent.
         self.bgremove_worker = None
         self.gridsnap_worker = None
+        # Normal map (task 43): the worker running a generation,
+        # the generated map, and whether the result pane is
+        # showing it instead of the sprite. The map belongs to
+        # the result it was made from — any pixel change clears
+        # it (see _refresh_result).
+        self.normalmap_worker = None
+        self.normal_map_image = None
+        self._showing_normal_map = False
         self.result_image = None
         self._updating_size = False
         # Pixel editor (task 33): the result's edit state, the
@@ -3367,6 +3421,67 @@ class MainWindow(QMainWindow):
         gridsnap_row.addStretch(1)
         form.addLayout(gridsnap_row)
 
+        # Normal map (task 43): a normal map for 2D lighting,
+        # made from the pixelized sprite's brightness — bright
+        # reads as high, dark as low. Generation runs in a
+        # worker (a 512 x 512 image takes about a second), the
+        # map can be shown in place of the sprite, and it
+        # exports as a PNG. The map belongs to the result it
+        # was made from: any control change, edit, or new load
+        # clears it, and the buttons say so by going quiet.
+        form.addWidget(self._section("Normal map"))
+        normalmap_row = QHBoxLayout()
+        self.normalmap_btn = QPushButton("Generate normal map")
+        self.normalmap_btn.setToolTip(
+            "Make a normal map from the sprite for 2D lighting. "
+            "Bright parts read as high, dark parts as low")
+        self.normalmap_btn.setEnabled(False)
+        self.normalmap_btn.clicked.connect(
+            self._on_generate_normal_map)
+        normalmap_row.addWidget(self.normalmap_btn)
+        self.normalmap_cancel_btn = QPushButton("Cancel")
+        self.normalmap_cancel_btn.setToolTip(
+            "Stop generating the normal map. Any map already "
+            "made is kept")
+        self.normalmap_cancel_btn.setEnabled(False)
+        self.normalmap_cancel_btn.clicked.connect(
+            self._on_normalmap_cancel)
+        normalmap_row.addWidget(self.normalmap_cancel_btn)
+        normalmap_row.addStretch(1)
+        form.addLayout(normalmap_row)
+        normalmap_view_row = QHBoxLayout()
+        self.normalmap_strength_spin = QDoubleSpinBox()
+        self.normalmap_strength_spin.setRange(
+            normalmap.MIN_STRENGTH, normalmap.MAX_STRENGTH)
+        self.normalmap_strength_spin.setDecimals(2)
+        self.normalmap_strength_spin.setSingleStep(0.25)
+        self.normalmap_strength_spin.setValue(
+            normalmap.DEFAULT_STRENGTH)
+        self.normalmap_strength_spin.setPrefix("Strength ")
+        self.normalmap_strength_spin.setToolTip(
+            "How strong the lighting relief is. 1.00 is the "
+            "true slope of the sprite, lower is flatter, "
+            "higher is more dramatic")
+        normalmap_view_row.addWidget(self.normalmap_strength_spin)
+        self.normalmap_show_btn = QPushButton("Show normal map")
+        self.normalmap_show_btn.setCheckable(True)
+        self.normalmap_show_btn.setToolTip(
+            "Show the normal map in the pixel preview instead "
+            "of the sprite. Press again to go back")
+        self.normalmap_show_btn.setEnabled(False)
+        self.normalmap_show_btn.clicked.connect(
+            self._on_show_normal_map)
+        normalmap_view_row.addWidget(self.normalmap_show_btn)
+        normalmap_view_row.addStretch(1)
+        form.addLayout(normalmap_view_row)
+        self.normalmap_export_btn = QPushButton("Export normal map")
+        self.normalmap_export_btn.setToolTip(
+            "Save the normal map as a PNG next to the sprite")
+        self.normalmap_export_btn.setEnabled(False)
+        self.normalmap_export_btn.clicked.connect(
+            self._on_export_normal_map)
+        form.addWidget(self.normalmap_export_btn)
+
         form.addWidget(self._section("Size"))
         self.size_combo = QComboBox()
         self.size_combo.setToolTip("Sprite size in pixels")
@@ -3883,6 +3998,117 @@ class MainWindow(QMainWindow):
                 self.gridsnap_worker.wait(10000)
             self.gridsnap_worker = None
 
+    def _normalmap_running(self):
+        return (self.normalmap_worker is not None
+                and self.normalmap_worker.isRunning())
+
+    def _on_generate_normal_map(self):
+        """Generate a normal map from the current result (task 43).
+
+        A 512 x 512 image takes about a second, so the work runs
+        in a worker — the window stays responsive and the run
+        can be cancelled. A run in progress ignores a second
+        press. Generation never touches the result, so no
+        discard confirm is needed. When the map lands it is
+        shown in place of the sprite; the toggle switches back.
+        """
+        if self._normalmap_running() or self.result_image is None:
+            return
+        self.normalmap_worker = NormalMapWorker(
+            self.result_image,
+            self.normalmap_strength_spin.value(),
+            parent=self)
+        self.normalmap_worker.done.connect(self._on_normalmap_done)
+        self.normalmap_worker.failed.connect(
+            self._on_normalmap_failed)
+        self.normalmap_worker.cancelled.connect(
+            self._on_normalmap_cancelled)
+        self.normalmap_btn.setEnabled(False)
+        self.normalmap_cancel_btn.setEnabled(True)
+        self.normalmap_strength_spin.setEnabled(False)
+        self.statusBar().showMessage("Generating the normal map…")
+        self.normalmap_worker.start()
+
+    def _on_normalmap_cancel(self):
+        if self.normalmap_worker is not None:
+            self.normalmap_worker.cancel()
+            self.normalmap_cancel_btn.setEnabled(False)
+            self.statusBar().showMessage(
+                "Cancelling, stopping the normal map…")
+
+    def _normalmap_finished(self):
+        """Buttons back after a run ends, whatever the outcome."""
+        self.normalmap_worker = None
+        self.normalmap_cancel_btn.setEnabled(False)
+        self.normalmap_strength_spin.setEnabled(True)
+        if self.result_image is not None:
+            self.normalmap_btn.setEnabled(True)
+
+    def _on_normalmap_done(self, result):
+        # Only the current worker counts, and only when the
+        # result it ran on is still the current one — a control
+        # change or an edit mid-run re-pixelizes, and the old
+        # result's map must not be kept. Compared by VALUE, not
+        # identity: _refresh_result rebuilds the composite
+        # object on every call, so identity would call every
+        # map stale.
+        if self.sender() is not self.normalmap_worker:
+            return
+        self._normalmap_finished()
+        if result["source"] != self.result_image:
+            self.statusBar().showMessage(
+                "Normal map generated for a result that changed, "
+                "so it was not kept")
+            return
+        self.normal_map_image = result["image"]
+        self.normalmap_show_btn.setEnabled(True)
+        self.normalmap_export_btn.setEnabled(True)
+        self._showing_normal_map = True
+        self.normalmap_show_btn.setChecked(True)
+        self.normalmap_show_btn.setText("Show sprite")
+        self._refresh_pixmaps()
+        self._update_editor_enabled()
+        self.statusBar().showMessage(
+            "Normal map generated, %d x %d"
+            % (self.normal_map_image.width(),
+               self.normal_map_image.height()))
+
+    def _on_normalmap_failed(self, message):
+        if self.sender() is not self.normalmap_worker:
+            return
+        self._normalmap_finished()
+        warn_dialog(self, "Could not generate the normal map",
+                    message)
+        self.statusBar().showMessage("Normal map failed")
+
+    def _on_normalmap_cancelled(self):
+        if self.sender() is not self.normalmap_worker:
+            return
+        self._normalmap_finished()
+        self.statusBar().showMessage(
+            "Cancelled, the normal map is unchanged")
+
+    def _stop_normalmap_worker(self):
+        if self.normalmap_worker is not None:
+            if self.normalmap_worker.isRunning():
+                self.normalmap_worker.cancel()
+                self.normalmap_worker.wait(10000)
+            self.normalmap_worker = None
+
+    def _on_show_normal_map(self, checked):
+        """Show the generated normal map in the pixel preview
+        instead of the sprite, or go back to the sprite. The
+        editor tools go quiet while the map is showing: they
+        paint on the sprite, not on the map."""
+        self._showing_normal_map = bool(checked)
+        self.normalmap_show_btn.setText(
+            "Show sprite" if checked else "Show normal map")
+        self._refresh_pixmaps()
+        self._update_editor_enabled()
+        self.statusBar().showMessage(
+            "Showing the normal map" if checked
+            else "Showing the sprite")
+
     def _classify_drop(self, path):
         """'video', 'code', 'image', or None for a dropped path."""
         suffix = Path(path).suffix.lower()
@@ -4170,6 +4396,8 @@ class MainWindow(QMainWindow):
         self._update_editor_enabled()
         self.export_btn.setEnabled(True)
         self.save_library_btn.setEnabled(True)
+        if not self._normalmap_running():
+            self.normalmap_btn.setEnabled(True)
 
     def _refresh_info_label(self):
         """The Image tab's info line: size and color count, plus
@@ -4193,7 +4421,10 @@ class MainWindow(QMainWindow):
         fit = ORIGINAL_FIT / max(source.width(), source.height())
         before = checkerboard_pixmap(source, fit, smooth=True)
         self.before_label.setPixmap(before)
-        if self.result_image is not None:
+        if self._showing_normal_map and \
+                self.normal_map_image is not None:
+            self._show_after_image(self.normal_map_image)
+        elif self.result_image is not None:
             self._show_after_image(self.result_image)
 
     def _show_after_image(self, image):
@@ -4285,6 +4516,35 @@ class MainWindow(QMainWindow):
         if path and self.export_image(path):
             self._remember_export_dir(Path(path).parent)
 
+    def export_normal_map(self, path):
+        """Write the generated normal map to path as PNG.
+        Returns True on success; on failure shows a message box
+        and returns False. Mirrors export_image."""
+        if self.normal_map_image is None:
+            return False
+        if not str(path).lower().endswith(".png"):
+            path = "%s.png" % path
+        if not self.normal_map_image.save(str(path), "PNG"):
+            warn_dialog(self, "Could not export PNG",
+                        "could not write: %s" % path)
+            return False
+        self.statusBar().showMessage("Exported %s" % Path(path).name)
+        return True
+
+    def _on_export_normal_map(self):
+        if self.normal_map_image is None:
+            return
+        if self.source_path:
+            src = Path(self.source_path)
+            default = self._export_default(
+                src.stem + "-normal.png", self.source_path)
+        else:
+            default = self._export_default("sprite-normal.png")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export normal map", default, "PNG image (*.png)")
+        if path and self.export_normal_map(path):
+            self._remember_export_dir(Path(path).parent)
+
     # ------------------------------------------------ pixel editor
     # Task 33: fix one wrong pixel without round-tripping to
     # another program. The canvas is the result preview itself;
@@ -4297,8 +4557,12 @@ class MainWindow(QMainWindow):
 
     def _update_editor_enabled(self):
         """The editor tools work only on a loaded result — and
-        so do the layer controls."""
-        enabled = self.result_image is not None
+        so do the layer controls. While the normal map is
+        showing (task 43) the tools stay off: they paint on the
+        sprite, and painting blind behind the map would be
+        nonsense."""
+        enabled = self.result_image is not None \
+            and not self._showing_normal_map
         for button in self.editor_tool_buttons.values():
             button.setEnabled(enabled)
         self.editor_color_scroll.setEnabled(enabled)
@@ -4363,11 +4627,33 @@ class MainWindow(QMainWindow):
         """Recomposite the layer stack into result_image and
         bring the preview, info line, and color strip up to
         date. Every layer change goes through here."""
+        old_result = self.result_image
         self.result_image = composite_layers(self._layers)
+        # The normal map belongs to the result it was made from
+        # (task 43): any pixel change clears it. A refresh that
+        # leaves the pixels alone (a rename, a visibility flip
+        # on an empty layer) keeps the map.
+        if old_result is not None and \
+                old_result != self.result_image:
+            self._clear_normal_map()
         self._recompute_edited()
         self._refresh_pixmaps()
         self._refresh_info_label()
         self._refresh_editor_colors()
+
+    def _clear_normal_map(self):
+        """Drop the generated normal map and go back to showing
+        the sprite. Called when the result's pixels change, so
+        the map can never describe a result it was not made
+        from. Does not refresh the preview — the caller does."""
+        self.normal_map_image = None
+        self._showing_normal_map = False
+        self.normalmap_show_btn.blockSignals(True)
+        self.normalmap_show_btn.setChecked(False)
+        self.normalmap_show_btn.setText("Show normal map")
+        self.normalmap_show_btn.blockSignals(False)
+        self.normalmap_show_btn.setEnabled(False)
+        self.normalmap_export_btn.setEnabled(False)
 
     def _recompute_edited(self):
         """The edited flag, derived from the stack: True when
@@ -10722,6 +11008,7 @@ class MainWindow(QMainWindow):
         self._stop_playback()
         self._stop_bgremove_worker()
         self._stop_gridsnap_worker()
+        self._stop_normalmap_worker()
         self._stop_prompt_worker()
         self._stop_texture_worker()
         self._stop_video_worker()
