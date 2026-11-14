@@ -122,7 +122,16 @@ it keeps them and prints the way to remove them by hand.
   asks first when the result carries edits. It needs the
   background-removal packages and the 176 MB model — tick the box in
   the installer, or run `bash install.sh --with-bgremove`; without
-  them the button says what to install. The pixel preview is
+  them the button says what to install. **Snap to pixel grid**
+  cleans up an AI image that is meant to be pixel art: it finds the
+  image's native pixel grid, takes the middle color of each cell,
+  and quantises to the current palette, and the result replaces the
+  loaded image. It is opt-in — nothing snaps unless the button is
+  pressed — and it runs in the background with Cancel. A smooth
+  photo or a grid too faint to read says so plainly and the image
+  is left alone, and an already-clean sprite says so too. The same
+  step is on the command line as `pixel-forge convert
+  --snap-to-grid`. The pixel preview is
   also a canvas: pick a tool above it (Pencil, Eraser, Fill,
   Eyedropper, Line, Rectangle) and a color from the strip of swatches
   — one per color the sprite actually uses — and click or drag on

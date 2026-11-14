@@ -60,6 +60,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup,
 
 from . import __version__
 from . import bgremove
+from . import gridsnap
 from .atlas import (DEFAULT_MAX_SIZE, DEFAULT_PADDING,
                     build_atlas_metadata, pack_atlas, write_atlas)
 from .codeinput import CODE_EXTENSIONS, parse_paths
@@ -629,6 +630,79 @@ class BgRemoveWorker(QThread):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         self.done.emit({"image": result, "source": self.image})
+
+
+class GridSnapWorker(QThread):
+    """Snaps one image to its pixel grid off the GUI thread.
+
+    Detection alone takes about 3 seconds on a 1024x1024
+    image (measured), the snap about 1.5 more — far too long
+    to run on the GUI thread. The worker detects first, then
+    snaps + quantises with the palette settings it was given
+    (the GUI's current palette, color count and custom
+    palettes). Only a buffer Image crosses the thread boundary
+    (QPixmap is not thread-safe) — a plain Python object, like
+    the background-removal worker's result. Cancel is checked
+    between the stages (detect, snap, quantise): a cancel
+    during detection takes effect when detection returns, a
+    second or two later. The source image is carried along so
+    the done slot can tell a stale result from the current
+    image (a new import mid-run must not be overwritten by the
+    old image's result). No grid and already-clean are their
+    own signals, not failures — the image is left alone and
+    the status bar says so in plain words.
+    """
+    done = Signal(dict)   # image, source, grid
+    failed = Signal(str)  # readable error message
+    cancelled = Signal()
+    no_grid = Signal()
+    already_clean = Signal()
+
+    def __init__(self, image, palette, max_colors, palettes,
+                 parent=None):
+        super().__init__(parent)
+        self.image = image
+        self.palette = palette
+        self.max_colors = max_colors
+        self.palettes = palettes
+        self._cancel_event = threading.Event()
+
+    def cancel(self):
+        self._cancel_event.set()
+
+    def run(self):
+        try:
+            grid = gridsnap.detect_grid(self.image)
+        except PixelForgeError as exc:
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - window must stay up
+            self.failed.emit("pixel grid snap failed: %s" % exc)
+            return
+        if self._cancel_event.is_set():
+            self.cancelled.emit()
+            return
+        if grid is None:
+            self.no_grid.emit()
+            return
+        if grid[0] <= 1.0:
+            self.already_clean.emit()
+            return
+        try:
+            result = gridsnap.snap_and_quantise(
+                self.image, grid, self.palette, self.max_colors,
+                self.palettes)
+        except PixelForgeError as exc:
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - window must stay up
+            self.failed.emit("pixel grid snap failed: %s" % exc)
+            return
+        if self._cancel_event.is_set():
+            self.cancelled.emit()
+            return
+        self.done.emit({"image": result, "source": self.image,
+                        "grid": grid})
 
 
 class SpritesheetDialog(QDialog):
@@ -2493,10 +2567,11 @@ class MainWindow(QMainWindow):
         self._duplicate_fingerprint = None
         self.source_image = None
         self.source_path = None
-        # Background removal (task 41): the worker running the
-        # removal, or None. Like the prompt worker, it is stopped
-        # in closeEvent.
+        # Background removal (task 41) and pixel-grid snap
+        # (task 42): the worker running each job, or None. Like
+        # the prompt worker, both are stopped in closeEvent.
         self.bgremove_worker = None
+        self.gridsnap_worker = None
         self.result_image = None
         self._updating_size = False
         # Pixel editor (task 33): the result's edit state, the
@@ -3232,6 +3307,37 @@ class MainWindow(QMainWindow):
         bgremove_row.addStretch(1)
         form.addLayout(bgremove_row)
 
+        # Pixel-grid snap (task 42): an AI image meant to be
+        # pixel art comes back noisy — pixels off-grid, blended
+        # edges, stray colors. The snap finds the image's
+        # native pixel grid, takes the median color per cell,
+        # and quantises to the current palette, and the result
+        # replaces the loaded image. Opt-in only: the button is
+        # available whenever an image is loaded, and a clean
+        # sprite or a gridless image says so plainly and is
+        # left alone.
+        form.addWidget(self._section("Pixel grid"))
+        gridsnap_row = QHBoxLayout()
+        self.gridsnap_btn = QPushButton("Snap to pixel grid")
+        self.gridsnap_btn.setToolTip(
+            "Clean up an AI image that is meant to be pixel "
+            "art. Finds its pixel grid, takes the middle color "
+            "of each cell, and quantises to the current palette")
+        self.gridsnap_btn.setEnabled(False)
+        self.gridsnap_btn.clicked.connect(
+            self._on_snap_to_grid)
+        gridsnap_row.addWidget(self.gridsnap_btn)
+        self.gridsnap_cancel_btn = QPushButton("Cancel")
+        self.gridsnap_cancel_btn.setToolTip(
+            "Stop the pixel grid snap. The image is left "
+            "exactly as it was")
+        self.gridsnap_cancel_btn.setEnabled(False)
+        self.gridsnap_cancel_btn.clicked.connect(
+            self._on_gridsnap_cancel)
+        gridsnap_row.addWidget(self.gridsnap_cancel_btn)
+        gridsnap_row.addStretch(1)
+        form.addLayout(gridsnap_row)
+
         form.addWidget(self._section("Size"))
         self.size_combo = QComboBox()
         self.size_combo.setToolTip("Sprite size in pixels")
@@ -3628,6 +3734,126 @@ class MainWindow(QMainWindow):
                 self.bgremove_worker.wait(10000)
             self.bgremove_worker = None
 
+    # -------------------------------------------- pixel-grid snap
+
+    def _gridsnap_running(self):
+        return (self.gridsnap_worker is not None
+                and self.gridsnap_worker.isRunning())
+
+    def _on_snap_to_grid(self):
+        """Snap the loaded image to its pixel grid (task 42).
+
+        Detection alone takes seconds on a large image, so the
+        work runs in a worker — the window stays responsive and
+        the snap can be cancelled. A run in progress ignores a
+        second press. The result replaces the loaded image,
+        which throws the pixel edits away — the same discard
+        confirm as a new load guards that. A clean sprite and
+        a gridless image are not failures: the worker says so
+        and the image is left alone.
+        """
+        if self._gridsnap_running() or self.source_image is None:
+            return
+        if not self._confirm_discard_edits(
+                "Snap to the pixel grid?",
+                "Snap to the pixel grid and lose your edits?"):
+            return
+        self.gridsnap_worker = GridSnapWorker(
+            self.source_image,
+            self.palette_combo.currentData(),
+            self.colors_spin.value(),
+            self.palette_store.user_palettes(),
+            parent=self)
+        self.gridsnap_worker.done.connect(self._on_gridsnap_done)
+        self.gridsnap_worker.failed.connect(
+            self._on_gridsnap_failed)
+        self.gridsnap_worker.cancelled.connect(
+            self._on_gridsnap_cancelled)
+        self.gridsnap_worker.no_grid.connect(
+            self._on_gridsnap_no_grid)
+        self.gridsnap_worker.already_clean.connect(
+            self._on_gridsnap_already_clean)
+        self.gridsnap_btn.setEnabled(False)
+        self.gridsnap_cancel_btn.setEnabled(True)
+        self.import_btn.setEnabled(False)
+        self.statusBar().showMessage("Finding the pixel grid…")
+        self.gridsnap_worker.start()
+
+    def _on_gridsnap_cancel(self):
+        if self.gridsnap_worker is not None:
+            self.gridsnap_worker.cancel()
+            self.gridsnap_cancel_btn.setEnabled(False)
+            self.statusBar().showMessage(
+                "Cancelling, stopping the snap…")
+
+    def _gridsnap_finished(self):
+        """Buttons back after a run ends, whatever the outcome."""
+        self.gridsnap_worker = None
+        self.import_btn.setEnabled(True)
+        self.gridsnap_cancel_btn.setEnabled(False)
+        if self.source_image is not None:
+            self.gridsnap_btn.setEnabled(True)
+
+    def _on_gridsnap_done(self, result):
+        # Only the current worker counts (the Prompt tab's
+        # sender guard), and only when the image it ran on is
+        # still the loaded one — a new import mid-run (a drop
+        # lands even with the button disabled) must not be
+        # overwritten by the old image's result.
+        if self.sender() is not self.gridsnap_worker:
+            return
+        self._gridsnap_finished()
+        if result["source"] is not self.source_image:
+            self.statusBar().showMessage(
+                "Snapped to a grid for an image that is no "
+                "longer loaded, so the current image is "
+                "unchanged")
+            return
+        self.source_image = result["image"]
+        self.update_preview()
+        self.statusBar().showMessage(
+            "Snapped to a %g px grid (%d x %d sprite)"
+            % (result["grid"][0], self.source_image.width(),
+               self.source_image.height()))
+
+    def _on_gridsnap_failed(self, message):
+        if self.sender() is not self.gridsnap_worker:
+            return
+        self._gridsnap_finished()
+        warn_dialog(self, "Could not snap to the pixel grid",
+                    message)
+        self.statusBar().showMessage("Pixel grid snap failed")
+
+    def _on_gridsnap_cancelled(self):
+        if self.sender() is not self.gridsnap_worker:
+            return
+        self._gridsnap_finished()
+        self.statusBar().showMessage(
+            "Cancelled, the image is unchanged")
+
+    def _on_gridsnap_no_grid(self):
+        if self.sender() is not self.gridsnap_worker:
+            return
+        self._gridsnap_finished()
+        self.statusBar().showMessage(
+            "Could not find a pixel grid in this image, so the "
+            "image is unchanged")
+
+    def _on_gridsnap_already_clean(self):
+        if self.sender() is not self.gridsnap_worker:
+            return
+        self._gridsnap_finished()
+        self.statusBar().showMessage(
+            "This is already a clean pixel sprite, so the "
+            "image is unchanged")
+
+    def _stop_gridsnap_worker(self):
+        if self.gridsnap_worker is not None:
+            if self.gridsnap_worker.isRunning():
+                self.gridsnap_worker.cancel()
+                self.gridsnap_worker.wait(10000)
+            self.gridsnap_worker = None
+
     def _classify_drop(self, path):
         """'video', 'code', 'image', or None for a dropped path."""
         suffix = Path(path).suffix.lower()
@@ -3884,6 +4110,8 @@ class MainWindow(QMainWindow):
         self.extract_palette_btn.setEnabled(True)
         if not self._bgremove_running():
             self.bgremove_btn.setEnabled(True)
+        if not self._gridsnap_running():
+            self.gridsnap_btn.setEnabled(True)
         try:
             result = pixelize_image(
                 self.source_image,
@@ -10463,6 +10691,7 @@ class MainWindow(QMainWindow):
         self._save_geometry()
         self._stop_playback()
         self._stop_bgremove_worker()
+        self._stop_gridsnap_worker()
         self._stop_prompt_worker()
         self._stop_texture_worker()
         self._stop_video_worker()

@@ -430,6 +430,191 @@ class BgRemoveGuiTests(unittest.TestCase):
                       self.win.statusBar().currentMessage())
 
 
+class GridSnapGuiTests(unittest.TestCase):
+    """The Image tab's Snap to pixel grid button (task 42).
+
+    The snap runs in a worker — the tests pump the event loop
+    until the worker finishes (the BgRemoveGuiTests pattern).
+    The noisy image is a soft-edge upscale of a known sprite,
+    so the snapped result is checkable against the original.
+    """
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        from test_gridsnap import (make_gradient, make_sprite,
+                                   match_stats, soft_upscale)
+        cls.match_stats = staticmethod(match_stats)
+        cls.tmp = tempfile.mkdtemp()
+        cls.sprite = make_sprite(32)
+        cls.noisy = write_image(
+            soft_upscale(cls.sprite, 8, edge=0.25),
+            os.path.join(cls.tmp, "noisy.png"))
+        cls.clean = write_image(cls.sprite,
+                                os.path.join(cls.tmp, "clean.png"))
+        cls.grad = write_image(make_gradient(64, 64),
+                               os.path.join(cls.tmp, "grad.png"))
+        cls.other = write_image(
+            make_solid_image(32, 32, 0, 0, 200),
+            os.path.join(cls.tmp, "blue.png"))
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = tempfile.mkdtemp()
+        self.win = MainWindow(library_dir=self.lib_dir)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.lib_dir, ignore_errors=True)
+
+    def _wait_gridsnap(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while self.win.gridsnap_worker is not None:
+            if time.monotonic() > deadline:
+                raise AssertionError(
+                    "gridsnap worker did not finish")
+            self.app.processEvents()
+            time.sleep(0.05)
+        self.app.processEvents()
+
+    def test_button_disabled_without_image(self):
+        self.assertFalse(self.win.gridsnap_btn.isEnabled())
+        self.assertFalse(self.win.gridsnap_cancel_btn.isEnabled())
+
+    def test_button_enabled_after_load(self):
+        self.assertTrue(self.win.load_image(self.noisy))
+        self.assertTrue(self.win.gridsnap_btn.isEnabled())
+        self.assertFalse(self.win.gridsnap_cancel_btn.isEnabled())
+
+    def test_no_grid_leaves_image_alone(self):
+        self.assertTrue(self.win.load_image(self.grad))
+        original = self.win.source_image
+        self.win.gridsnap_btn.click()
+        self._wait_gridsnap()
+        self.assertIs(self.win.source_image, original)
+        self.assertEqual(self.win.statusBar().currentMessage(),
+                         "Could not find a pixel grid in this "
+                         "image, so the image is unchanged")
+        self.assertTrue(self.win.gridsnap_btn.isEnabled())
+
+    def test_already_clean_leaves_image_alone(self):
+        self.assertTrue(self.win.load_image(self.clean))
+        original = self.win.source_image
+        self.win.gridsnap_btn.click()
+        self._wait_gridsnap()
+        self.assertIs(self.win.source_image, original)
+        self.assertEqual(self.win.statusBar().currentMessage(),
+                         "This is already a clean pixel sprite, "
+                         "so the image is unchanged")
+        self.assertTrue(self.win.gridsnap_btn.isEnabled())
+
+    def test_snap_replaces_source(self):
+        self.assertTrue(self.win.load_image(self.noisy))
+        original = self.win.source_image
+        self.win.gridsnap_btn.click()
+        self.assertFalse(self.win.gridsnap_btn.isEnabled())
+        self.assertTrue(self.win.gridsnap_cancel_btn.isEnabled())
+        self._wait_gridsnap()
+        result = self.win.source_image
+        self.assertIsNot(result, original)
+        # 32 or 33 per side, not exactly 32: the synthetic's
+        # edge clamping duplicates the edge source pixels into
+        # an extra row or column on whichever side the sliver
+        # survives min_cover (see the module docstring). The
+        # overlapping 32x32 region is the check.
+        self.assertIn(result.width(), (32, 33))
+        self.assertIn(result.height(), (32, 33))
+        self.assertEqual(self.win.statusBar().currentMessage(),
+                         "Snapped to a 8 px grid (%d x %d sprite)"
+                         % (result.width(), result.height()))
+        exact, _mae = self.match_stats(result, self.sprite)
+        self.assertGreaterEqual(exact, 99.0)
+        self.assertTrue(self.win.gridsnap_btn.isEnabled())
+        self.assertFalse(self.win.gridsnap_cancel_btn.isEnabled())
+
+    def test_worker_failure_warns_and_keeps_source(self):
+        import pixel_forge.gridsnap as gridsnap
+        from pixel_forge.pixelize import PixelForgeError
+
+        self.win.load_image(self.noisy)
+        original = self.win.source_image
+        with mock.patch.object(
+                gridsnap, "detect_grid",
+                side_effect=PixelForgeError(
+                    "the image has no size")), \
+                mock.patch("pixel_forge.gui.warn_dialog") as warned:
+            self.win.gridsnap_btn.click()
+            self._wait_gridsnap()
+        self.assertEqual(warned.call_count, 1)
+        self.assertEqual(warned.call_args[0][1],
+                         "Could not snap to the pixel grid")
+        self.assertIn("no size", warned.call_args[0][2])
+        self.assertIs(self.win.source_image, original)
+        self.assertTrue(self.win.gridsnap_btn.isEnabled())
+
+    def test_cancel_leaves_image_unchanged(self):
+        import pixel_forge.gridsnap as gridsnap
+
+        self.win.load_image(self.noisy)
+        original = self.win.source_image
+
+        def blocking_detect(image):
+            # Wait until the Cancel button sets the worker's
+            # cancel event, then return a grid — the worker
+            # checks the event and reports cancelled.
+            worker = self.win.gridsnap_worker
+            while not worker._cancel_event.is_set():
+                time.sleep(0.05)
+            return (8.0, 0.0, 0.0)
+
+        with mock.patch.object(gridsnap, "detect_grid",
+                               blocking_detect):
+            self.win.gridsnap_btn.click()
+            deadline = time.monotonic() + 10
+            while not self.win.gridsnap_cancel_btn.isEnabled():
+                if time.monotonic() > deadline:
+                    raise AssertionError("worker did not start")
+                self.app.processEvents()
+                time.sleep(0.05)
+            self.win.gridsnap_cancel_btn.click()
+            self._wait_gridsnap()
+        self.assertIs(self.win.source_image, original)
+        self.assertEqual(self.win.statusBar().currentMessage(),
+                         "Cancelled, the image is unchanged")
+        self.assertTrue(self.win.gridsnap_btn.isEnabled())
+
+    def test_stale_result_is_ignored(self):
+        import pixel_forge.gridsnap as gridsnap
+
+        self.win.load_image(self.noisy)
+        first = self.win.source_image
+        release = threading.Event()
+
+        def slow_detect(image):
+            release.wait(timeout=30)
+            return (8.0, 0.0, 0.0)
+
+        with mock.patch.object(gridsnap, "detect_grid",
+                               slow_detect):
+            self.win.gridsnap_btn.click()
+            self.app.processEvents()
+            # A new image lands mid-run (a drop lands even with
+            # the Import button disabled).
+            self.assertTrue(self.win.load_image(self.other))
+            second = self.win.source_image
+            self.assertIsNot(second, first)
+            release.set()
+            self._wait_gridsnap()
+        # The old image's result must not overwrite the new one.
+        self.assertIs(self.win.source_image, second)
+        data = self.win.source_image.data
+        self.assertEqual(tuple(data[0:3]), (0, 0, 200))
+        self.assertIn("no longer loaded",
+                      self.win.statusBar().currentMessage())
+
+
 class VideoGuiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

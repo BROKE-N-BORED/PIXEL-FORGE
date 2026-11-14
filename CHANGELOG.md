@@ -1,5 +1,25 @@
 # Pixel Forge changelog
 
+## 0.63 — 2026-11-14
+
+Pixel-grid snap for AI output (task 42) — the Image tab has a
+Snap to pixel grid button that cleans up an AI image meant to
+be pixel art: it finds the image's native pixel grid, takes
+the middle color of each cell, and quantises to the current
+palette, and the result replaces the loaded image. Detection
+is honest — a smooth photo or a grid too faint to read says
+so plainly and the image is left alone, and an already-clean
+sprite says so too. It runs in a worker with Cancel, so the
+window stays responsive (detection takes a few seconds on a
+large image). The CLI has the same step as `pixel-forge
+convert --snap-to-grid`: a gridless file is an error on its
+own, or skipped in a folder convert. The approach is the
+sprite-forge toolkit's clean pipeline (detect, median per
+cell, quantise), reimplemented in Pixel Forge's own code.
+Proven on a known sprite upscaled with smoothed edges (the
+realistic AI case): the snap recovers the original almost
+exactly.
+
 ## 0.62 — 2026-11-14
 
 Local background removal (task 41) — the Image tab has a

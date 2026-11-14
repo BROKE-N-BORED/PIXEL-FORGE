@@ -249,12 +249,21 @@ def quantize(image, palette, dither=True):
 
 def pixelize_image(image, width=32, height=None, keep_aspect=False,
                    palette="image", max_colors=16, dither=True,
-                   palettes=None):
+                   palettes=None, snap_to_grid=False):
     """Full pipeline on an in-memory image: downscale, then quantize.
     palettes is an optional dict of user palettes (name -> colors),
-    passed through to resolve_palette."""
+    passed through to resolve_palette. With snap_to_grid, the image
+    is first cleaned to its native pixel grid (gridsnap.clean_image)
+    — a clean sprite passes through unchanged, an image with no
+    grid raises PixelForgeError. The gridsnap import is local:
+    gridsnap imports this module, so a top-level import would be
+    circular."""
     if height is None:
         height = width
+    if snap_to_grid:
+        from .gridsnap import clean_image
+        image, _grid = clean_image(image, palette, max_colors,
+                                   palettes)
     small = downscale(image, width, height, keep_aspect)
     working = resolve_palette(small, palette, max_colors,
                               palettes=palettes)
@@ -263,18 +272,21 @@ def pixelize_image(image, width=32, height=None, keep_aspect=False,
 
 def pixelize_file(input_path, output_path, width=32, height=None,
                   keep_aspect=False, palette="image", max_colors=16,
-                  dither=True, palettes=None):
+                  dither=True, palettes=None, snap_to_grid=False):
     """Full pipeline on files. Returns (width, height, colors_used).
 
     Saves a transparent PNG. Raises PixelForgeError with a readable
     message on any failure. palettes is an optional dict of user
     palettes (name -> colors), passed through to resolve_palette.
+    With snap_to_grid, the image is first cleaned to its native
+    pixel grid (see pixelize_image).
     """
     image = load_image(input_path)
     result = pixelize_image(image, width=width, height=height,
                             keep_aspect=keep_aspect, palette=palette,
                             max_colors=max_colors, dither=dither,
-                            palettes=palettes)
+                            palettes=palettes,
+                            snap_to_grid=snap_to_grid)
     if not result.save(str(output_path), "PNG"):
         raise PixelForgeError("could not write: %s" % output_path)
     return result.width(), result.height(), count_opaque_colors(result)

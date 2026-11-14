@@ -275,6 +275,14 @@ def build_parser():
                          "images to convert in turn")
     _add_pixelize_args(convert)
     _add_output_args(convert)
+    convert.add_argument("--snap-to-grid", action="store_true",
+                         help="clean up an AI image that is meant to "
+                         "be pixel art before converting: find its "
+                         "pixel grid, take the middle color of each "
+                         "cell, and quantise to the palette. A "
+                         "clean sprite passes through unchanged. An "
+                         "image with no grid is an error (single "
+                         "file) or skipped (folder)")
     convert.add_argument("--out", default=None,
                          help="output PNG path (default: "
                          "<input-stem>-pixel.png next to the input); "
@@ -643,7 +651,7 @@ def cmd_convert(args):
         args.input, out, width=width, height=height,
         keep_aspect=args.keep_aspect, palette=palette,
         max_colors=args.colors, dither=args.dither,
-        palettes=palettes)
+        palettes=palettes, snap_to_grid=args.snap_to_grid)
     _emit_json(args, {"output": str(out), "width": width_out,
                       "height": height_out, "colors": colors})
     _info(args, "%s: %d x %d, %d colors"
@@ -680,7 +688,7 @@ def _cmd_convert_folder(args, folder, width, height, palette,
                 str(src), str(out), width=width, height=height,
                 keep_aspect=args.keep_aspect, palette=palette,
                 max_colors=args.colors, dither=args.dither,
-                palettes=palettes)
+                palettes=palettes, snap_to_grid=args.snap_to_grid)
         except PixelForgeError as exc:
             failed.append({"file": src.name, "reason": str(exc)})
             print("pixel-forge: skipped %s: %s" % (src.name, exc),

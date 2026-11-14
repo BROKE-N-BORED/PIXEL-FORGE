@@ -144,6 +144,54 @@ class CliTests(unittest.TestCase):
         self.assertIn("pico8", err)
         self.assertNotIn("Traceback", err)
 
+    def test_convert_snap_to_grid(self):
+        # Task 42: a soft-edge upscale of a known sprite, with
+        # the flag — the snap cleans it to the sprite's colors
+        # before the convert downscales to the requested size.
+        from test_gridsnap import make_sprite, soft_upscale
+
+        sprite = make_sprite(32)
+        noisy = write_image(soft_upscale(sprite, 8, edge=0.25),
+                            os.path.join(self.tmp, "noisy.png"))
+        out_path = os.path.join(self.tmp, "snapped.png")
+        code, _out, err = self._run(
+            ["convert", noisy, "--snap-to-grid", "--size", "32",
+             "--out", out_path])
+        self.assertEqual(code, 0, err)
+        image = load_image(out_path)
+        self.assertEqual((image.width(), image.height()), (32, 32))
+        allowed = set()
+        for i in range(0, len(sprite.data), 4):
+            allowed.add(tuple(sprite.data[i:i + 3]))
+        for i in range(0, len(image.data), 4):
+            if image.data[i + 3] == 0:
+                continue
+            self.assertIn(tuple(image.data[i:i + 3]), allowed)
+
+    def test_convert_snap_to_grid_no_grid_fails_cleanly(self):
+        # A smooth photo has no grid: exit 1 with the plain
+        # message, no traceback.
+        code, _out, err = self._run(
+            ["convert", self.src, "--snap-to-grid"])
+        self.assertEqual(code, 1)
+        self.assertIn("could not find a pixel grid", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_convert_without_snap_flag_unchanged(self):
+        # The flag is off by default: the same noisy image
+        # converts without it (a plain downscale of the blur).
+        from test_gridsnap import make_sprite, soft_upscale
+
+        noisy = write_image(
+            soft_upscale(make_sprite(32), 8, edge=0.25),
+            os.path.join(self.tmp, "noisy2.png"))
+        out_path = os.path.join(self.tmp, "plain.png")
+        code, _out, err = self._run(
+            ["convert", noisy, "--size", "32", "--out", out_path])
+        self.assertEqual(code, 0, err)
+        image = load_image(out_path)
+        self.assertEqual((image.width(), image.height()), (32, 32))
+
     def test_no_command_prints_help_with_error(self):
         code, _out, err = self._run([])
         self.assertEqual(code, 2)
@@ -1455,6 +1503,29 @@ class BatchProcessingCliTests(unittest.TestCase):
         self.assertIn("a-pixel.png", out)
         self.assertIn("b-pixel.png", out)
         self.assertNotIn("notes", err)
+
+    def test_convert_folder_snap_skips_gridless(self):
+        # Task 42: with --snap-to-grid, a gridless file in the
+        # folder is reported and skipped like any other bad
+        # file, and the snappable one still converts.
+        from test_gridsnap import make_sprite, soft_upscale
+
+        folder = os.path.join(self.work, "snapshots")
+        os.mkdir(folder)
+        write_image(soft_upscale(make_sprite(32), 8, edge=0.25),
+                    os.path.join(folder, "noisy.png"))
+        write_image(make_gradient_image(),
+                    os.path.join(folder, "photo.png"))
+        code, out, err = self._run(
+            ["convert", folder, "--snap-to-grid"])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(
+            os.path.join(folder, "noisy-pixel.png")))
+        self.assertFalse(os.path.isfile(
+            os.path.join(folder, "photo-pixel.png")))
+        self.assertIn("skipped photo.png", err)
+        self.assertIn("could not find a pixel grid", err)
+        self.assertIn("noisy-pixel.png", out)
 
     def test_convert_folder_out_dir(self):
         folder = self._convert_folder()
