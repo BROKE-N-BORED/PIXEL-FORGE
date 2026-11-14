@@ -1,5 +1,20 @@
 # Pixel Forge changelog
 
+## 0.52 — 2026-11-13
+
+Library export of a sheet no longer produces a stale pair (task
+75): exporting a sheet under a new name rewrote nothing, so the
+exported JSON's "sheet" field still named the library PNG while
+the exported PNG had the name the user picked. The export now
+rewrites "sheet" to the exported PNG's name, using the same
+rewrite the library itself uses when a sheet is added (task 62)
+— atomic write, the library's own meta file never touched, a
+meta that is not a JSON object copied verbatim as before. A
+meta JSON with no "sheet" key gets the key added, naming the
+exported PNG. Exporting the whole library (Export library)
+keeps the file names, so its pairs were already
+self-consistent — now pinned by a test instead of assumed.
+
 ## 0.51 — 2026-11-13
 
 Installer hardening — tasks 84 + 85 (from Joshua's real-PC

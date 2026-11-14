@@ -9741,8 +9741,18 @@ class MainWindow(QMainWindow):
         try:
             shutil.copyfile(src, dest)
             if entry["kind"] == "sheet" and entry.get("meta"):
-                shutil.copyfile(self.library.directory / entry["meta"],
-                                dest.with_suffix(".json"))
+                # Task 75: the meta's "sheet" field names the
+                # LIBRARY png — copying it verbatim left the
+                # exported pair stale (the same defect class as
+                # task 62, different code path). _copy_sheet_meta
+                # rewrites "sheet" to the exported PNG's name
+                # (adding the key when it is missing), writes
+                # atomically, and never touches the library's own
+                # meta file; a meta that is not a JSON object is
+                # copied verbatim, as before.
+                self.library._copy_sheet_meta(
+                    self.library.directory / entry["meta"],
+                    dest.with_suffix(".json"), dest.name)
         except OSError as exc:
             warn_dialog(self, "Could not export",
                                 "could not write: %s" % exc)

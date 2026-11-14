@@ -713,6 +713,23 @@ class LibraryDepthTests(unittest.TestCase):
         self.assertFalse(os.path.isfile(
             os.path.join(backup, "knight.png")))
 
+    def test_export_to_keeps_sheet_pairs_self_consistent(self):
+        # Task 75: export_to keeps the file names, so a sheet's
+        # exported JSON still names the PNG next to it — verified
+        # here rather than assumed.
+        self._sheet("Walk cycle")
+        backup = os.path.join(self.tmp, "backup")
+        self.assertEqual(self.lib.export_to(backup), 1)
+        png = os.path.join(backup, "walk-cycle.png")
+        meta = os.path.join(backup, "walk-cycle.json")
+        self.assertTrue(os.path.isfile(png))
+        self.assertTrue(os.path.isfile(meta))
+        with open(meta) as f:
+            data = json.load(f)
+        self.assertEqual(data["sheet"], "walk-cycle.png")
+        self.assertTrue(os.path.isfile(
+            os.path.join(backup, data["sheet"])))
+
 
 if __name__ == "__main__":
     unittest.main()

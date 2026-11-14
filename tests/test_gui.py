@@ -2321,6 +2321,103 @@ class LibraryGuiTests(unittest.TestCase):
             self.win._on_library_export()
         self.assertTrue(os.path.isfile(dest))
 
+    def _sheet(self, name="Walk cycle", meta_text=None):
+        tmp = tempfile.mkdtemp()
+        png = write_image(make_solid_image(64, 64, 255, 0, 0),
+                          os.path.join(tmp, "walk.png"))
+        meta = os.path.join(tmp, "walk.json")
+        if meta_text is None:
+            with open(meta, "w") as f:
+                json.dump({"format": "pixel-forge-spritesheet",
+                           "version": 1, "frames": []}, f)
+        else:
+            with open(meta, "w") as f:
+                f.write(meta_text)
+        return self.win.library.add_sheet(png, meta, name,
+                                          frames=14)
+
+    def _export(self, dest):
+        from unittest import mock
+        with mock.patch.object(
+                QFileDialog, "getSaveFileName",
+                return_value=(dest, "")):
+            self.win._on_library_export()
+
+    def test_export_sheet_rewrites_sheet_field(self):
+        # Task 75: the exported JSON must name the EXPORTED
+        # png, not the library png — and the library's own meta
+        # must be untouched.
+        entry = self._sheet("Walk cycle")
+        self.win._refresh_library()
+        self._select(0)
+        dest = os.path.join(tempfile.mkdtemp(), "my-walk.png")
+        self._export(dest)
+        self.assertTrue(os.path.isfile(dest))
+        with open(os.path.join(
+                os.path.dirname(dest), "my-walk.json")) as f:
+            exported = json.load(f)
+        self.assertEqual(exported["sheet"], "my-walk.png")
+        self.assertEqual(exported["frames"], [])
+        with open(os.path.join(self.lib_dir,
+                               entry["meta"])) as f:
+            library_meta = json.load(f)
+        self.assertEqual(library_meta["sheet"], "walk-cycle.png")
+
+    def test_export_sheet_same_name_stays_consistent(self):
+        # The user picks the same name as the library png: the
+        # rewrite is a no-op and the pair is still consistent.
+        self._sheet("Walk cycle")
+        self.win._refresh_library()
+        self._select(0)
+        dest = os.path.join(tempfile.mkdtemp(), "walk-cycle.png")
+        self._export(dest)
+        with open(os.path.join(
+                os.path.dirname(dest), "walk-cycle.json")) as f:
+            exported = json.load(f)
+        self.assertEqual(exported["sheet"], "walk-cycle.png")
+
+    def test_export_sheet_non_json_meta_copied_verbatim(self):
+        # A meta that is not a JSON object has no "sheet" field
+        # to go stale — it is copied byte for byte, as before.
+        entry = self._sheet("Walk cycle",
+                            meta_text="not json at all\n")
+        self.win._refresh_library()
+        self._select(0)
+        dest = os.path.join(tempfile.mkdtemp(), "my-walk.png")
+        self._export(dest)
+        exported = os.path.join(os.path.dirname(dest),
+                                "my-walk.json")
+        with open(exported, "rb") as f:
+            exported_bytes = f.read()
+        with open(os.path.join(self.lib_dir,
+                               entry["meta"]), "rb") as f:
+            library_bytes = f.read()
+        self.assertEqual(exported_bytes, library_bytes)
+        self.assertEqual(exported_bytes, b"not json at all\n")
+
+    def test_export_sheet_missing_sheet_key_added(self):
+        # A meta JSON with no "sheet" key (an older or
+        # hand-edited meta): the export adds the key naming the
+        # exported png, so the pair is self-consistent.
+        entry = self._sheet("Walk cycle")
+        with open(os.path.join(self.lib_dir,
+                               entry["meta"]), "w") as f:
+            json.dump({"format": "pixel-forge-spritesheet",
+                       "version": 1, "frames": []}, f)
+        self.win._refresh_library()
+        self._select(0)
+        dest = os.path.join(tempfile.mkdtemp(), "my-walk.png")
+        self._export(dest)
+        with open(os.path.join(
+                os.path.dirname(dest), "my-walk.json")) as f:
+            exported = json.load(f)
+        self.assertEqual(exported["sheet"], "my-walk.png")
+        # The library's own meta is untouched — still keyless.
+        with open(os.path.join(self.lib_dir,
+                               entry["meta"])) as f:
+            library_meta = json.load(f)
+        self.assertNotIn("sheet", library_meta)
+
     def test_persistence_across_windows(self):
         from pixel_forge.gui import MainWindow
         self.assertTrue(self.win.load_image(self.src))
