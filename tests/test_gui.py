@@ -1312,10 +1312,14 @@ class PromptGuiTests(unittest.TestCase):
     def test_pick_keeper_with_corrupt_batch_shows_status(self):
         # The keeper slot catches PixelForgeError already; with
         # load_batch wrapped, a corrupt batch lands there as a plain
-        # status-bar message instead of a traceback.
+        # status-bar message instead of a traceback. The candidate
+        # file is valid, so the load succeeds first (task 80) and
+        # the corrupt batch.json is what fails.
         from pixel_forge import imagegen as imagegen_mod
         work = tempfile.mkdtemp()
         _batch, bdir = imagegen_mod.new_batch(work, "a knight")
+        write_image(make_solid_image(8, 8, 255, 0, 0),
+                    str(bdir / "cand-01.png"))
         path = bdir / "batch.json"
         good = path.read_bytes()
         truncated = good[:len(good) // 2]
@@ -1554,6 +1558,70 @@ class PromptGuiTests(unittest.TestCase):
         self.assertIn("cand-02.png", info)
         self.assertIn("Could not load", info)
         self.assertEqual(self.win.prompt_keeper, "cand-01.png")
+
+    def test_failed_keeper_pick_leaves_batch_untouched(self):
+        # Task 80: the pick used to mark the keeper in
+        # batch.json before loading the image, so a corrupt
+        # candidate left batch.json naming the bad file while
+        # the tab kept the good one. A failed pick now leaves
+        # batch.json byte-identical — the batch and the tab
+        # agree on the good keeper.
+        from pixel_forge.imagegen import load_batch
+        self._generate()
+        bdir = self.win.prompt_batch_dir
+        before = (bdir / "batch.json").read_bytes()
+        (bdir / "cand-02.png").write_bytes(b"not a png at all")
+        self.win._pick_prompt_keeper("cand-02.png")
+        self.app.processEvents()
+        self.assertEqual((bdir / "batch.json").read_bytes(), before)
+        batch = load_batch(bdir)
+        self.assertEqual(batch["keeper"], "cand-01.png")
+        self.assertEqual(self.win.prompt_keeper, "cand-01.png")
+        status = {c["file"]: c["status"]
+                  for c in batch["candidates"]}
+        self.assertEqual(status["cand-01.png"], "kept")
+        self.assertEqual(status["cand-02.png"], "pending")
+
+    def test_failed_first_keeper_pick_leaves_no_keeper(self):
+        # Task 80, no prior keeper: a corrupt first pick leaves
+        # no keeper anywhere — batch.json keeps keeper None and
+        # the candidate stays pending, and the tab agrees.
+        from pixel_forge import imagegen as imagegen_mod
+        work = tempfile.mkdtemp()
+        _batch, bdir = imagegen_mod.new_batch(work, "a knight")
+        batch = imagegen_mod.load_batch(bdir)
+        batch["candidates"] = [
+            {"file": "cand-01.png", "seed": 1, "status": "pending"},
+        ]
+        imagegen_mod.save_batch(bdir, batch)
+        (bdir / "cand-01.png").write_bytes(b"not a png at all")
+        self.win.prompt_batch_dir = bdir
+        self.win.prompt_candidates = batch["candidates"]
+        self.win._pick_prompt_keeper("cand-01.png")
+        self.app.processEvents()
+        self.assertIsNone(self.win.prompt_keeper)
+        batch = imagegen_mod.load_batch(bdir)
+        self.assertIsNone(batch["keeper"])
+        self.assertEqual(batch["candidates"][0]["status"],
+                         "pending")
+        self.assertIn("cand-01.png",
+                      self.win.prompt_info_label.text())
+
+    def test_good_keeper_pick_marks_batch_and_tab(self):
+        # Task 80, happy path: picking a good candidate marks
+        # it keeper in both places and un-keeps the old one.
+        from pixel_forge.imagegen import load_batch
+        self._generate()
+        bdir = self.win.prompt_batch_dir
+        self.win._pick_prompt_keeper("cand-02.png")
+        self.app.processEvents()
+        self.assertEqual(self.win.prompt_keeper, "cand-02.png")
+        batch = load_batch(bdir)
+        self.assertEqual(batch["keeper"], "cand-02.png")
+        status = {c["file"]: c["status"]
+                  for c in batch["candidates"]}
+        self.assertEqual(status["cand-01.png"], "pending")
+        self.assertEqual(status["cand-02.png"], "kept")
 
     def test_info_label_names_failed_preview_pixelize(self):
         # Task 27: a pixelize failure in the preview names the

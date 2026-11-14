@@ -7246,8 +7246,13 @@ class MainWindow(QMainWindow):
         if self.prompt_batch_dir is None:
             return
         try:
-            set_keeper(self.prompt_batch_dir, filename)
+            # Task 80: load first, mark second. Marking the
+            # keeper before the load meant a corrupt candidate
+            # landed in batch.json as keeper while the tab kept
+            # the good one — the batch and the tab disagreed.
+            # A failed load now leaves batch.json untouched.
             image = load_image(self.prompt_batch_dir / filename)
+            set_keeper(self.prompt_batch_dir, filename)
         except PixelForgeError as exc:
             # A load failure used to live only in the status bar,
             # which the next message overwrites (task 27). The

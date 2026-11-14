@@ -1,5 +1,15 @@
 # Pixel Forge changelog
 
+## 0.54 — 2026-11-14
+
+Keeper/batch mismatch fixed (task 80) — picking a candidate
+used to mark it the keeper in batch.json before loading its
+image, so a corrupt candidate left batch.json naming the bad
+file as keeper while the tab kept the good one. The pick now
+loads the image first and only marks the keeper once the load
+succeeds, so the batch record and the tab can never disagree:
+a failed pick leaves batch.json untouched.
+
 ## 0.53 — 2026-11-13
 
 Installer hardening, round 2 (task 76) — the GUI installer and
