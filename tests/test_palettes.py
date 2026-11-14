@@ -159,6 +159,37 @@ class PaletteValidationTests(unittest.TestCase):
         self.assertEqual(median_cut([], 4), [])
         self.assertEqual(median_cut([], 1), [])
 
+    def test_select_zero_or_negative_max_raises(self):
+        # Task 78: select_palette_colors used to raise ValueError
+        # here while median_cut raised PixelForgeError for the
+        # same condition. Both now raise PixelForgeError, with
+        # the message unchanged.
+        colors = [(255, 0, 0), (0, 255, 0)]
+        for bad in (0, -1, -3):
+            with self.assertRaises(PixelForgeError) as caught:
+                select_palette_colors(PICO8, colors, bad)
+            self.assertEqual(str(caught.exception),
+                             "max_colors must be at least 1")
+
+    def test_select_and_median_cut_raise_the_same_type(self):
+        # Task 78: one bad max_colors, one error type — a caller
+        # catching PixelForgeError catches both, and neither is
+        # a ValueError (PixelForgeError is not a ValueError
+        # subclass, so assertRaises(PixelForgeError) would fail
+        # if either still raised ValueError).
+        colors = [(255, 0, 0), (0, 255, 0)]
+        for func in (lambda bad: select_palette_colors(PICO8, colors,
+                                                       bad),
+                     lambda bad: median_cut(colors, bad)):
+            with self.assertRaises(PixelForgeError):
+                func(0)
+        try:
+            select_palette_colors(PICO8, colors, 0)
+        except PixelForgeError as caught:
+            self.assertNotIsInstance(caught, ValueError)
+        else:
+            self.fail("select_palette_colors did not raise")
+
     def test_median_cut_pinned_output(self):
         # Same palette as v0.28 on this input — the guard must
         # not change the valid path. Values recorded from v0.28.

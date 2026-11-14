@@ -99,7 +99,13 @@ def select_palette_colors(palette, colors, max_colors):
     were both cut.
     """
     if max_colors < 1:
-        raise ValueError("max_colors must be at least 1")
+        # Imported here, not at module level: pixelize imports
+        # this module, so a top-level import would be circular.
+        # Task 78: this used to raise ValueError while median_cut
+        # raised PixelForgeError for the same condition — callers
+        # now catch one type.
+        from .pixelize import PixelForgeError
+        raise PixelForgeError("max_colors must be at least 1")
     palette = list(palette)
     if len(palette) <= max_colors:
         return palette

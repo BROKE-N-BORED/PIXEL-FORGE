@@ -1,5 +1,15 @@
 # Pixel Forge changelog
 
+## 0.60 — 2026-11-14
+
+One error type for a bad max_colors (task 78) —
+select_palette_colors used to raise ValueError for
+max_colors under 1 while median_cut raised PixelForgeError
+for the same condition, so a caller catching one type
+missed the other. Both now raise PixelForgeError, with the
+message unchanged. The other palettes.py and pixelize.py
+validators were checked and already raise PixelForgeError.
+
 ## 0.59 — 2026-11-14
 
 A light/dark theme toggle (task 67) — the dark theme was
