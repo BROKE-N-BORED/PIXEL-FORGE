@@ -408,6 +408,49 @@ class LibraryTests(unittest.TestCase):
             del broken[key]
             self.assertIsNotNone(validate_entry(broken), key)
 
+    def test_texture_source_validates_and_records(self):
+        # Task 79: "texture" is a valid library source — a
+        # texture saved from the Code tab is recorded as one,
+        # not as a skin. An unknown source still fails.
+        entry = self._good_entry()
+        entry["source"] = "texture"
+        self.assertIsNone(validate_entry(entry))
+        from pixel_forge.library import SOURCES
+        self.assertIn("texture", SOURCES)
+        saved = self.lib.add_image(self._image(), "Grass",
+                                   source="texture")
+        self.assertEqual(saved["source"], "texture")
+        self.assertEqual(self.lib.find(saved["id"])["source"],
+                         "texture")
+        entry["source"] = "nope"
+        self.assertIsNotNone(validate_entry(entry))
+        with self.assertRaises(PixelForgeError):
+            self.lib.add_image(self._image(), "Bad",
+                               source="nope")
+
+    def test_old_entries_load_unchanged(self):
+        # Task 79: adding "texture" changes nothing about the
+        # entries already on disk — every pre-existing source
+        # loads with its source intact, nothing is skipped, and
+        # the load rewrites nothing.
+        old_sources = ("image", "video", "prompt", "code",
+                       "skin", "file")
+        entries = []
+        for index, source in enumerate(old_sources):
+            entry = self._good_entry(name="Old %s" % source,
+                                     stem="old-%d" % index)
+            entry["source"] = source
+            entries.append(entry)
+        path = self._write_index(entries)
+        before = open(path, "rb").read()
+        lib = Library(os.path.join(self.tmp, "lib"))
+        loaded = lib.entries()
+        self.assertEqual(len(loaded), len(old_sources))
+        self.assertEqual([e["source"] for e in loaded],
+                         list(old_sources))
+        self.assertEqual(lib.skipped_entries(), [])
+        self.assertEqual(open(path, "rb").read(), before)
+
     def test_malformed_entries_left_untouched_on_disk(self):
         no_name = self._good_entry(name="Ghost", stem="ghost")
         del no_name["name"]

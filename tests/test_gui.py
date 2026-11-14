@@ -3424,6 +3424,56 @@ class CodeTabTests(unittest.TestCase):
         entry = self.win.save_code_asset_to_library("Skin head", [])
         self.assertEqual(entry["source"], "skin")
 
+    def test_save_texture_to_library(self):
+        # Task 79: a plain texture saved from the Code tab is
+        # recorded as source "texture", not "skin".
+        self.assertTrue(self.win.load_game_asset(self.texture))
+        self.assertTrue(self._wait_for_texture())
+        entry = self.win.save_code_asset_to_library(
+            "Grass texture", [])
+        self.assertEqual(entry["source"], "texture")
+        self.assertEqual(entry["kind"], "sprite")
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.lib_dir, "grass-texture.png")))
+
+    def test_texture_filter_shows_only_textures(self):
+        # Task 79: the Library tab's From filter offers
+        # Texture, and filtering by it shows only the texture
+        # — the skin stays under Skin. Nothing is pre-filtered:
+        # the combo starts on All sources.
+        self.assertTrue(self.win.load_game_asset(self.texture))
+        self.assertTrue(self._wait_for_texture())
+        self.win.save_code_asset_to_library("Grass texture", [])
+        self.assertTrue(self.win.load_game_asset(self.skin))
+        self.win.save_code_asset_to_library("Skin head", [])
+        combo = self.win.library_source_combo
+        self.assertIsNone(combo.currentData())
+        index = combo.findData("texture")
+        self.assertGreaterEqual(index, 0)
+        self.assertEqual(combo.itemText(index), "Texture")
+        self.win.tabs.setCurrentIndex(4)
+        self.app.processEvents()
+        texts = [self.win.library_list.item(row).text()
+                 for row in range(self.win.library_list.count())]
+        self.assertEqual(sorted(texts),
+                         ["Grass texture", "Skin head"])
+        combo.setCurrentIndex(index)
+        self.app.processEvents()
+        texts = [self.win.library_list.item(row).text()
+                 for row in range(self.win.library_list.count())]
+        self.assertEqual(texts, ["Grass texture"])
+        combo.setCurrentIndex(combo.findData("skin"))
+        self.app.processEvents()
+        texts = [self.win.library_list.item(row).text()
+                 for row in range(self.win.library_list.count())]
+        self.assertEqual(texts, ["Skin head"])
+        combo.setCurrentIndex(combo.findData(None))
+        self.app.processEvents()
+        texts = [self.win.library_list.item(row).text()
+                 for row in range(self.win.library_list.count())]
+        self.assertEqual(sorted(texts),
+                         ["Grass texture", "Skin head"])
+
     def test_code_labels_fit_their_text(self):
         # Regression: the info label wrapped but the layout gave
         # it too little height, so the text overflowed into the
@@ -3646,6 +3696,25 @@ class CodeTextureControlsTests(unittest.TestCase):
         self.assertFalse(self.win.code_texture_section.isHidden())
         self.assertIn("treated as a texture",
                       self.win.code_info_label.text())
+
+    def test_overridden_skin_saves_as_texture(self):
+        # Task 79: a 64x64 non-skin treated as a texture via the
+        # override saves as source "texture" — and toggling
+        # back to a skin saves as "skin" again. The source
+        # follows how the asset is being treated, both ways.
+        self.assertTrue(self.win.load_game_asset(self.nonskin))
+        self.win.code_treat_texture_btn.click()
+        self.assertTrue(self._wait_for_asset_count(1))
+        self.assertEqual(self.win.code_kind, "texture")
+        entry = self.win.save_code_asset_to_library(
+            "Nonskin texture", [])
+        self.assertEqual(entry["source"], "texture")
+        self.win.code_treat_texture_btn.click()
+        self.app.processEvents()
+        self.assertEqual(self.win.code_kind, "skin")
+        entry = self.win.save_code_asset_to_library(
+            "Nonskin skin", [])
+        self.assertEqual(entry["source"], "skin")
 
     def test_treat_as_skin_restores_parts(self):
         self.assertTrue(self.win.load_game_asset(self.nonskin))

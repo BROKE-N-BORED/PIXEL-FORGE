@@ -1,5 +1,16 @@
 # Pixel Forge changelog
 
+## 0.56 — 2026-11-14
+
+Library "texture" source (task 79) — a game asset saved from
+the Code tab used to be recorded as source "skin" even when it
+was a plain texture (or a 64x64 non-skin treated as a texture
+via the override). The library now has a "texture" source: the
+save path records the source from how the asset is actually
+being treated, and the Library tab's From filter offers
+Texture alongside Skin. A real skin still saves as "skin", and
+old entries load unchanged.
+
 ## 0.55 — 2026-11-14
 
 Native GIF frame delays preserved on import (task 83) — a GIF

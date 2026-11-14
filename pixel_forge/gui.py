@@ -10018,7 +10018,13 @@ class MainWindow(QMainWindow):
         raises PixelForgeError when nothing is selected."""
         if self.code_image is None:
             raise PixelForgeError("nothing to save to the library")
-        source = "code" if self.code_kind == "code" else "skin"
+        # Task 79: the source follows how the asset is actually
+        # being treated — a texture saved as "skin" was a lie in
+        # the library. code_kind is one of the three whenever an
+        # asset is loaded; "code" is the fallback, never a
+        # silent "skin".
+        source = self.code_kind if self.code_kind in (
+            "code", "skin", "texture") else "code"
         entry = self.library.add_image(
             self.code_image, name, tags, source=source)
         self._refresh_library()
