@@ -573,7 +573,8 @@ def build_parser():
 
     code = sub.add_parser(
         "code", help="reproduce pixel-art assets from source code "
-        "(.py, .js, .ts — parsed statically, never executed)")
+        "(.py, .js, .ts, .json, .cs, .gd, .lua — parsed "
+        "statically, never executed)")
     code.add_argument("file", help="code file or folder of code "
                       "files to parse")
     code.add_argument("--list", action="store_true",

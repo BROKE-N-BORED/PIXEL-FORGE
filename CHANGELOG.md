@@ -1,5 +1,25 @@
 # Pixel Forge changelog
 
+## 0.64 — 2026-11-14
+
+Code input expansion (task 46) — the Code tab now reads JSON
+sprite files (Aseprite JSON export with its sheet image, plain
+pixel/palette JSON, named sprites) and C#, GDScript, and Lua
+(Unity/Godot/Love2D code was invisible before): colors, palettes,
+pixel maps, image references, and rects. Image files referenced
+by code are followed and shown as assets when they sit next to
+the code file (a missing file is a plain note, an absolute path
+is never followed silently). A single color renders as a swatch,
+a rect is reported as a frame region. Also in this release: a
+deeply-nested hostile file is refused plainly instead of reaching
+the GUI uncaught; detected items now appear in true file order
+(Python's walk was breadth-first); the JS scan is linear instead
+of quadratic (a 40,000-assignment file parses in well under a
+second, down from over 6 seconds); 0xAARRGGBB int colors parse
+with the alpha first; seven more named colors (skyblue, crimson,
+violet, turquoise, coral, khaki, indigo); and code files over
+5 MB are refused before parsing, with the size named.
+
 ## 0.63 — 2026-11-14
 
 Pixel-grid snap for AI output (task 42) — the Image tab has a

@@ -11,9 +11,11 @@ Prompt: describe a sprite, generate 3 candidates with the local
 image engine, click one to keep it, pixelize it with the same
 controls, export a transparent PNG. Generation runs in a worker
 thread — a minutes-long CPU run never freezes the window.
-Code: import a .py / .js / .ts file (or a folder of them) and the
-pixel art the code defines — pixel maps, palettes — is rebuilt as
-real sprites, parsed statically and never executed. Or import a
+Code: import a .py / .js / .ts / .json / .cs / .gd / .lua file
+(or a folder of them) and the pixel art the code defines — pixel
+maps, palettes, single colors, sprite frames, image references —
+is rebuilt as real sprites, parsed statically and never executed.
+Or import a
 game asset: a Minecraft skin splits into its parts, anything else
 pixelizes as a texture. Export PNG and Save to library work like
 the other tabs.
@@ -3061,9 +3063,11 @@ class MainWindow(QMainWindow):
         return (
             "What the Code tab detects\n"
             "\n"
-            "Source code (.py, .js, .ts) is read statically — it "
-            "is never run, imported, or executed. Only literal "
-            "values in the code are rendered.\n"
+            "Source code (.py, .js, .ts, .json, .cs, .gd, .lua) "
+            "is read statically — it is never run, imported, or "
+            "executed. Only literal values in the code are "
+            "rendered. Items appear in the order they occur in "
+            "the file.\n"
             "\n"
             "Pixel maps — a variable holding rows of pixels:\n"
             "- int rows: numbers, where 0 is transparent and the "
@@ -3080,7 +3084,31 @@ class MainWindow(QMainWindow):
             "\n"
             "Palettes — a flat list of colors, or a dict mapping "
             "names, numbers, or characters to colors. Rendered "
-            "as a strip, one block per color.\n"
+            "as a strip, one block per color. Colors can be hex "
+            "strings, RGB tuples, named colors, or 0xAARRGGBB "
+            "ints (alpha first).\n"
+            "\n"
+            "Single colors: one color on its own (a Color in "
+            "C# or GDScript, a {1, 0, 0} table in Lua, a tuple "
+            "or a \"#ff0000\" string) is shown as a small swatch.\n"
+            "\n"
+            "JSON sprites: a .json file describing a sprite: "
+            "Aseprite frame exports (frames plus the sheet image "
+            "in meta), a pixel list with a palette, a flat pixel "
+            "list with width and height, or a plain list of rows "
+            "or colors.\n"
+            "\n"
+            "Image references: when code names an image file "
+            "next to it (load, preload, newImage, "
+            "Resources.Load, or a plain \"hero.png\" string), "
+            "the image is loaded and shown like any other asset. "
+            "A missing file is listed with the reason, and "
+            "absolute paths are never followed.\n"
+            "\n"
+            "Rectangles: a rect or frame region (Rect, Rect2, "
+            "newQuad, or an {x, y, w, h} dict) is listed as "
+            "found but not rendered: it is a frame region, not "
+            "pixels.\n"
             "\n"
             "Game assets — a 64x64 or 64x32 PNG is treated as a "
             "Minecraft skin and split into its parts (head, "
@@ -3094,10 +3122,11 @@ class MainWindow(QMainWindow):
             "- anything computed — function calls, loops, "
             "arithmetic — is reported as found but not "
             "rendered, never faked\n"
-            "- sprites loaded from image files at run time, and "
-            "anything drawn by a game engine, cannot be detected\n"
+            "- anything drawn by a game engine cannot be detected\n"
             "- skins are detected by size only: a non-skin "
-            "64x64 image would be misread as a skin\n")
+            "64x64 image would be misread as a skin\n"
+            "- code files over 5 MB are refused before parsing, "
+            "with the size named\n")
 
     def _show_code_detects(self):
         dialog = QDialog(self)
@@ -8206,8 +8235,9 @@ class MainWindow(QMainWindow):
             warn_dialog(
                 self, "No pixel-art assets found",
                 "no pixel-art assets found in %s — the code "
-                "defines no pixel maps or palettes Pixel Forge "
-                "can read (see the README for what is detected)"
+                "defines no pixel maps, palettes, colors, or "
+                "image references Pixel Forge can read (see the "
+                "README for what is detected)"
                 % ", ".join(Path(p).name for p in paths))
             return False
         self.code_assets = result["assets"]

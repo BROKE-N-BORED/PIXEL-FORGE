@@ -244,15 +244,17 @@ it keeps them and prints the way to remove them by hand.
   combo offers past prompts back. Batches live in
   `~/pixel-forge-library/batches/` and the history in
   `prompt-history.json` in the same folder.
-- **Code tab:** import a `.py`, `.js`, or `.ts` file (or a whole
-  folder of them) and the pixel art the code defines is rebuilt as
-  real sprites — pixel maps and palettes, parsed statically and
-  never executed, so a file cannot run anything when you import
-  it. Click an asset to preview it, Export PNG, or Save to
-  library; Export all writes every asset in the list to a
-  folder, one PNG per asset. Anything the code defines that cannot be rendered
-  (art built by loops or function calls, draw-call specs) is
-  listed under "Found but not rendered" with the reason. Import
+- **Code tab:** import a `.py`, `.js`, `.ts`, `.json`, `.cs`,
+  `.gd`, or `.lua` file (or a whole folder of them) and the pixel
+  art the code defines is rebuilt as real sprites — pixel maps,
+  palettes, single colors, sprite frames, and image references,
+  parsed statically and never executed, so a file cannot run
+  anything when you import it. Click an asset to preview it,
+  Export PNG, or Save to library; Export all writes every asset
+  in the list to a folder, one PNG per asset. Anything the code
+  defines that cannot be rendered (art built by loops or function
+  calls, draw-call specs, rects) is listed under "Found but not
+  rendered" with the reason. Import
   game asset loads a Minecraft skin (64x64 or 64x32) and splits
   it into its parts — head, body, arms, legs, overlays — plus the
   combined figure; Export parts writes one PNG per part. Any
@@ -451,18 +453,42 @@ What they find, all as literal data in the file:
   always transparent). Maps are capped at 512 x 512 and rows must
   all be the same length.
 - **Palettes** — a flat list of colors (hex strings, RGB tuples,
-  named colors like `red` or `gold`) or a dict mapping names, ints,
-  or characters to colors. Rendered as a strip, one block per color.
+  named colors like `red` or `gold`, `0xAARRGGBB` ints with alpha
+  first) or a dict mapping names, ints, or characters to colors.
+  Rendered as a strip, one block per color.
+- **Single colors** — one color on its own (a tuple, a `"#ff0000"`
+  or named-color string, a C# `Color`/`Color32`, a GDScript
+  `Color`/`Color8`, a Lua `{1, 0, 0}` table) is shown as a small
+  swatch.
+- **JSON sprites** — a `.json` file describing a sprite: Aseprite
+  frame exports (`frames` plus the sheet image in `meta`), a
+  `pixels`/`data`/`grid` row list with an optional `palette`, a
+  flat pixel list with `width`/`height`, a top-level list of rows
+  or colors, or a dict of named sprites. Frames are cropped from
+  the sheet; a frame outside the sheet is reported, not crashed
+  on.
+- **Image references** — when code names an image file next to it
+  (GDScript `load`/`preload`, Love2D `newImage`, Unity
+  `Resources.Load`, or a plain `"hero.png"` string), the image is
+  loaded and shown like any other asset. A missing file is listed
+  with the reason.
+- **Rectangles** — a rect or frame region (C# `Rect`, GDScript
+  `Rect2`, Lua `newQuad`, or an `{x, y, w, h}` dict) is listed as
+  found but not rendered: it is a frame region, not pixels.
 - **Draw-call specs** — lists of dicts with rectangle keys (`x`,
   `y`, `w`, `h`, `color`) are recognized and reported as not
   rendered: they describe drawing steps, not pixels.
 
 Not detected: anything computed (function calls, loops, arithmetic,
-comprehensions), sprites loaded from image files at run time, and
-sprites drawn through a game engine's API or Three.js / WebGL
-geometry. Python detection looks at assignments anywhere in the
-file; JS/TS detection is a textual scan (a regex literal containing
-`//` may confuse its comment stripping).
+comprehensions) and sprites drawn through a game engine's API or
+Three.js / WebGL geometry. Python detection looks at assignments
+anywhere in the file; JS/TS/C#/GDScript/Lua detection is a textual
+scan (a regex literal containing `//` may confuse its comment
+stripping, and an assignment inside a string literal may be
+misread as a real one). Image references resolve against the code
+file's folder; absolute paths are never followed, and a `res://`
+path (Godot) is searched upward toward the project root. Code
+files over 5 MB are refused before parsing, with the size named.
 
 Transparency is preserved: transparent pixels stay transparent and
 never enter the palette; other pixels keep their original alpha.

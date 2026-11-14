@@ -4045,6 +4045,142 @@ class CodeTabTests(unittest.TestCase):
         self.assertGreater(label.height(), 10)
 
 
+class CodeInputExpansionTests(unittest.TestCase):
+    """Task 46 — JSON, C#, GDScript, and Lua input on the Code
+    tab, plus image references that open the image."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        cls.sheet = write_image(
+            make_solid_image(64, 32, 255, 0, 0),
+            os.path.join(cls.tmp, "sheet.png"))
+        # An Aseprite-style JSON export plus its sheet.
+        doc = {
+            "frames": {
+                "hero 0.aseprite": {
+                    "frame": {"x": 0, "y": 0, "w": 32, "h": 32}},
+                "hero 1.aseprite": {
+                    "frame": {"x": 32, "y": 0, "w": 32, "h": 32}},
+            },
+            "meta": {"image": "sheet.png"},
+        }
+        cls.aseprite = os.path.join(cls.tmp, "hero.json")
+        with open(cls.aseprite, "w") as handle:
+            json.dump(doc, handle)
+        cls.csharp = os.path.join(cls.tmp, "Hero.cs")
+        with open(cls.csharp, "w") as handle:
+            handle.write(
+                "using UnityEngine;\n"
+                "public class Hero : MonoBehaviour {\n"
+                "    public Color tint = new Color(1f, 0f, 0f, 1f);\n"
+                "    public Rect frame = new Rect(0, 0, 32, 32);\n"
+                "    public Color[] palette = new Color[] "
+                "{ Color.red, Color.green };\n"
+                "}\n")
+        cls.gdscript = os.path.join(cls.tmp, "hero.gd")
+        with open(cls.gdscript, "w") as handle:
+            handle.write(
+                "extends Node2D\n"
+                "var tint = Color(1, 0, 0)\n"
+                "var palette = [Color.RED, Color.BLUE]\n")
+        cls.lua = os.path.join(cls.tmp, "main.lua")
+        with open(cls.lua, "w") as handle:
+            handle.write(
+                "local tint = {1, 0, 0}\n"
+                "local palette = {{1.0, 0, 0}, {0, 1.0, 0}}\n")
+        # A C# file whose loader call names the sheet (no
+        # extension — Unity Resources.Load style).
+        cls.loader = os.path.join(cls.tmp, "Loader.cs")
+        with open(cls.loader, "w") as handle:
+            handle.write(
+                'Sprite s = Resources.Load<Sprite>("sheet");\n')
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self.win = MainWindow(library_dir=self.lib_dir)
+        self.win.tabs.setCurrentIndex(3)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _texts(self):
+        return [self.win.code_list.item(i).text()
+                for i in range(self.win.code_list.count())]
+
+    def test_json_input_lands_in_the_list(self):
+        self.assertTrue(self.win.load_code(self.aseprite))
+        texts = self._texts()
+        self.assertTrue(any(t.startswith("hero 0 — frame, 32 x 32")
+                            for t in texts))
+        self.assertTrue(any(t.startswith("hero 1 — frame, 32 x 32")
+                            for t in texts))
+        # Selecting a frame previews the crop.
+        item = self.win.code_list.item(0)
+        self.win.code_list.setCurrentItem(item)
+        self.win._on_code_item_clicked(item)
+        self.assertIn("hero 0", self.win.code_info_label.text())
+        self.assertEqual((self.win.code_image.width(),
+                          self.win.code_image.height()), (32, 32))
+
+    def test_csharp_items_show(self):
+        self.assertTrue(self.win.load_code(self.csharp))
+        texts = self._texts()
+        self.assertTrue(any(t.startswith("tint — color")
+                            for t in texts))
+        self.assertTrue(any(t.startswith("palette — palette")
+                            for t in texts))
+        # The Rect is listed under "Found but not rendered".
+        self.assertIn("frame", self.win.code_skipped_label.text())
+        self.assertIn("rectangle",
+                      self.win.code_skipped_label.text())
+
+    def test_gdscript_items_show(self):
+        self.assertTrue(self.win.load_code(self.gdscript))
+        texts = self._texts()
+        self.assertTrue(any(t.startswith("tint — color")
+                            for t in texts))
+        self.assertTrue(any(t.startswith("palette — palette")
+                            for t in texts))
+
+    def test_lua_items_show(self):
+        self.assertTrue(self.win.load_code(self.lua))
+        texts = self._texts()
+        self.assertTrue(any(t.startswith("tint — color")
+                            for t in texts))
+        self.assertTrue(any(t.startswith("palette — palette")
+                            for t in texts))
+
+    def test_image_reference_opens_the_image(self):
+        self.assertTrue(self.win.load_code(self.loader))
+        texts = self._texts()
+        self.assertTrue(any(t.startswith("s — image, 64 x 32")
+                            for t in texts))
+        item = self.win.code_list.item(0)
+        self.win.code_list.setCurrentItem(item)
+        self.win._on_code_item_clicked(item)
+        self.assertEqual((self.win.code_image.width(),
+                          self.win.code_image.height()), (64, 32))
+        # The preview is the referenced sheet itself (solid red).
+        px = self.win.code_image.pixel(0, 0)
+        self.assertEqual(((px >> 16) & 0xFF, (px >> 8) & 0xFF,
+                          px & 0xFF, (px >> 24) & 0xFF),
+                         (255, 0, 0, 255))
+
+    def test_code_detects_text_covers_new_languages(self):
+        text = self.win._code_detects_text()
+        for phrase in (".json", ".cs", ".gd", ".lua", "Aseprite",
+                       "Image references", "Rectangles",
+                       "Single colors", "5 MB"):
+            self.assertIn(phrase, text, "missing from Code detects "
+                          "text: %r" % phrase)
+
+
 class CodeTextureControlsTests(unittest.TestCase):
     """Task 26 — the Code tab's texture controls and the skin
     override. Visibility is checked with isHidden (the flag
