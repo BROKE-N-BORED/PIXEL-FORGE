@@ -4063,9 +4063,11 @@ class ShortcutsMenusTests(unittest.TestCase):
         return {action.text(): action.menu()
                 for action in bar.actions()}
 
-    def test_menu_bar_has_file_and_help_menus(self):
+    def test_menu_bar_has_file_edit_view_and_help_menus(self):
+        # Task 67 adds the View menu (the Light theme switch).
         menus = self._menus()
-        self.assertEqual(sorted(menus), ["Edit", "File", "Help"])
+        self.assertEqual(sorted(menus),
+                         ["Edit", "File", "Help", "View"])
         file_items = [(a.text(), a.shortcut().toString())
                       for a in menus["File"].actions()]
         # Task 29 adds the Recent files submenu after Export; it
@@ -4514,19 +4516,22 @@ class PolishTests(unittest.TestCase):
                         "message starts lowercase: %r" % message)
 
     def test_prompt_counter(self):
+        # Task 67: the over-limit color moved into the
+        # stylesheets (QLabel[overLimit="true"]) — the counter
+        # flips a property now, not an inline style.
         from pixel_forge.imagegen import MAX_PROMPT_LEN
         self.assertEqual(self.win.prompt_counter_label.text(),
                          "0 / 1000")
         self.win.prompt_edit.setText("hello")
         self.assertEqual(self.win.prompt_counter_label.text(),
                          "5 / 1000")
-        self.assertEqual(self.win.prompt_counter_label.styleSheet(),
-                         "")
+        self.assertFalse(
+            self.win.prompt_counter_label.property("overLimit"))
         self.win.prompt_edit.setText("x" * (MAX_PROMPT_LEN + 1))
         self.assertEqual(self.win.prompt_counter_label.text(),
                          "1001 / 1000")
-        self.assertIn("#ffb066",
-                      self.win.prompt_counter_label.styleSheet())
+        self.assertTrue(
+            self.win.prompt_counter_label.property("overLimit"))
 
     def test_export_default_next_to_source(self):
         from unittest import mock
@@ -8214,6 +8219,149 @@ class GeometryPersistenceTests(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual((again.width(), again.height()),
                          (1020, 640))
+
+
+class ThemeToggleTests(unittest.TestCase):
+    """Task 67: the light/dark theme toggle.
+
+    Every test uses its own temp-file QSettings, so nothing
+    touches the user's real settings. tearDown restores the
+    dark stylesheet, so a light theme left behind cannot leak
+    into another test class.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.settings_path = os.path.join(self.tmp, "settings.ini")
+        self.lib_dir = os.path.join(self.tmp, "lib")
+        self._windows = []
+
+    def tearDown(self):
+        from pixel_forge.gui import DARK_STYLESHEET
+        for win in self._windows:
+            win.close()
+            win.deleteLater()
+        self.app.setStyleSheet(DARK_STYLESHEET)
+        self.app.processEvents()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _settings(self):
+        return QSettings(self.settings_path, QSettings.IniFormat)
+
+    def _window(self, settings="default"):
+        from pixel_forge.gui import MainWindow
+        if settings == "default":
+            settings = self._settings()
+        win = MainWindow(library_dir=self.lib_dir, restore=False,
+                         settings=settings)
+        self._windows.append(win)
+        return win
+
+    def test_toggle_switches_stylesheet_both_ways(self):
+        from pixel_forge.gui import (DARK_STYLESHEET,
+                                     LIGHT_STYLESHEET)
+        win = self._window()
+        win.show()
+        self.app.processEvents()
+        self.assertEqual(self.app.styleSheet(), DARK_STYLESHEET)
+        self.assertFalse(win._light_theme_action.isChecked())
+        win._light_theme_action.trigger()
+        self.app.processEvents()
+        self.assertEqual(self.app.styleSheet(), LIGHT_STYLESHEET)
+        self.assertTrue(win._light_theme_action.isChecked())
+        win._light_theme_action.trigger()
+        self.app.processEvents()
+        self.assertEqual(self.app.styleSheet(), DARK_STYLESHEET)
+        self.assertFalse(win._light_theme_action.isChecked())
+
+    def test_choice_persists_across_windows(self):
+        from pixel_forge.gui import LIGHT_STYLESHEET
+        first = self._window()
+        first.show()
+        self.app.processEvents()
+        first._light_theme_action.trigger()
+        self.app.processEvents()
+        # The choice is on disk, not just in memory.
+        stored = self._settings()
+        self.assertEqual(stored.value("theme"), "light")
+        first.close()
+        self.app.processEvents()
+        again = self._window()
+        again.show()
+        self.app.processEvents()
+        self.assertEqual(self.app.styleSheet(), LIGHT_STYLESHEET)
+        self.assertTrue(again._light_theme_action.isChecked())
+
+    def test_no_saved_choice_defaults_to_dark(self):
+        from pixel_forge.gui import DARK_STYLESHEET
+        win = self._window()
+        win.show()
+        self.app.processEvents()
+        self.assertEqual(self.app.styleSheet(), DARK_STYLESHEET)
+        self.assertFalse(win._light_theme_action.isChecked())
+
+    def test_window_without_settings_switches_but_saves_nothing(self):
+        # No settings, no save: toggling still switches the
+        # live theme, but nothing is written anywhere — and the
+        # real settings file is untouched either way.
+        from pixel_forge.gui import (DARK_STYLESHEET,
+                                     LIGHT_STYLESHEET)
+        self.app.setStyleSheet(DARK_STYLESHEET)
+        real_conf = os.path.join(
+            os.path.expanduser("~"), ".config", "BrokeNBored",
+            "PixelForge.conf")
+        before = os.path.exists(real_conf)
+        win = self._window(settings=None)
+        win.show()
+        self.app.processEvents()
+        self.assertEqual(self.app.styleSheet(), DARK_STYLESHEET)
+        self.assertFalse(win._light_theme_action.isChecked())
+        win._light_theme_action.trigger()
+        self.app.processEvents()
+        self.assertEqual(self.app.styleSheet(), LIGHT_STYLESHEET)
+        self.assertEqual(os.path.exists(real_conf), before)
+
+    def test_saved_light_theme_restores_on_open(self):
+        from pixel_forge.gui import LIGHT_STYLESHEET
+        stored = self._settings()
+        stored.setValue("theme", "light")
+        stored.sync()
+        win = self._window()
+        win.show()
+        self.app.processEvents()
+        self.assertEqual(self.app.styleSheet(), LIGHT_STYLESHEET)
+        self.assertTrue(win._light_theme_action.isChecked())
+
+    def test_invalid_saved_theme_falls_back_to_dark(self):
+        from pixel_forge.gui import DARK_STYLESHEET
+        stored = self._settings()
+        stored.setValue("theme", "banana")
+        stored.sync()
+        win = self._window()
+        win.show()
+        self.app.processEvents()
+        self.assertEqual(self.app.styleSheet(), DARK_STYLESHEET)
+        self.assertFalse(win._light_theme_action.isChecked())
+
+    def test_over_limit_counter_uses_theme_property(self):
+        # The counter flips a property now (see
+        # test_prompt_counter): the color comes from the
+        # theme's stylesheet, so it stays readable in light.
+        from pixel_forge.imagegen import MAX_PROMPT_LEN
+        win = self._window()
+        win.show()
+        self.app.processEvents()
+        win.prompt_edit.setText("hello")
+        self.assertFalse(
+            win.prompt_counter_label.property("overLimit"))
+        win.prompt_edit.setText("x" * (MAX_PROMPT_LEN + 1))
+        self.assertTrue(
+            win.prompt_counter_label.property("overLimit"))
 
 
 if __name__ == "__main__":

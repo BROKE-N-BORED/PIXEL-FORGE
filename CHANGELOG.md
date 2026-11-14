@@ -1,5 +1,14 @@
 # Pixel Forge changelog
 
+## 0.59 — 2026-11-14
+
+A light/dark theme toggle (task 67) — the dark theme was
+hardcoded with no way to change it. The View menu now has a
+Light theme switch that applies at once and is remembered for
+the next launch; first launch with nothing saved still opens
+dark. The light theme meets the same contrast bar as the
+task-22 polish pass (WCAG AA 4.5:1, measured in the tests).
+
 ## 0.58 — 2026-11-14
 
 The window remembers its size and position (task 66) — it

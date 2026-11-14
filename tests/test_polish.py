@@ -35,14 +35,23 @@ def contrast_ratio(fg, bg):
     return (light + 0.05) / (dark + 0.05)
 
 
-def _stylesheet():
-    """DARK_STYLESHEET, parsed out of gui.py's source."""
+def _stylesheet(name="DARK_STYLESHEET"):
+    """A stylesheet, parsed out of gui.py's source."""
     with open(GUI_PATH, encoding="utf-8") as handle:
         source = handle.read()
-    match = re.search(r'DARK_STYLESHEET = """(.*?)"""',
+    match = re.search(r'%s = """(.*?)"""' % name,
                       source, re.DOTALL)
-    assert match is not None, "DARK_STYLESHEET not found in gui.py"
+    assert match is not None, "%s not found in gui.py" % name
     return match.group(1)
+
+
+def _selectors(sheet):
+    """The selector set a stylesheet styles, one per rule."""
+    found = set()
+    for match in re.finditer(r'^([A-Za-z][^\{]*)\{',
+                             sheet, re.MULTILINE):
+        found.add(match.group(1).strip())
+    return found
 
 
 class ContrastTests(unittest.TestCase):
@@ -72,6 +81,35 @@ class ContrastTests(unittest.TestCase):
         # The old failing orange must not come back.
         self.assertNotIn("#b35a1b", sheet)
 
+    def test_warning_heading_and_status_meet_wcag_aa(self):
+        # Task 67: the warning color (preset warnings, the
+        # over-limit prompt counter) and the headings live in
+        # the stylesheets now, so they are measured like the
+        # export buttons — against the background they sit on.
+        sheet = _stylesheet()
+        bg = re.search(
+            r'QMainWindow, QWidget \{ background-color: '
+            r'(#[0-9a-f]{6});', sheet).group(1)
+        heading = re.search(
+            r'QLabel#heading \{[^}]*color: (#[0-9a-f]{6});',
+            sheet).group(1)
+        self.assertGreaterEqual(contrast_ratio(heading, bg), 4.5)
+        warning = re.search(
+            r'QLabel#warning \{ color: (#[0-9a-f]{6});',
+            sheet).group(1)
+        self.assertGreaterEqual(contrast_ratio(warning, bg), 4.5)
+        over = re.search(
+            r'QLabel\[overLimit="true"\] \{ color: '
+            r'(#[0-9a-f]{6});', sheet).group(1)
+        self.assertEqual(over, warning,
+                         "the over-limit counter must use the "
+                         "warning color")
+        status = re.search(
+            r'QStatusBar \{ background-color: (#[0-9a-f]{6}); '
+            r'color: (#[0-9a-f]{6});', sheet)
+        self.assertGreaterEqual(
+            contrast_ratio(status.group(2), status.group(1)), 4.5)
+
     def test_no_comment_lines_inside_stylesheet(self):
         # Qt stylesheets have no # comments: a # line inside the
         # string is parsed as a selector and can swallow the rules
@@ -84,6 +122,95 @@ class ContrastTests(unittest.TestCase):
             self.assertFalse(
                 stripped.startswith("# "),
                 "comment line inside DARK_STYLESHEET: %r" % line)
+
+
+class LightThemeContrastTests(unittest.TestCase):
+    def test_light_theme_meets_wcag_aa(self):
+        # Task 67: the light theme must meet the same bar as
+        # task 22's polish pass — WCAG AA 4.5:1 for normal
+        # text. The colors are parsed out of LIGHT_STYLESHEET
+        # itself, so a future color change re-measures here.
+        sheet = _stylesheet("LIGHT_STYLESHEET")
+        main = re.search(
+            r'QMainWindow, QWidget \{ background-color: '
+            r'(#[0-9a-f]{6}); color: (#[0-9a-f]{6});',
+            sheet)
+        bg, text = main.group(1), main.group(2)
+        pairs = [("text", text, "background", bg)]
+        button = re.search(
+            r'QPushButton \{ background-color: (#[0-9a-f]{6});',
+            sheet).group(1)
+        pairs.append(("text", text, "button", button))
+        hover = re.search(
+            r'QPushButton:hover \{ background-color: '
+            r'(#[0-9a-f]{6});', sheet).group(1)
+        pairs.append(("text", text, "button hover", hover))
+        # The export button carries its own light text color —
+        # the main text color is dark now and would vanish on
+        # the orange. Read the color from the export rule itself.
+        export_rule = re.search(
+            r'QPushButton#export \{ background-color: '
+            r'(#[0-9a-f]{6});[^}]*color: (#[0-9a-f]{6});',
+            sheet)
+        export_text = export_rule.group(2)
+        pairs.append(("export text", export_text,
+                      "export", export_rule.group(1)))
+        export_hover = re.search(
+            r'QPushButton#export:hover \{ background-color: '
+            r'(#[0-9a-f]{6});', sheet).group(1)
+        pairs.append(("export text", export_text,
+                      "export hover", export_hover))
+        heading = re.search(
+            r'QLabel#heading \{[^}]*color: (#[0-9a-f]{6});',
+            sheet).group(1)
+        pairs.append(("heading", heading, "background", bg))
+        warning = re.search(
+            r'QLabel#warning \{ color: (#[0-9a-f]{6});',
+            sheet).group(1)
+        pairs.append(("warning", warning, "background", bg))
+        status = re.search(
+            r'QStatusBar \{ background-color: (#[0-9a-f]{6}); '
+            r'color: (#[0-9a-f]{6});', sheet)
+        pairs.append(("status text", status.group(2),
+                      "status bar", status.group(1)))
+        field = re.search(
+            r'QComboBox, QSpinBox, QLineEdit \{ background-color: '
+            r'(#[0-9a-f]{6});', sheet).group(1)
+        pairs.append(("text", text, "input", field))
+        list_bg = re.search(
+            r'QListWidget \{ background-color: (#[0-9a-f]{6});',
+            sheet).group(1)
+        pairs.append(("text", text, "list", list_bg))
+        selected = re.search(
+            r'QListWidget::item:selected \{ background-color: '
+            r'(#[0-9a-f]{6});', sheet).group(1)
+        pairs.append(("text", text, "selected item", selected))
+        for fg_name, fg, bg_name, bg_color in pairs:
+            self.assertGreaterEqual(
+                contrast_ratio(fg, bg_color), 4.5,
+                "light %s %s on %s %s is %.2f:1, under WCAG AA "
+                "4.5:1" % (fg_name, fg, bg_name, bg_color,
+                           contrast_ratio(fg, bg_color)))
+
+    def test_no_comment_lines_inside_light_stylesheet(self):
+        # Same rule as the dark sheet: a # line inside the
+        # string is parsed as a selector.
+        for line in _stylesheet("LIGHT_STYLESHEET").splitlines():
+            stripped = line.strip()
+            self.assertFalse(
+                stripped.startswith("# "),
+                "comment line inside LIGHT_STYLESHEET: %r" % line)
+
+    def test_both_themes_cover_the_same_selectors(self):
+        # A rule forgotten in one theme falls back to the
+        # default style in that theme — usually unreadable.
+        # The two sheets must style the same selector set.
+        dark = _selectors(_stylesheet())
+        light = _selectors(_stylesheet("LIGHT_STYLESHEET"))
+        self.assertEqual(dark, light,
+                         "dark-only: %s; light-only: %s"
+                         % (sorted(dark - light),
+                            sorted(light - dark)))
 
 
 class NoProgrammerPhrasingTests(unittest.TestCase):

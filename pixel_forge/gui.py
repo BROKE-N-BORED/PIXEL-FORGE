@@ -134,6 +134,8 @@ DARK_STYLESHEET = """
 QMainWindow, QWidget { background-color: #232329; color: #e8e6e3; }
 QLabel { background-color: transparent; }
 QLabel#heading { font-weight: bold; font-size: 13px; color: #ffb066; }
+QLabel#warning { color: #ffb066; }
+QLabel[overLimit="true"] { color: #ffb066; }
 QPushButton { background-color: #3a3a42; border: 1px solid #55555e;
     border-radius: 4px; padding: 7px 14px; }
 QPushButton:hover { background-color: #4a4a54; }
@@ -158,6 +160,49 @@ QListWidget::item:selected { background-color: #3a3a42; }
 QSplitter::handle { background-color: #3a3a42; }
 QStatusBar { background-color: #1a1a1f; color: #b8b5b0; }
 """
+
+
+# Light theme (task 67): the same rules as the dark sheet, with
+# the colors flipped. The export button keeps the dark orange
+# background, so it carries its own light text color — the main
+# text color is dark now and would vanish on the orange. Measured
+# against the task-22 bar (WCAG AA 4.5:1 for normal text): main
+# text 13.94:1, button text 12.03:1, export text 6.37:1, export
+# hover 5.48:1, heading and warning 6.37:1, status text 6.06:1,
+# input and list text 15.63:1. All pinned in tests/test_polish.py.
+LIGHT_STYLESHEET = """
+QMainWindow, QWidget { background-color: #f2f2f0; color: #232329; }
+QLabel { background-color: transparent; }
+QLabel#heading { font-weight: bold; font-size: 13px; color: #8a4513; }
+QLabel#warning { color: #8a4513; }
+QLabel[overLimit="true"] { color: #8a4513; }
+QPushButton { background-color: #e2e2de; border: 1px solid #b8b8b2;
+    border-radius: 4px; padding: 7px 14px; }
+QPushButton:hover { background-color: #d4d4cf; }
+QPushButton:pressed { background-color: #c8c8c2; }
+QPushButton:checked { background-color: #d4d4cf;
+    border-color: #8a4513; }
+QPushButton:disabled { color: #9a9a94; border-color: #d4d4cf; }
+QPushButton#export { background-color: #8a4513; border-color: #d97a2e;
+    color: #f2f2f0; font-weight: bold; }
+QPushButton#export:hover { background-color: #9a4c15; }
+QPushButton#export:disabled { background-color: #d8c8bb; color: #9a9a94; }
+QComboBox, QSpinBox, QLineEdit { background-color: #ffffff;
+    border: 1px solid #b8b8b2; border-radius: 4px; padding: 4px; }
+QComboBox::drop-down { border: none; }
+QSlider::groove:horizontal { height: 6px; background: #d4d4cf;
+    border-radius: 3px; }
+QSlider::handle:horizontal { width: 16px; margin: -5px 0;
+    background: #8a4513; border-radius: 8px; }
+QScrollArea { border: 1px solid #d4d4cf; background-color: #e9e9e6; }
+QListWidget { background-color: #ffffff; border: 1px solid #d4d4cf; }
+QListWidget::item:selected { background-color: #d4d4cf; }
+QSplitter::handle { background-color: #d4d4cf; }
+QStatusBar { background-color: #e9e9e6; color: #55555e; }
+"""
+
+
+THEMES = {"dark": DARK_STYLESHEET, "light": LIGHT_STYLESHEET}
 
 
 _IMAGE_EXTENSIONS = None
@@ -2338,6 +2383,15 @@ class MainWindow(QMainWindow):
         # (1020x640, nothing saved).
         self._settings = settings
         self._restore_geometry()
+        # Theme (task 67): the saved choice, or dark on first
+        # launch. Applied before the widgets are built, so they
+        # are styled at creation. Only a window with settings
+        # applies its theme here — main() always passes them,
+        # and a window built without them must not restyle the
+        # app behind a harness that sets its own stylesheet.
+        self._theme = self._load_theme()
+        if settings is not None:
+            self._apply_stylesheet()
         self.setAcceptDrops(True)
         # Library + presets. library_dir is a test hook — the real
         # window uses ~/pixel-forge-library/ (or PIXELFORGE_LIBRARY).
@@ -2558,8 +2612,8 @@ class MainWindow(QMainWindow):
     # ================================================ menus, shortcuts, help
 
     def _build_menu_bar(self):
-        """File + Edit + Help menus and the keyboard shortcuts
-        (task 21; Edit is task 30).
+        """File + Edit + View + Help menus and the keyboard
+        shortcuts (task 21; Edit is task 30; View is task 67).
 
         Import/Export are QActions with their shortcuts, so the
         menu shows the keys and the actions work from anywhere in
@@ -2610,6 +2664,19 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(redo_action)
         self._undo_action = undo_action
         self._redo_action = redo_action
+
+        # Light theme (task 67): a checkable action that mirrors
+        # the current theme — checked means light is on. It is a
+        # reflection of state, not a pre-selection.
+        view_menu = self.menuBar().addMenu("View")
+        light_action = QAction("Light theme", self)
+        light_action.setCheckable(True)
+        light_action.setChecked(self._theme == "light")
+        light_action.setToolTip("Switch between the light and "
+                                "dark themes")
+        light_action.triggered.connect(self._on_toggle_theme)
+        view_menu.addAction(light_action)
+        self._light_theme_action = light_action
 
         help_menu = self.menuBar().addMenu("Help")
         about_action = QAction("About Pixel Forge", self)
@@ -2995,7 +3062,10 @@ class MainWindow(QMainWindow):
         # the user's presets had vanished. Hidden when there is
         # nothing to warn about; updated by _refresh_preset_combos.
         warning = QLabel()
-        warning.setStyleSheet("color: #ffb066;")
+        # Task 67: the warning color lives in the stylesheets
+        # (QLabel#warning), one color per theme — the inline
+        # #ffb066 would vanish on the light background.
+        warning.setObjectName("warning")
         warning.setWordWrap(True)
         warning.setVisible(False)
         form.addWidget(warning)
@@ -7236,13 +7306,19 @@ class MainWindow(QMainWindow):
         length = len(text)
         self.prompt_counter_label.setText(
             "%d / %d" % (length, MAX_PROMPT_LEN))
-        # Past the limit the counter turns the warning orange —
+        # Past the limit the counter takes the warning color —
         # the same color as the preset warning under the pickers.
-        if length > MAX_PROMPT_LEN:
-            self.prompt_counter_label.setStyleSheet(
-                "color: #ffb066;")
-        else:
-            self.prompt_counter_label.setStyleSheet("")
+        # A dynamic property, not an inline style, so the color
+        # comes from the theme's stylesheet (task 67): the dark
+        # theme's orange would vanish on the light background.
+        # The unpolish/polish re-evaluates the stylesheet for
+        # the new property value.
+        self.prompt_counter_label.setProperty(
+            "overLimit", length > MAX_PROMPT_LEN)
+        style = self.prompt_counter_label.style()
+        style.unpolish(self.prompt_counter_label)
+        style.polish(self.prompt_counter_label)
+        self.prompt_counter_label.update()
 
     def _on_open_model_download(self):
         """Open the pinned model's download page in the browser."""
@@ -10140,6 +10216,32 @@ class MainWindow(QMainWindow):
             rect = clamp_geometry(rect, screen.availableGeometry())
         self.setGeometry(rect)
 
+    def _load_theme(self):
+        """The saved theme (task 67): "light" only when the
+        settings say so — anything else (missing, anything
+        else) is dark, the first-launch look."""
+        if self._settings is None:
+            return "dark"
+        return "light" if self._settings.value("theme") == "light" \
+            else "dark"
+
+    def _apply_stylesheet(self):
+        """Apply the current theme to the whole app (task 67)."""
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(THEMES[self._theme])
+
+    def _on_toggle_theme(self, checked):
+        """The View menu's Light theme action (task 67): switch
+        now, remember the choice for the next launch. A window
+        without settings still switches the live theme — it
+        just has nowhere to save the choice."""
+        self._theme = "light" if checked else "dark"
+        self._apply_stylesheet()
+        if self._settings is not None:
+            self._settings.setValue("theme", self._theme)
+            self._settings.sync()
+
     def _save_geometry(self):
         """Remember size + position for the next launch (task 66).
         Nothing is saved when the window has no settings. The
@@ -10173,12 +10275,14 @@ def main(argv=None):
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv if argv is None else argv)
-    # The names QSettings stores the window geometry under
-    # (task 66): ~/.config/BrokeNBored/PixelForge.conf. Set
-    # before the settings object is built.
+    # The names QSettings stores the window geometry (task 66)
+    # and the theme (task 67) under:
+    # ~/.config/BrokeNBored/PixelForge.conf. Set before the
+    # settings object is built. The window applies its saved
+    # theme itself in __init__ — main() no longer hardcodes
+    # the dark stylesheet here.
     app.setOrganizationName("BrokeNBored")
     app.setApplicationName("PixelForge")
-    app.setStyleSheet(DARK_STYLESHEET)
     icon_path = Path(__file__).resolve().parent.parent / "icons" / \
         "pixel-forge-256.png"
     if icon_path.is_file():
