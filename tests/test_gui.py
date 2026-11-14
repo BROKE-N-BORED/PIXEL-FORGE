@@ -2393,6 +2393,77 @@ class LibraryGuiTests(unittest.TestCase):
         self.assertIsNotNone(pixmap)
         self.assertFalse(pixmap.isNull())
 
+    def test_zero_size_entry_shows_broken_in_grid_and_preview(self):
+        # Task 77: a 0-size image would ZeroDivisionError in the
+        # preview (230 / max(0, 0)). load_image rejects 0-size
+        # images from disk, so this is latent — the test stubs
+        # the load to return one. It reads as a broken entry in
+        # the grid and the preview, not a crash, and the entry
+        # stays in the list.
+        from unittest import mock
+
+        import pixel_forge.gui as gui_mod
+        from pixel_forge.image import Image
+        self._add("Knight")
+        self._add("Ghost")
+        real_load = gui_mod.load_image
+        ghost_path = os.path.join(self.lib_dir, "ghost.png")
+
+        def stub_load(path):
+            if os.fspath(path) == ghost_path:
+                return Image(0, 0)
+            return real_load(path)
+
+        with mock.patch.object(gui_mod, "load_image",
+                               side_effect=stub_load):
+            # The good thumbs may already be cached from the
+            # adds — clear the cache so the rebuild goes through
+            # the stub.
+            self.win._thumb_cache.clear()
+            self.win._refresh_library()
+            self.assertEqual(self.win.library_list.count(), 2)
+            item = self.win.library_list.item(1)
+            self.assertEqual(item.text(), "Ghost (broken)")
+            self.assertIn("Can't read this image", item.toolTip())
+            self.assertIn("no size", item.toolTip())
+            self._select(1)
+            self.assertEqual(
+                self.win.library_preview_label.text(),
+                "Can't read this image\nthe image has no size")
+            pixmap = self.win.library_preview_label.pixmap()
+            self.assertTrue(pixmap is None or pixmap.isNull())
+
+    def test_zero_size_entry_leaves_normal_entries_previewing(self):
+        # Task 77: the guard only fires for a 0-size image — a
+        # normal entry next to it still previews exactly as
+        # before, with no marker.
+        from unittest import mock
+
+        import pixel_forge.gui as gui_mod
+        from pixel_forge.image import Image
+        self._add("Knight")
+        self._add("Ghost")
+        real_load = gui_mod.load_image
+        ghost_path = os.path.join(self.lib_dir, "ghost.png")
+
+        def stub_load(path):
+            if os.fspath(path) == ghost_path:
+                return Image(0, 0)
+            return real_load(path)
+
+        with mock.patch.object(gui_mod, "load_image",
+                               side_effect=stub_load):
+            self.win._thumb_cache.clear()
+            self.win._refresh_library()
+            self.assertEqual(self.win.library_list.item(0).text(),
+                             "Knight")
+            self._select(0)
+            pixmap = self.win.library_preview_label.pixmap()
+            self.assertIsNotNone(pixmap)
+            self.assertFalse(pixmap.isNull())
+            self.assertEqual(
+                self.win.library_preview_label.text(), "")
+
     def test_rename_entry(self):
         from unittest import mock
         self._add("Old Name")

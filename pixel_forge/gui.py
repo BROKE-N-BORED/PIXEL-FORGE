@@ -9658,8 +9658,17 @@ class MainWindow(QMainWindow):
             thumb.fill(Qt.GlobalColor.darkGray)
             reason = unreadable_reason(path, exc)
         else:
-            thumb = thumb_pixmap(image, 64)
-            reason = None
+            if image.isNull():
+                # Task 77: a 0-size image loads fine but has no
+                # pixels to thumb — it reads as broken, the same
+                # as in the preview, instead of a blank thumbnail
+                # with no marker.
+                thumb = QPixmap(64, 64)
+                thumb.fill(Qt.GlobalColor.darkGray)
+                reason = "the image has no size"
+            else:
+                thumb = thumb_pixmap(image, 64)
+                reason = None
         self._thumb_cache[key] = (thumb, reason)
         return thumb
 
@@ -9740,9 +9749,18 @@ class MainWindow(QMainWindow):
                     "Can't read this image\n%s"
                     % unreadable_reason(path, exc))
             else:
-                scale = 230 / max(image.width(), image.height())
-                self.library_preview_label.setPixmap(
-                    checkerboard_pixmap(image, scale, smooth=False))
+                # Task 77: a 0-size image would divide by zero
+                # below (same class as task 15's B11). load_image
+                # rejects 0-size images from disk, so this is
+                # latent — but one that ever gets here reads as a
+                # broken entry, not a crash.
+                if image.isNull():
+                    self.library_preview_label.setText(
+                        "Can't read this image\nthe image has no size")
+                else:
+                    scale = 230 / max(image.width(), image.height())
+                    self.library_preview_label.setPixmap(
+                        checkerboard_pixmap(image, scale, smooth=False))
         lines = [entry["name"]]
         if entry["kind"] == "sheet":
             lines.append("%d x %d spritesheet, %d frames"

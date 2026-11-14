@@ -1,5 +1,15 @@
 # Pixel Forge changelog
 
+## 0.61 — 2026-11-14
+
+A 0-size library image reads as broken instead of crashing
+(task 77) — the library preview divided by the image size, so
+a 0x0 image would have crashed with a division by zero. That
+cannot happen from a file on disk (the loader rejects 0-size
+images), but one that ever gets through now shows the plain
+"Can't read this image" marker in the grid and the preview,
+with the reason, instead of dividing.
+
 ## 0.60 — 2026-11-14
 
 One error type for a bad max_colors (task 78) —
