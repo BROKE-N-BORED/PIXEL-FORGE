@@ -15,7 +15,7 @@ from pixel_forge.image import Image  # noqa: E402
 from pixel_forge.library import (LIBRARY_FORMAT, Library,  # noqa: E402
                                  default_library_dir,
                                  normalize_tags, slugify,
-                                 validate_entry)
+                                 unreadable_reason, validate_entry)
 from pixel_forge.pixelize import PixelForgeError  # noqa: E402
 
 # The QApplication must exist before the first load_image
@@ -450,6 +450,53 @@ class LibraryTests(unittest.TestCase):
                          list(old_sources))
         self.assertEqual(lib.skipped_entries(), [])
         self.assertEqual(open(path, "rb").read(), before)
+
+    def test_unreadable_reason_names_missing_file(self):
+        # Task 68: a file that is gone reads as missing, in
+        # plain words — the grid marker and preview text use
+        # this instead of the raw exception.
+        missing = os.path.join(self.tmp, "gone.png")
+        exc = PixelForgeError("not found: %s" % missing)
+        self.assertEqual(unreadable_reason(missing, exc),
+                         "the file is missing")
+
+    def test_unreadable_reason_names_damaged_file(self):
+        # Task 68: a file that is there but cannot be parsed
+        # reads as damaged or not an image — both from the
+        # error load_image actually raises and from a real
+        # truncated PNG loaded for real (the Qt and stdlib
+        # paths raise the same words for it).
+        present = os.path.join(self.tmp, "damaged.png")
+        with open(present, "wb") as handle:
+            handle.write(b"not a png at all")
+        exc = PixelForgeError(
+            "could not read as an image: %s "
+            "(unsupported format or damaged file)" % present)
+        self.assertEqual(unreadable_reason(present, exc),
+                         "the file is damaged or not an image")
+        good = write_image(self._image(),
+                           os.path.join(self.tmp, "good.png"))
+        with open(good, "rb") as handle:
+            head = handle.read(20)
+        with open(present, "wb") as handle:
+            handle.write(head)
+        from pixel_forge.pixelize import load_image
+        with self.assertRaises(PixelForgeError) as caught:
+            load_image(present)
+        self.assertEqual(
+            unreadable_reason(present, caught.exception),
+            "the file is damaged or not an image")
+
+    def test_unreadable_reason_keeps_unknown_errors(self):
+        # Task 68: an error load_image does not produce today
+        # keeps its own words rather than being mislabeled.
+        present = os.path.join(self.tmp, "odd.png")
+        with open(present, "wb") as handle:
+            handle.write(b"x")
+        self.assertEqual(
+            unreadable_reason(present,
+                              PixelForgeError("something odd")),
+            "something odd")
 
     def test_malformed_entries_left_untouched_on_disk(self):
         no_name = self._good_entry(name="Ghost", stem="ghost")

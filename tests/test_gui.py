@@ -2317,6 +2317,82 @@ class LibraryGuiTests(unittest.TestCase):
         self.assertTrue(self.win.library_delete_btn.isEnabled())
         self.assertTrue(self.win.library_export_btn.isEnabled())
 
+    def test_missing_entry_shows_missing_in_grid_and_preview(self):
+        # Task 68: a missing file keeps its existing markers —
+        # "Missing" in the grid, "File missing" naming the file
+        # in the preview — and the entry stays in the list.
+        self._add("Knight")
+        os.unlink(os.path.join(self.lib_dir, "knight.png"))
+        self.win._refresh_library()
+        self.assertEqual(self.win.library_list.count(), 1)
+        item = self.win.library_list.item(0)
+        self.assertEqual(item.text(), "Knight — Missing")
+        self._select(0)
+        self.assertEqual(self.win.library_preview_label.text(),
+                         "File missing: knight.png")
+        pixmap = self.win.library_preview_label.pixmap()
+        self.assertTrue(pixmap is None or pixmap.isNull())
+
+    def test_corrupt_entry_shows_broken_in_grid_and_preview(self):
+        # Task 68: a file that is there but cannot be read used
+        # to show as a bare gray square, and the preview lied
+        # "File missing" about it. The grid now marks it broken
+        # with the reason in the tooltip, and the preview says
+        # it cannot be read, with the reason — and the entry
+        # stays in the list, not auto-deleted.
+        self._add("Knight")
+        with open(os.path.join(self.lib_dir, "knight.png"),
+                  "wb") as handle:
+            handle.write(b"not a png at all")
+        self.win._refresh_library()
+        self.assertEqual(self.win.library_list.count(), 1)
+        item = self.win.library_list.item(0)
+        self.assertEqual(item.text(), "Knight (broken)")
+        self.assertIn("Can't read this image", item.toolTip())
+        self.assertIn("damaged or not an image", item.toolTip())
+        self._select(0)
+        self.assertEqual(self.win.library_preview_label.text(),
+                         "Can't read this image\n"
+                         "the file is damaged or not an image")
+        pixmap = self.win.library_preview_label.pixmap()
+        self.assertTrue(pixmap is None or pixmap.isNull())
+
+    def test_readable_entry_shows_no_broken_marker(self):
+        # Task 68: a readable entry is untouched — plain name
+        # in the grid, no broken wording anywhere, real preview.
+        self._add("Knight")
+        self.win._refresh_library()
+        item = self.win.library_list.item(0)
+        self.assertEqual(item.text(), "Knight")
+        self.assertNotIn("broken", item.toolTip())
+        self._select(0)
+        pixmap = self.win.library_preview_label.pixmap()
+        self.assertIsNotNone(pixmap)
+        self.assertFalse(pixmap.isNull())
+        self.assertNotIn("Can't read",
+                         self.win.library_preview_label.text())
+
+    def test_repaired_entry_clears_broken_marker(self):
+        # Task 68: the broken marker follows the file, not the
+        # entry — replacing the corrupt file with a good one
+        # clears it on the next refresh (the thumbnail cache
+        # keys on size + mtime, so the rebuild re-checks).
+        path = os.path.join(self.lib_dir, "knight.png")
+        self._add("Knight")
+        with open(path, "wb") as handle:
+            handle.write(b"not a png at all")
+        self.win._refresh_library()
+        self.assertEqual(self.win.library_list.item(0).text(),
+                         "Knight (broken)")
+        write_image(make_solid_image(32, 32, 0, 255, 0), path)
+        self.win._refresh_library()
+        self.assertEqual(self.win.library_list.item(0).text(),
+                         "Knight")
+        self._select(0)
+        pixmap = self.win.library_preview_label.pixmap()
+        self.assertIsNotNone(pixmap)
+        self.assertFalse(pixmap.isNull())
+
     def test_rename_entry(self):
         from unittest import mock
         self._add("Old Name")

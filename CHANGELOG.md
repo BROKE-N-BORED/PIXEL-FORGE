@@ -1,5 +1,18 @@
 # Pixel Forge changelog
 
+## 0.57 — 2026-11-14
+
+Broken library images get a marker (task 68) — a library
+entry whose file is present but unreadable used to show as a
+plain dark-gray square with nothing saying it was broken, and
+the preview claimed "File missing" for a file that was right
+there. The grid now marks such an entry "(broken)" with the
+reason in its tooltip, and the preview says "Can't read this
+image" with the reason where known (a damaged file reads as
+damaged, a missing file still reads as missing). The entry
+stays in the list, Repair missing still works, and a readable
+entry is untouched.
+
 ## 0.56 — 2026-11-14
 
 Library "texture" source (task 79) — a game asset saved from

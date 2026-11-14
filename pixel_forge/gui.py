@@ -80,7 +80,7 @@ from .imagegen import (DEFAULT_COUNT, DEFAULT_NEGATIVE, DEFAULT_SIZE,
                        require_model, set_keeper, slugify,
                        validate_prompt)
 from .layers import Layer, composite_layers, has_content
-from .library import SOURCE_LABELS, Library
+from .library import SOURCE_LABELS, Library, unreadable_reason
 from .palette_io import (PaletteStore, extract_palette_from_image)
 from .palettes import NAMED_PALETTES, PALETTE_LABELS
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
@@ -9439,14 +9439,27 @@ class MainWindow(QMainWindow):
             for entry in entries:
                 thumb = self._library_thumb(entry)
                 label = entry["name"]
+                tooltip = ", ".join(entry.get("tags", [])) \
+                    or entry["name"]
                 if entry["kind"] == "sheet":
                     label += " — Sheet"
                 if entry["id"] in missing_ids:
                     label += " — Missing"
+                else:
+                    # Task 68: a file that is there but cannot
+                    # be read used to show as a bare gray square.
+                    # It now says so, with the reason in the
+                    # tooltip. "(broken)" uses parens, not an
+                    # em-dash, so the new marker adds no U33
+                    # violation.
+                    reason = self._library_thumb_broken(entry)
+                    if reason is not None:
+                        label += " (broken)"
+                        tooltip = ("Can't read this image: %s"
+                                   % reason)
                 item = QListWidgetItem(thumb, label)
                 item.setData(Qt.ItemDataRole.UserRole, entry["id"])
-                item.setToolTip(", ".join(entry.get("tags", []))
-                                or entry["name"])
+                item.setToolTip(tooltip)
                 self.library_list.addItem(item)
         finally:
             self.library_list.blockSignals(False)
@@ -9513,31 +9526,52 @@ class MainWindow(QMainWindow):
         finally:
             combo.blockSignals(False)
 
-    def _library_thumb(self, entry):
-        """The grid thumbnail for an entry, from the cache when
-        the file is unchanged (task 24). The key is the entry id
-        + the file's size and mtime; a missing file keys on
-        (id, None, None) and caches the gray square too, so an
-        orphan does not re-attempt a load on every refresh."""
+    def _library_thumb_key(self, entry):
+        """Cache key for an entry's thumbnail: the entry id +
+        the file's size and mtime; a missing file keys on
+        (id, None, None) (task 24). A repaired or replaced file
+        has a new size or mtime, so it rebuilds, and a broken
+        marker clears itself (task 68)."""
         path = self.library.path_for(entry)
         try:
             stat = path.stat()
-            key = (entry["id"], stat.st_size, stat.st_mtime_ns)
+            return (entry["id"], stat.st_size, stat.st_mtime_ns)
         except OSError:
-            key = (entry["id"], None, None)
-        thumb = self._thumb_cache.get(key)
-        if thumb is not None:
-            return thumb
+            return (entry["id"], None, None)
+
+    def _library_thumb(self, entry):
+        """The grid thumbnail for an entry, from the cache when
+        the file is unchanged (task 24). The cache holds the
+        pixmap + the reason it is the gray square (None when the
+        image loaded), so one load serves both the thumbnail and
+        the broken marker (task 68), and an unreadable file does
+        not re-attempt a load on every refresh."""
+        path = self.library.path_for(entry)
+        key = self._library_thumb_key(entry)
+        cached = self._thumb_cache.get(key)
+        if cached is not None:
+            return cached[0]
         self._thumb_builds += 1
         try:
             image = load_image(path)
-        except PixelForgeError:
+        except PixelForgeError as exc:
             thumb = QPixmap(64, 64)
             thumb.fill(Qt.GlobalColor.darkGray)
+            reason = unreadable_reason(path, exc)
         else:
             thumb = thumb_pixmap(image, 64)
-        self._thumb_cache[key] = thumb
+            reason = None
+        self._thumb_cache[key] = (thumb, reason)
         return thumb
+
+    def _library_thumb_broken(self, entry):
+        """Why an entry's thumbnail is the gray square, or None
+        when the image loads (task 68). Builds the thumbnail
+        first, so the reason comes from the same single load."""
+        self._library_thumb(entry)
+        cached = self._thumb_cache.get(
+            self._library_thumb_key(entry))
+        return cached[1] if cached is not None else None
 
     def _duplicate_groups(self):
         """Duplicate groups for the library, cached against a
@@ -9592,15 +9626,24 @@ class MainWindow(QMainWindow):
             self._clear_library_selection()
             return
         path = self.library.path_for(entry)
-        try:
-            image = load_image(path)
-        except PixelForgeError:
+        if not path.is_file():
             self.library_preview_label.setText(
                 "File missing: %s" % entry["file"])
         else:
-            scale = 230 / max(image.width(), image.height())
-            self.library_preview_label.setPixmap(
-                checkerboard_pixmap(image, scale, smooth=False))
+            try:
+                image = load_image(path)
+            except PixelForgeError as exc:
+                # Task 68: a present-but-unreadable file used
+                # to claim "File missing" here, a lie about a
+                # file that is right there. It now says it
+                # cannot be read, with the reason where known.
+                self.library_preview_label.setText(
+                    "Can't read this image\n%s"
+                    % unreadable_reason(path, exc))
+            else:
+                scale = 230 / max(image.width(), image.height())
+                self.library_preview_label.setPixmap(
+                    checkerboard_pixmap(image, scale, smooth=False))
         lines = [entry["name"]]
         if entry["kind"] == "sheet":
             lines.append("%d x %d spritesheet, %d frames"

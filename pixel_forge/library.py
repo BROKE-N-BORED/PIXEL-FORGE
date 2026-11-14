@@ -145,6 +145,21 @@ def validate_entry(entry):
     return None
 
 
+def unreadable_reason(path, exc):
+    """Plain-words reason an image file could not be read (task
+    68), for the Library tab's broken marker and preview text.
+    `exc` is the PixelForgeError load_image raised. A missing
+    file is its own reason; anything load_image could not parse
+    is damaged or not an image; anything else keeps the
+    exception's own words (the fallback only fires for errors
+    load_image does not produce today)."""
+    if not Path(path).is_file():
+        return "the file is missing"
+    if "could not read as an image" in str(exc):
+        return "the file is damaged or not an image"
+    return str(exc)
+
+
 class Library:
     """One library folder. The index loads lazily and is written
     back (atomically, via a temp file + rename) on every change."""
