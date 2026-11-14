@@ -1,5 +1,15 @@
 # Pixel Forge changelog
 
+## 0.58 — 2026-11-14
+
+The window remembers its size and position (task 66) — it
+used to open 1020x640 every time and remember nothing. The
+geometry is saved when the window closes and restored on the
+next launch, clamped to the current screen so a saved position
+from a bigger or second monitor never strands the window
+off-screen. First launch with nothing saved still opens
+1020x640.
+
 ## 0.57 — 2026-11-14
 
 Broken library images get a marker (task 68) — a library

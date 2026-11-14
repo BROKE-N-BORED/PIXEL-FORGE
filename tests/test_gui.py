@@ -20,7 +20,7 @@ try:
     from helpers import (make_gradient_image, make_noisy_image,  # noqa: E402
                          make_solid_image, make_test_video, stub_env,
                          write_image, write_stub_engine)
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import QRect, QSettings, Qt
     from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, \
         QFileDialog, QInputDialog, QLabel, QMessageBox, QPushButton, \
         QTabWidget, QWidget
@@ -8043,6 +8043,177 @@ class PaletteEditorGuiTests(unittest.TestCase):
             self.assertNotIn("(s)", text,
                              "programmer phrasing in visible text: "
                              "%r" % text)
+
+
+class GeometryPersistenceTests(unittest.TestCase):
+    """Task 66: the window remembers its size + position.
+
+    Every test uses its own temp-file QSettings, so nothing
+    touches the user's real settings — and each window gets a
+    fresh QSettings on the same file, the way a new launch
+    would."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.settings_path = os.path.join(self.tmp, "settings.ini")
+        self.lib_dir = os.path.join(self.tmp, "lib")
+        self._windows = []
+
+    def tearDown(self):
+        for win in self._windows:
+            win.close()
+            win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _settings(self):
+        return QSettings(self.settings_path, QSettings.IniFormat)
+
+    def _window(self, settings="default"):
+        from pixel_forge.gui import MainWindow
+        if settings == "default":
+            settings = self._settings()
+        win = MainWindow(library_dir=self.lib_dir, restore=False,
+                         settings=settings)
+        self._windows.append(win)
+        return win
+
+    def _rect(self, win):
+        rect = win.geometry()
+        return (rect.x(), rect.y(), rect.width(), rect.height())
+
+    def test_window_reopens_at_saved_geometry(self):
+        # Move + resize one window, close it, open a fresh one:
+        # it opens where the first one closed.
+        first = self._window()
+        first.show()
+        self.app.processEvents()
+        first.setGeometry(52, 42, 700, 500)
+        self.app.processEvents()
+        saved = self._rect(first)
+        # The layout minimum floors the 700-wide request, so
+        # the saved geometry is whatever the window actually
+        # is — the position and height are as requested.
+        self.assertEqual(saved[:2], (52, 42))
+        self.assertEqual(saved[3], 500)
+        self.assertGreaterEqual(saved[2], 700)
+        first.close()
+        self.app.processEvents()
+        # The values are on disk, not just in memory.
+        stored = self._settings()
+        self.assertEqual(
+            [stored.value("window/%s" % key, type=int)
+             for key in ("x", "y", "width", "height")],
+            list(saved))
+        second = self._window()
+        second.show()
+        self.app.processEvents()
+        # Offscreen the screen (800 wide) is narrower than the
+        # window's minimum width, so the clamp pulls the
+        # restore to the left edge and Qt floors the width
+        # back to the minimum — the height and y survive
+        # untouched. On a real screen the restore is exact.
+        # The x reads 0 or 2: offscreen nudges an edge-sitting
+        # window 2 px in (probed on a bare QMainWindow too).
+        restored = self._rect(second)
+        self.assertEqual(restored[1:],
+                         (saved[1], saved[2], saved[3]))
+        self.assertIn(restored[0], (0, 2))
+
+    def test_offscreen_saved_geometry_is_clamped(self):
+        # A saved rectangle hanging off the bottom-right corner
+        # is pulled back so the whole window is visible. The
+        # expected corner is computed from the screen Qt
+        # reports, not a hardcoded size; the size is floored
+        # by the layout minimum, which the clamp does not
+        # fight — exact size clamping is pinned by
+        # test_clamp_geometry instead.
+        avail = self.app.primaryScreen().availableGeometry()
+        stored = self._settings()
+        stored.setValue("window/x", avail.right() - 10)
+        stored.setValue("window/y", avail.bottom() - 10)
+        stored.setValue("window/width", 400)
+        stored.setValue("window/height", 300)
+        stored.sync()
+        win = self._window()
+        win.show()
+        self.app.processEvents()
+        hint = win.minimumSizeHint()
+        self.assertEqual(
+            self._rect(win),
+            (avail.left() + avail.width() - 400,
+             avail.top() + avail.height() - 300,
+             max(400, hint.width()), max(300, hint.height())))
+
+    def test_clamp_geometry(self):
+        from pixel_forge.gui import clamp_geometry
+        avail = QRect(0, 0, 800, 800)
+        cases = [
+            # Inside: untouched.
+            (QRect(10, 10, 100, 100), QRect(10, 10, 100, 100)),
+            # Off the bottom-right: pulled back, size kept.
+            (QRect(700, 700, 400, 300), QRect(400, 500, 400, 300)),
+            # Off the top-left: pulled back to the corner.
+            (QRect(-50, -40, 200, 150), QRect(0, 0, 200, 150)),
+            # Bigger than the screen: capped at the screen.
+            (QRect(-5000, -5000, 5000, 5000),
+             QRect(0, 0, 800, 800)),
+            # Wider than the screen, fitting height: only the
+            # width is capped, and the x goes to the left edge.
+            (QRect(50, 50, 2000, 100), QRect(0, 50, 800, 100)),
+        ]
+        for rect, expected in cases:
+            self.assertEqual(clamp_geometry(rect, avail), expected,
+                             "clamp %r" % (rect.getRect(),))
+        # No screen to clamp against: the rectangle is left
+        # alone rather than collapsed.
+        self.assertEqual(clamp_geometry(QRect(10, 10, 100, 100),
+                                        QRect()),
+                         QRect(10, 10, 100, 100))
+
+    def test_no_saved_geometry_keeps_default(self):
+        # First launch: nothing in the settings file, so the
+        # window opens 1020x640 exactly as before.
+        win = self._window()
+        win.show()
+        self.app.processEvents()
+        self.assertEqual((win.width(), win.height()), (1020, 640))
+
+    def test_window_without_settings_keeps_default(self):
+        # A window built without settings (every existing test)
+        # behaves exactly as before: 1020x640, nothing saved.
+        win = self._window(settings=None)
+        win.show()
+        self.app.processEvents()
+        self.assertEqual((win.width(), win.height()), (1020, 640))
+        self.assertFalse(os.path.exists(self.settings_path))
+
+    def test_partial_or_invalid_saved_geometry_keeps_default(self):
+        # Half a saved rectangle (or a nonsense size) is not a
+        # rectangle at all: fall back to the default.
+        stored = self._settings()
+        stored.setValue("window/x", 100)
+        stored.setValue("window/y", 100)
+        stored.sync()
+        win = self._window()
+        win.show()
+        self.app.processEvents()
+        self.assertEqual((win.width(), win.height()), (1020, 640))
+        win.close()
+        self.app.processEvents()
+        stored.setValue("window/width", 0)
+        stored.setValue("window/height", -5)
+        stored.sync()
+        again = self._window()
+        again.show()
+        self.app.processEvents()
+        self.assertEqual((again.width(), again.height()),
+                         (1020, 640))
 
 
 if __name__ == "__main__":

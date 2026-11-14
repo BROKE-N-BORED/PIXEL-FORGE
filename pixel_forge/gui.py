@@ -43,8 +43,8 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import (QPoint, QSize, Qt, QThread, QTimer, QUrl,
-                            Signal)
+from PySide6.QtCore import (QPoint, QRect, QSettings, QSize, Qt, QThread,
+                            QTimer, QUrl, Signal)
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QIcon,
                            QImage, QImageReader, QKeySequence, QPainter,
                            QPixmap, QShortcut)
@@ -2310,11 +2310,34 @@ class PaletteEditorDialog(QDialog):
             return
 
 
+def clamp_geometry(rect, available):
+    """A saved window rectangle pulled back onto the screen (task
+    66). The size is capped at the available size and the position
+    is moved so the whole window is visible — a saved rectangle
+    from a bigger or second monitor never strands the window
+    off-screen. An empty available rectangle (no screen) leaves
+    the saved rectangle alone."""
+    if available.width() < 1 or available.height() < 1:
+        return QRect(rect)
+    width = min(rect.width(), available.width())
+    height = min(rect.height(), available.height())
+    x = min(max(rect.x(), available.left()),
+            available.left() + available.width() - width)
+    y = min(max(rect.y(), available.top()),
+            available.top() + available.height() - height)
+    return QRect(x, y, width, height)
+
+
 class MainWindow(QMainWindow):
-    def __init__(self, library_dir=None, restore=True):
+    def __init__(self, library_dir=None, restore=True, settings=None):
         super().__init__()
         self.setWindowTitle("Pixel Forge %s" % __version__)
-        self.resize(1020, 640)
+        # Geometry persistence (task 66): settings is a test hook
+        # like library_dir — main() passes the real QSettings, and
+        # a window built without one behaves exactly as before
+        # (1020x640, nothing saved).
+        self._settings = settings
+        self._restore_geometry()
         self.setAcceptDrops(True)
         # Library + presets. library_dir is a test hook — the real
         # window uses ~/pixel-forge-library/ (or PIXELFORGE_LIBRARY).
@@ -10092,7 +10115,47 @@ class MainWindow(QMainWindow):
             self._session_restored = True
             self.restore_session()
 
+    def _restore_geometry(self):
+        """Open where the window was last closed (task 66), or
+        1020x640 on first launch. A saved rectangle is clamped to
+        the current screen, so a changed monitor setup never
+        strands the window off-screen. The default is never
+        clamped — first launch looks exactly like it always did."""
+        settings = self._settings
+        if settings is None:
+            self.resize(1020, 640)
+            return
+        values = [settings.value("window/%s" % key, type=int)
+                  for key in ("x", "y", "width", "height")]
+        if any(value is None for value in values):
+            self.resize(1020, 640)
+            return
+        x, y, width, height = values
+        if width < 1 or height < 1:
+            self.resize(1020, 640)
+            return
+        screen = self.screen() or QApplication.primaryScreen()
+        rect = QRect(x, y, width, height)
+        if screen is not None:
+            rect = clamp_geometry(rect, screen.availableGeometry())
+        self.setGeometry(rect)
+
+    def _save_geometry(self):
+        """Remember size + position for the next launch (task 66).
+        Nothing is saved when the window has no settings. The
+        sync puts the values on disk at once, so they survive
+        even if the process ends right after the close."""
+        if self._settings is None:
+            return
+        rect = self.geometry()
+        self._settings.setValue("window/x", rect.x())
+        self._settings.setValue("window/y", rect.y())
+        self._settings.setValue("window/width", rect.width())
+        self._settings.setValue("window/height", rect.height())
+        self._settings.sync()
+
     def closeEvent(self, event):
+        self._save_geometry()
         self._stop_playback()
         self._stop_prompt_worker()
         self._stop_texture_worker()
@@ -10110,6 +10173,11 @@ def main(argv=None):
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv if argv is None else argv)
+    # The names QSettings stores the window geometry under
+    # (task 66): ~/.config/BrokeNBored/PixelForge.conf. Set
+    # before the settings object is built.
+    app.setOrganizationName("BrokeNBored")
+    app.setApplicationName("PixelForge")
     app.setStyleSheet(DARK_STYLESHEET)
     icon_path = Path(__file__).resolve().parent.parent / "icons" / \
         "pixel-forge-256.png"
@@ -10119,7 +10187,8 @@ def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv[1:])
     # A file on the command line wins over the session (task
     # 29): the user asked for this file, so no restore.
-    window = MainWindow(restore=not (args and os.path.isfile(args[0])))
+    window = MainWindow(restore=not (args and os.path.isfile(args[0])),
+                        settings=QSettings())
     if args and os.path.isfile(args[0]):
         if Path(args[0]).suffix.lower() in VIDEO_EXTENSIONS:
             window.tabs.setCurrentIndex(1)
