@@ -480,6 +480,243 @@ class ImageEnginePinTests(unittest.TestCase):
         self.assertIn("~/pixel-forge-models/", log)
 
 
+@unittest.skipUnless(HAS_QT, "PySide6 not available")
+class BgRemoveStepTests(unittest.TestCase):
+    """Task 41: the GUI installer's background-removal step
+    installs rembg + onnxruntime and downloads the pinned
+    u2net model. The subprocess calls are stubbed at the
+    InstallContext boundary — no test pip-installs or
+    downloads anything for real."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(
+            lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+    def _venv_python(self):
+        path = (Path(self.tmp) / ".local" / "share"
+                / "pixel-forge" / "venv" / "bin" / "python")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"#!/bin/sh\n")
+        return path
+
+    def _model_path(self):
+        return (Path(self.tmp) / ".rembg" / "models" / "u2net"
+                / "u2net.onnx")
+
+    def _ctx(self, lines, run, run_output, install=True,
+             dryrun=False, free_bytes=100 * 1024 ** 3):
+        from pixel_forge.installer import InstallContext
+
+        ctx = InstallContext(lines.append, dryrun=dryrun)
+        ctx.install_bgremove = install
+        ctx.home = Path(self.tmp)
+        ctx.free_bytes_override = free_bytes
+        ctx.run = run
+        ctx.run_output = run_output
+        return ctx
+
+    def _drive_step(self, run, import_codes, model, check=None,
+                    venv=True, **ctx_kw):
+        """Drive the real step_bgremove with stubbed process
+        calls. import_codes are the venv import-check return
+        codes, consumed in call order; model is the find_model
+        return value; check replaces check_model_file (default:
+        records the path). Returns (result, lines, commands,
+        checked)."""
+        import pixel_forge.bgremove as bgremove
+        from pixel_forge.installer import step_bgremove
+
+        lines = []
+        commands = []
+        checked = []
+        codes = iter(import_codes)
+
+        def recording_run(cmd, timeout=None):
+            commands.append(list(cmd))
+            return run(cmd, timeout)
+
+        def stubbed_output(cmd, timeout=60):
+            return next(codes), ""
+
+        if venv:
+            self._venv_python()
+        ctx = self._ctx(lines, recording_run, stubbed_output,
+                        **ctx_kw)
+        patches = [
+            mock.patch.object(bgremove, "find_model",
+                              lambda: model),
+            mock.patch.object(
+                bgremove, "check_model_file",
+                check if check is not None
+                else lambda p: checked.append(Path(p))),
+        ]
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            result = step_bgremove(ctx)
+        return result, lines, commands, checked
+
+    def _curl_lands_a_file(self, cmd, timeout=None):
+        """A stub run: curl writes a small file at its -o target,
+        everything else succeeds silently."""
+        if cmd[0] == "curl":
+            dest = Path(cmd[cmd.index("-o") + 1])
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"fake model bytes")
+        return 0
+
+    def test_already_installed_skips_everything(self):
+        from pixel_forge.installer import StepResult
+
+        # A path that does not exist is not partial (a file that
+        # vanished is treated as missing, not as a bad model) —
+        # and with the deps present the step is done.
+        model = Path(self.tmp) / "u2net.onnx"
+        result, _lines, commands, _checked = self._drive_step(
+            self._curl_lands_a_file, [0], model)
+        self.assertEqual(result.status, StepResult.DONE)
+        self.assertEqual(result.detail, "already installed")
+        self.assertEqual(commands, [])
+
+    def test_not_requested_skips(self):
+        from pixel_forge.installer import StepResult
+
+        result, _lines, commands, _checked = self._drive_step(
+            self._curl_lands_a_file, [1], None, install=False)
+        self.assertEqual(result.status, StepResult.DONE)
+        self.assertEqual(result.detail, "skipped")
+        self.assertEqual(commands, [])
+
+    def test_dryrun_reports_without_doing(self):
+        from pixel_forge.installer import StepResult
+
+        result, _lines, commands, _checked = self._drive_step(
+            self._curl_lands_a_file, [1], None, dryrun=True)
+        self.assertEqual(result.status, StepResult.DONE)
+        self.assertEqual(result.detail, "dry-run")
+        self.assertEqual(commands, [])
+
+    def test_disk_space_refusal_warns(self):
+        from pixel_forge.installer import StepResult
+
+        result, _lines, commands, _checked = self._drive_step(
+            self._curl_lands_a_file, [1], None,
+            free_bytes=100 * 1024 ** 2)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("not enough disk space", result.detail)
+        self.assertEqual(commands, [])
+
+    def test_pip_installs_packages_and_downloads_model(self):
+        import pixel_forge.bgremove as bgremove
+        from pixel_forge.installer import StepResult
+
+        result, _lines, commands, checked = self._drive_step(
+            self._curl_lands_a_file, [1, 0], None)
+        self.assertEqual(result.status, StepResult.DONE)
+        pips = [c for c in commands
+                if len(c) > 3 and c[1:3] == ["-m", "pip"]]
+        self.assertEqual(len(pips), 1)
+        self.assertEqual(pips[0][5:],
+                         bgremove.BGREMOVE_PACKAGES,
+                         "pip installed a different package list "
+                         "than bgremove.BGREMOVE_PACKAGES")
+        curls = [c for c in commands if c[0] == "curl"]
+        self.assertEqual(len(curls), 1)
+        self.assertIn("-C", curls[0])
+        self.assertEqual(curls[0][curls[0].index("-C") + 1], "-")
+        self.assertIn(bgremove.MODEL_URL, curls[0])
+        self.assertEqual(checked, [self._model_path()],
+                         "the model download was never "
+                         "hash-checked")
+
+    def test_pip_failure_warns_and_skips_download(self):
+        from pixel_forge.installer import StepResult
+
+        def run(cmd, timeout=None):
+            if len(cmd) > 3 and cmd[1:3] == ["-m", "pip"]:
+                return 1
+            return 0
+
+        result, _lines, commands, checked = self._drive_step(
+            run, [1], None)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("packages failed", result.detail)
+        self.assertFalse(any(c[0] == "curl" for c in commands),
+                         "the model downloaded after pip failed")
+        self.assertEqual(checked, [])
+
+    def test_import_check_fails_after_pip_warns(self):
+        from pixel_forge.installer import StepResult
+
+        result, _lines, commands, _checked = self._drive_step(
+            self._curl_lands_a_file, [1, 1], None)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("packages failed", result.detail)
+        self.assertFalse(any(c[0] == "curl" for c in commands),
+                         "the model downloaded with the packages "
+                         "unverified")
+
+    def test_no_venv_python_warns(self):
+        from pixel_forge.installer import StepResult
+
+        result, _lines, commands, _checked = self._drive_step(
+            self._curl_lands_a_file, [1], None, venv=False)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("no venv", result.detail)
+        self.assertEqual(commands, [])
+
+    def test_download_failure_warns_and_keeps_partial(self):
+        from pixel_forge.installer import StepResult
+
+        def run(cmd, timeout=None):
+            if cmd[0] == "curl":
+                dest = Path(cmd[cmd.index("-o") + 1])
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(b"partial")
+                return 22
+            return 0
+
+        result, _lines, _commands, checked = self._drive_step(
+            run, [0], None)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("model download failed", result.detail)
+        self.assertTrue(self._model_path().exists(),
+                        "the partial file was deleted — resume "
+                        "lost")
+        self.assertEqual(checked, [],
+                         "the hash check ran on a failed download")
+
+    def test_checksum_failure_deletes_and_warns(self):
+        from pixel_forge.installer import StepResult
+        from pixel_forge.pixelize import PixelForgeError
+
+        def check(_path):
+            raise PixelForgeError("checksum mismatch")
+
+        result, _lines, _commands, _checked = self._drive_step(
+            self._curl_lands_a_file, [0], None, check=check)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("checksum failed", result.detail)
+        self.assertFalse(self._model_path().exists(),
+                         "the bad file was kept")
+
+    def test_partial_model_resumes(self):
+        from pixel_forge.installer import StepResult
+
+        path = self._model_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"half a model")
+        result, lines, commands, checked = self._drive_step(
+            self._curl_lands_a_file, [0], path)
+        self.assertEqual(result.status, StepResult.DONE)
+        log = "\n".join(lines)
+        self.assertIn("resuming", log)
+        self.assertEqual(len([c for c in commands
+                              if c[0] == "curl"]), 1)
+        self.assertEqual(checked, [path])
+
+
 class BuildJobsTests(unittest.TestCase):
     """Task 84: the engine source build caps its parallel jobs on
     low-memory machines. Fake meminfo values — no /proc reads."""
@@ -1541,6 +1778,9 @@ class InstallerDefaultsTests(unittest.TestCase):
                          "ffmpeg checkbox is checked by default")
         self.assertFalse(win.image_engine_check.isChecked(),
                          "image-engine checkbox is checked by default")
+        self.assertFalse(win.bgremove_check.isChecked(),
+                         "background-removal checkbox is checked "
+                         "by default")
         win.close()
 
     def test_defaults_are_off_one_layer_down(self):
@@ -1559,6 +1799,24 @@ class InstallerDefaultsTests(unittest.TestCase):
         self.assertIs(default, False)
         ctx.which = lambda _name: None  # ffmpeg missing
         result = step_ffmpeg(ctx)
+        self.assertEqual(result.status, StepResult.DONE)
+        self.assertEqual(result.detail, "skipped")
+
+    def test_bgremove_defaults_are_off_one_layer_down(self):
+        """Task 41: the same for background removal — a bare
+        worker or context must not install rembg or download the
+        model without the user's choice."""
+        import inspect
+
+        from pixel_forge.installer import (InstallContext, InstallWorker,
+                                           StepResult, step_bgremove)
+
+        ctx = InstallContext(lambda _msg: None, dryrun=True)
+        self.assertFalse(ctx.install_bgremove)
+        default = inspect.signature(
+            InstallWorker.__init__).parameters["install_bgremove"].default
+        self.assertIs(default, False)
+        result = step_bgremove(ctx)
         self.assertEqual(result.status, StepResult.DONE)
         self.assertEqual(result.detail, "skipped")
 
@@ -1742,6 +2000,23 @@ def _imagegen_constant(name):
     raise AssertionError("no %s in imagegen.py" % name)
 
 
+def _bgremove_constant(name):
+    """A module-level constant from pixel_forge/bgremove.py, read
+    from the source with ast — no import, so the test pins the
+    literal the shell installer must match (task 41)."""
+    import ast
+
+    path = os.path.join(ROOT, "pixel_forge", "bgremove.py")
+    with open(path) as fh:
+        tree = ast.parse(fh.read())
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    return ast.literal_eval(node.value)
+    raise AssertionError("no %s in bgremove.py" % name)
+
+
 def _installer_constant(name):
     """A module-level constant from pixel_forge/installer.py, read
     from the source with ast — no import, so the test pins the
@@ -1865,6 +2140,46 @@ class InstallScriptPinTests(unittest.TestCase):
 
     def test_download_resumes(self):
         self.assertIn("curl -fSL -C -", _install_sh_text())
+
+    def test_bgremove_hash_matches_bgremove(self):
+        match = re.search(r'^BGREMOVE_MODEL_SHA256="([0-9a-f]{64})"$',
+                          _install_sh_text(), re.MULTILINE)
+        self.assertIsNotNone(
+            match, "install.sh has no BGREMOVE_MODEL_SHA256")
+        self.assertEqual(match.group(1),
+                         _bgremove_constant("MODEL_SHA256"))
+
+    def test_bgremove_size_matches_bgremove(self):
+        match = re.search(r"^BGREMOVE_MODEL_SIZE=([0-9]+)$",
+                          _install_sh_text(), re.MULTILINE)
+        self.assertIsNotNone(
+            match, "install.sh has no BGREMOVE_MODEL_SIZE")
+        self.assertEqual(int(match.group(1)),
+                         _bgremove_constant("MODEL_SIZE_BYTES"))
+
+    def test_bgremove_url_matches_bgremove(self):
+        # MODEL_URL is a concatenation in bgremove.py (the release
+        # URL plus MODEL_FILENAME), not a single literal, so the
+        # ast helper cannot read it — import the module (it is
+        # Qt-free) and compare against the real value.
+        import pixel_forge.bgremove as bgremove
+
+        text = _install_sh_text()
+        file_match = re.search(
+            r'^BGREMOVE_MODEL_FILE="([^"]+)"$', text, re.MULTILINE)
+        self.assertIsNotNone(
+            file_match, "install.sh has no BGREMOVE_MODEL_FILE")
+        url_match = re.search(
+            r'^BGREMOVE_MODEL_URL="([^"]+)"$', text, re.MULTILINE)
+        self.assertIsNotNone(
+            url_match, "install.sh has no BGREMOVE_MODEL_URL")
+        url = url_match.group(1).replace(
+            "${BGREMOVE_MODEL_FILE}", file_match.group(1))
+        self.assertEqual(url, bgremove.MODEL_URL)
+
+    def test_bgremove_download_resumes(self):
+        text = _install_sh_text()
+        self.assertIn('curl -fSL -C - "$BGREMOVE_MODEL_URL"', text)
 
     def _run_download_block(self, content, sha):
         """Run the shipped download + check lines with a stubbed
@@ -3478,7 +3793,7 @@ class StepOrderTests(unittest.TestCase):
         keys = [key for key, _title, _func in STEPS]
         self.assertEqual(keys, ["network", "system", "venv",
                                 "packages", "ffmpeg", "image-engine",
-                                "files"])
+                                "bgremove", "files"])
         self.assertLess(keys.index("venv"),
                         keys.index("image-engine"))
         self.assertLess(keys.index("packages"),
@@ -3498,6 +3813,7 @@ class InstallScriptOrderTests(unittest.TestCase):
                    "Installing packages (Pixel Forge, PySide6)",
                    "# ffmpeg (optional",
                    "# Image engine (stable-diffusion.cpp",
+                   "# Background removal (rembg + u2net model)",
                    "# Menu launcher"]
         positions = [text.index(marker) for marker in markers]
         self.assertEqual(positions, sorted(positions),
@@ -3982,6 +4298,14 @@ class DiskSpaceScriptTests(unittest.TestCase):
             match, "install.sh has no SD_ENGINE_BUILD_BYTES")
         self.assertEqual(int(match.group(1)),
                          _installer_constant("ENGINE_BUILD_BYTES"))
+
+    def test_bgremove_bytes_match_the_gui_installer(self):
+        match = re.search(r"^PF_BGREMOVE_BYTES=([0-9]+)$",
+                          _install_sh_text(), re.MULTILINE)
+        self.assertIsNotNone(
+            match, "install.sh has no PF_BGREMOVE_BYTES")
+        self.assertEqual(int(match.group(1)),
+                         _installer_constant("BGREMOVE_BYTES"))
 
 
 @unittest.skipUnless(shutil.which("bash"), "bash not available")

@@ -11,8 +11,10 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -214,6 +216,218 @@ class GuiTests(unittest.TestCase):
         self.win.grab().save(shot)
         self.assertTrue(os.path.exists(shot))
         self.assertGreater(os.path.getsize(shot), 1000)
+
+
+class BgRemoveGuiTests(unittest.TestCase):
+    """The Image tab's Remove background button (task 41).
+
+    The removal subprocess is stubbed at the bgremove module
+    boundary — no test runs rembg or downloads a model. The
+    real run is proven by the proof script and the real-model
+    test in test_bgremove.py.
+    """
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        cls.src = write_image(make_solid_image(32, 32, 200, 0, 0),
+                              os.path.join(cls.tmp, "red.png"))
+        cls.other = write_image(
+            make_solid_image(32, 32, 0, 0, 200),
+            os.path.join(cls.tmp, "blue.png"))
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = tempfile.mkdtemp()
+        self.win = MainWindow(library_dir=self.lib_dir)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.lib_dir, ignore_errors=True)
+
+    def _wait_bgremove(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while self.win.bgremove_worker is not None:
+            if time.monotonic() > deadline:
+                raise AssertionError(
+                    "bgremove worker did not finish")
+            self.app.processEvents()
+            time.sleep(0.05)
+        self.app.processEvents()
+
+    @staticmethod
+    def _half_transparent(src, dst, model=None, timeout_s=600,
+                          cancel_event=None):
+        """A stub removal: the right half goes transparent."""
+        from pixel_forge.pixelize import load_image
+        from pixel_forge.pngio import write_png
+
+        image = load_image(src)
+        data = image.data
+        width = image.width()
+        for y in range(image.height()):
+            for x in range(width // 2, width):
+                data[(y * width + x) * 4 + 3] = 0
+        write_png(image, dst)
+
+    def test_button_disabled_without_image(self):
+        self.assertFalse(self.win.bgremove_btn.isEnabled())
+        self.assertFalse(self.win.bgremove_cancel_btn.isEnabled())
+
+    def test_button_enabled_after_load(self):
+        self.assertTrue(self.win.load_image(self.src))
+        self.assertTrue(self.win.bgremove_btn.isEnabled())
+        self.assertFalse(self.win.bgremove_cancel_btn.isEnabled())
+
+    def test_missing_deps_warns(self):
+        import pixel_forge.bgremove as bgremove
+        from pixel_forge.pixelize import PixelForgeError
+
+        self.win.load_image(self.src)
+        with mock.patch.object(
+                bgremove, "require_child_ready",
+                side_effect=PixelForgeError(
+                    "background removal needs rembg")), \
+                mock.patch("pixel_forge.gui.warn_dialog") as warned:
+            self.win.bgremove_btn.click()
+            self.app.processEvents()
+        self.assertEqual(warned.call_count, 1)
+        self.assertEqual(warned.call_args[0][1],
+                         "Could not remove background")
+        self.assertIn("rembg", warned.call_args[0][2])
+        self.assertIsNone(self.win.bgremove_worker)
+
+    def test_missing_model_warns(self):
+        import pixel_forge.bgremove as bgremove
+        from pixel_forge.pixelize import PixelForgeError
+
+        self.win.load_image(self.src)
+        with mock.patch.object(
+                bgremove, "require_child_ready",
+                side_effect=PixelForgeError(
+                    "the model is not downloaded")), \
+                mock.patch("pixel_forge.gui.warn_dialog") as warned:
+            self.win.bgremove_btn.click()
+            self.app.processEvents()
+        self.assertEqual(warned.call_count, 1)
+        self.assertIn("not downloaded", warned.call_args[0][2])
+        self.assertIsNone(self.win.bgremove_worker)
+
+    def test_worker_replaces_source(self):
+        import pixel_forge.bgremove as bgremove
+
+        self.win.load_image(self.src)
+        original = self.win.source_image
+        with mock.patch.object(bgremove, "require_child_ready",
+                               lambda: None), \
+                mock.patch.object(bgremove,
+                                  "remove_background_file",
+                                  self._half_transparent):
+            self.win.bgremove_btn.click()
+            self.assertFalse(self.win.bgremove_btn.isEnabled())
+            self.assertTrue(
+                self.win.bgremove_cancel_btn.isEnabled())
+            self._wait_bgremove()
+        result = self.win.source_image
+        self.assertIsNot(result, original)
+        data = result.data
+        self.assertEqual(data[3], 255)
+        self.assertEqual(data[(32 - 1) * 4 + 3], 0)
+        self.assertTrue(self.win.bgremove_btn.isEnabled())
+        self.assertFalse(self.win.bgremove_cancel_btn.isEnabled())
+        self.assertEqual(self.win.statusBar().currentMessage(),
+                         "Background removed")
+
+    def test_worker_failure_warns_and_keeps_source(self):
+        import pixel_forge.bgremove as bgremove
+        from pixel_forge.pixelize import PixelForgeError
+
+        self.win.load_image(self.src)
+        original = self.win.source_image
+
+        def failing(src, dst, model=None, timeout_s=600,
+                    cancel_event=None):
+            raise PixelForgeError("the model file is damaged")
+
+        with mock.patch.object(bgremove, "require_child_ready",
+                               lambda: None), \
+                mock.patch.object(bgremove,
+                                  "remove_background_file",
+                                  failing), \
+                mock.patch("pixel_forge.gui.warn_dialog") as warned:
+            self.win.bgremove_btn.click()
+            self._wait_bgremove()
+        self.assertEqual(warned.call_count, 1)
+        self.assertIn("damaged", warned.call_args[0][2])
+        self.assertIs(self.win.source_image, original)
+        self.assertTrue(self.win.bgremove_btn.isEnabled())
+
+    def test_cancel_leaves_image_unchanged(self):
+        import pixel_forge.bgremove as bgremove
+
+        self.win.load_image(self.src)
+        original = self.win.source_image
+
+        def blocking(src, dst, model=None, timeout_s=600,
+                     cancel_event=None):
+            while cancel_event is None or not cancel_event.is_set():
+                time.sleep(0.05)
+            raise bgremove.RemovalCancelled()
+
+        with mock.patch.object(bgremove, "require_child_ready",
+                               lambda: None), \
+                mock.patch.object(bgremove,
+                                  "remove_background_file",
+                                  blocking):
+            self.win.bgremove_btn.click()
+            deadline = time.monotonic() + 10
+            while not self.win.bgremove_cancel_btn.isEnabled():
+                if time.monotonic() > deadline:
+                    raise AssertionError("worker did not start")
+                self.app.processEvents()
+                time.sleep(0.05)
+            self.win.bgremove_cancel_btn.click()
+            self._wait_bgremove()
+        self.assertIs(self.win.source_image, original)
+        self.assertEqual(self.win.statusBar().currentMessage(),
+                         "Cancelled — the image is unchanged")
+        self.assertTrue(self.win.bgremove_btn.isEnabled())
+
+    def test_stale_result_is_ignored(self):
+        import pixel_forge.bgremove as bgremove
+
+        self.win.load_image(self.src)
+        first = self.win.source_image
+        release = threading.Event()
+
+        def slow(src, dst, model=None, timeout_s=600,
+                 cancel_event=None):
+            release.wait(timeout=30)
+            BgRemoveGuiTests._half_transparent(src, dst)
+
+        with mock.patch.object(bgremove, "require_child_ready",
+                               lambda: None), \
+                mock.patch.object(bgremove,
+                                  "remove_background_file",
+                                  slow):
+            self.win.bgremove_btn.click()
+            self.app.processEvents()
+            # A new image lands mid-run (a drop lands even with
+            # the Import button disabled).
+            self.assertTrue(self.win.load_image(self.other))
+            second = self.win.source_image
+            self.assertIsNot(second, first)
+            release.set()
+            self._wait_bgremove()
+        # The old image's result must not overwrite the new one.
+        self.assertIs(self.win.source_image, second)
+        data = self.win.source_image.data
+        self.assertEqual(tuple(data[0:3]), (0, 0, 200))
+        self.assertIn("no longer loaded",
+                      self.win.statusBar().currentMessage())
 
 
 class VideoGuiTests(unittest.TestCase):

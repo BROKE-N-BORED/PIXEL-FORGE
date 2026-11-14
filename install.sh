@@ -4,12 +4,16 @@
 # pipefail):
 #     bash install.sh
 #     bash install.sh --with-image-engine
+#     bash install.sh --with-bgremove
 # Creates a venv under ~/.local/share/pixel-forge, installs Pixel
 # Forge + PySide6, and puts `pixel-forge` / `pixel-forge-gui` on
 # your PATH plus Pixel Forge in your app menu. --with-image-engine
 # also builds the image engine from source and downloads its model
 # (needs git, cmake, a C++ compiler; the prebuilt engine binary
 # needs glibc 2.43 and Mint ships 2.39, so there is no shortcut).
+# --with-bgremove also installs rembg + onnxruntime and downloads
+# the 176 MB u2net model, for the Image tab's Remove background
+# button.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,6 +48,28 @@ SD_MODEL_SIZE=2134675232
 # and an unreadable disk never refuses.
 PF_INSTALL_BYTES=2147483648
 SD_ENGINE_BUILD_BYTES=2147483648
+# Background removal (task 41): rembg's u2net model, the small
+# ~176 MB one. Pinned — these MUST match MODEL_FILENAME /
+# MODEL_URL / MODEL_SHA256 / MODEL_SIZE_BYTES in
+# pixel_forge/bgremove.py; tests/test_installer.py checks they
+# agree, so the two can never drift silently. Every model
+# download is SHA-256-checked against this hash, and a file
+# named BGREMOVE_MODEL_FILE at any other size is a partial
+# download, never the model.
+BGREMOVE_MODEL_FILE="u2net.onnx"
+BGREMOVE_MODEL_URL="https://github.com/danielgatis/rembg/releases/download/v0.0.0/${BGREMOVE_MODEL_FILE}"
+BGREMOVE_MODEL_SHA256="8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491"
+BGREMOVE_MODEL_SIZE=175997641
+# Disk-space allowance for the background-removal step, in
+# bytes — MUST match BGREMOVE_BYTES in pixel_forge/installer.py
+# (the installer tests check they agree). Covers the packages
+# (about 600 MB installed) plus the 176 MB model and pip's
+# download cache, with headroom.
+PF_BGREMOVE_BYTES=2147483648
+# rembg's own home (current layout): the model goes where rembg
+# looks first, so it never downloads anything at run time. The
+# old flat ~/.u2net layout is still read as a fallback.
+BGREMOVE_MODEL_HOME="$HOME/.rembg/models/u2net"
 # Shared with the Design Shell: one download serves both programs.
 SD_MODEL_HOME="$HOME/design-shell-models"
 # Where the built engine is installed (root-owned). Override with
@@ -56,9 +82,11 @@ SD_INSTALL_DIR="${PIXELFORGE_SD_INSTALL_DIR:-/opt/sd.cpp}"
 # Same path the GUI installer uses (SD_BUILD_SUBDIR).
 SD_BUILD_ROOT="$PREFIX/sd-build"
 WITH_IMAGE=0
+WITH_BGREMOVE=0
 for arg in "$@"; do
   case "$arg" in
     --with-image-engine) WITH_IMAGE=1 ;;
+    --with-bgremove) WITH_BGREMOVE=1 ;;
   esac
 done
 
@@ -376,6 +404,9 @@ if ! check_network; then
   if [ "$WITH_IMAGE" = "1" ]; then
     echo "With --with-image-engine it also downloads the image engine source (git) and the 2.1 GB model."
   fi
+  if [ "$WITH_BGREMOVE" = "1" ]; then
+    echo "With --with-bgremove it also installs rembg and downloads the 176 MB background-removal model."
+  fi
   echo "Check your connection and run the installer again."
   exit 1
 fi
@@ -636,6 +667,124 @@ if [ "$WITH_IMAGE" = "1" ]; then
     echo "Model downloaded to $SD_MODEL_HOME/$SD_MODEL_FILE"
   else
     echo "Image model already downloaded: $SD_MODEL_FOUND"
+  fi
+fi
+
+# Background removal (rembg + u2net model) — only for the Image
+# tab's Remove background button; everything else works without
+# it. Warn-never-refuse, like ffmpeg: a failed step just means
+# the button stays unavailable until the step is re-run — it
+# never stops the install. (The image-engine block above is
+# fatal on failure; that is the known pre-existing wart, not the
+# pattern — this block does not copy it.)
+find_bgremove_model() {
+  if [ -n "${PIXELFORGE_BGREMOVE_MODEL:-}" ] && [ -f "${PIXELFORGE_BGREMOVE_MODEL}" ]; then
+    echo "$PIXELFORGE_BGREMOVE_MODEL"; return
+  fi
+  for home_dir in "$BGREMOVE_MODEL_HOME" "$HOME/.u2net"; do
+    if [ -f "$home_dir/$BGREMOVE_MODEL_FILE" ]; then echo "$home_dir/$BGREMOVE_MODEL_FILE"; return; fi
+  done
+  echo ""
+}
+
+if [ "$WITH_BGREMOVE" = "1" ]; then
+  BGREMOVE_MODEL_FOUND="$(find_bgremove_model)"
+  # A partial model download must not pass as the finished
+  # model: a file named BGREMOVE_MODEL_FILE at the wrong size
+  # is an interrupted download, and the curl below resumes it
+  # (-C -) instead of the install calling it done.
+  if [ -n "$BGREMOVE_MODEL_FOUND" ] \
+      && [ "$(stat -c%s "$BGREMOVE_MODEL_FOUND" 2>/dev/null || echo 0)" != "$BGREMOVE_MODEL_SIZE" ]; then
+    echo "The background-removal model download was interrupted — resuming it instead of starting over…"
+    BGREMOVE_MODEL_FOUND=""
+  fi
+  BGREMOVE_DEPS_OK=0
+  if "$VENV/bin/python" -c "import rembg, onnxruntime" >/dev/null 2>&1; then
+    BGREMOVE_DEPS_OK=1
+    echo "Background-removal packages already installed."
+  fi
+  if [ "$BGREMOVE_DEPS_OK" = "1" ] && [ -n "$BGREMOVE_MODEL_FOUND" ]; then
+    echo "Background-removal model already downloaded: $BGREMOVE_MODEL_FOUND"
+  else
+    # Disk space (task 76): refuse this step now, before the
+    # pip install and the 176 MB download, when the disk cannot
+    # hold them. A resumed download only needs what is left.
+    _bg_have=0
+    if [ -f "$BGREMOVE_MODEL_HOME/$BGREMOVE_MODEL_FILE" ]; then
+      _bg_have="$(stat -c%s "$BGREMOVE_MODEL_HOME/$BGREMOVE_MODEL_FILE" 2>/dev/null || echo 0)"
+      case "$_bg_have" in ''|*[!0-9]*) _bg_have=0 ;; esac
+    fi
+    if ! check_disk_space "background removal" "$BGREMOVE_MODEL_HOME" "$((PF_BGREMOVE_BYTES - _bg_have))"; then
+      echo "WARNING: not enough disk space for background removal — the Remove background button will stay unavailable." >&2
+      record_warning "background removal skipped (not enough disk space)"
+    else
+      if [ "$BGREMOVE_DEPS_OK" = "0" ]; then
+        echo "Installing the background-removal packages (rembg, onnxruntime)…"
+        _pip_log="$(mktemp)"
+        if ! "$VENV/bin/pip" install --quiet rembg onnxruntime >"$_pip_log" 2>&1; then
+          echo "WARNING: the background-removal packages could not be installed. Last lines of the pip output:" >&2
+          tail -20 "$_pip_log" | sed 's/^/  /' >&2
+          record_warning "background-removal packages failed (see the log above) — the Remove background button will stay unavailable"
+        elif ! "$VENV/bin/python" -c "import rembg, onnxruntime" >/dev/null 2>&1; then
+          echo "WARNING: the background-removal packages installed but do not import — the Remove background button will stay unavailable." >&2
+          record_warning "background-removal packages do not import — the Remove background button will stay unavailable"
+        else
+          BGREMOVE_DEPS_OK=1
+          echo "Background-removal packages installed."
+        fi
+        rm -f "$_pip_log"
+      fi
+      if [ "$BGREMOVE_DEPS_OK" = "1" ] && [ -z "$BGREMOVE_MODEL_FOUND" ]; then
+        echo "Downloading the background-removal model ($BGREMOVE_MODEL_FILE, about 176 MB)..."
+        mkdir -p "$BGREMOVE_MODEL_HOME"
+        # The download runs in the background so the terminal
+        # can show its progress: curl prints its own meter only
+        # to a terminal, and piped it prints nothing — so the
+        # bytes on disk are polled every 2 seconds against the
+        # model size (task 76). CURRENT_PID is the Ctrl-C
+        # handler's handle on the download (it kills curl, and
+        # the partial file stays for curl -C - to resume on the
+        # next run).
+        _curl_rc=0
+        curl -fSL -C - "$BGREMOVE_MODEL_URL" -o "$BGREMOVE_MODEL_HOME/$BGREMOVE_MODEL_FILE" &
+        CURRENT_PID=$!
+        _last_pct=-1
+        while kill -0 "$CURRENT_PID" 2>/dev/null; do
+          if [ -f "$BGREMOVE_MODEL_HOME/$BGREMOVE_MODEL_FILE" ]; then
+            _have="$(stat -c%s "$BGREMOVE_MODEL_HOME/$BGREMOVE_MODEL_FILE" 2>/dev/null || echo 0)"
+            case "$_have" in ''|*[!0-9]*) _have=0 ;; esac
+            _pct=$(( _have * 100 / BGREMOVE_MODEL_SIZE ))
+            if [ "$_pct" -ge "$((_last_pct + 5))" ] || [ "$_pct" -ge 100 ]; then
+              echo "Model: ${_pct}%"
+              _last_pct="$_pct"
+            fi
+          fi
+          sleep 2
+        done
+        wait "$CURRENT_PID" || _curl_rc=$?
+        CURRENT_PID=""
+        if [ "${_curl_rc:-0}" -ne 0 ] || [ ! -f "$BGREMOVE_MODEL_HOME/$BGREMOVE_MODEL_FILE" ]; then
+          echo "WARNING: the background-removal model download failed (exit ${_curl_rc:-0})." >&2
+          echo "       The partial file stays in $BGREMOVE_MODEL_HOME/ — run ./install.sh --with-bgremove again to resume it." >&2
+          record_warning "background-removal model download failed — the Remove background button will stay unavailable"
+        else
+          # Prove the download is the pinned model before
+          # accepting it: a mismatched file is deleted, never
+          # kept.
+          _actual="$(sha256sum "$BGREMOVE_MODEL_HOME/$BGREMOVE_MODEL_FILE" | cut -d' ' -f1)"
+          if [ "$_actual" != "$BGREMOVE_MODEL_SHA256" ]; then
+            echo "WARNING: the downloaded background-removal model failed its SHA-256 check." >&2
+            echo "       expected: $BGREMOVE_MODEL_SHA256" >&2
+            echo "       got:      $_actual" >&2
+            echo "       The bad file was removed — run ./install.sh --with-bgremove again to retry." >&2
+            rm -f "$BGREMOVE_MODEL_HOME/$BGREMOVE_MODEL_FILE"
+            record_warning "background-removal model checksum failed — the Remove background button will stay unavailable"
+          else
+            echo "Model downloaded to $BGREMOVE_MODEL_HOME/$BGREMOVE_MODEL_FILE"
+          fi
+        fi
+      fi
+    fi
   fi
 fi
 

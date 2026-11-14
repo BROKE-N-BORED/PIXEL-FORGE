@@ -59,6 +59,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup,
                                QVBoxLayout, QWidget)
 
 from . import __version__
+from . import bgremove
 from .atlas import (DEFAULT_MAX_SIZE, DEFAULT_PADDING,
                     build_atlas_metadata, pack_atlas, write_atlas)
 from .codeinput import CODE_EXTENSIONS, parse_paths
@@ -86,6 +87,7 @@ from .palettes import NAMED_PALETTES, PALETTE_LABELS
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
                        count_opaque_colors, load_image, pixelize_image,
                        plural)
+from .pngio import write_png
 from .presets import (BUILTIN_PRESETS, SHEET_COLS_VALUES, PresetStore,
                       read_preset_export)
 from .qtimage import to_qimage
@@ -577,6 +579,56 @@ class VideoWorker(QThread):
             "path": settings.get("path"),
             "durations": durations,
         })
+
+
+class BgRemoveWorker(QThread):
+    """Removes the background from one image off the GUI thread.
+
+    A CPU removal takes seconds to about a minute, and the model
+    load alone is seconds — far too long to run on the GUI
+    thread. The worker writes the source to a temp PNG, runs
+    the removal in a subprocess (bgremove.remove_background_file),
+    and reads the result back. Only a buffer Image crosses the
+    thread boundary (QPixmap is not thread-safe) — a plain
+    Python object, like the Video worker's frames. Cancel kills
+    the subprocess at once; the source image is carried along
+    so the done slot can tell a stale result from the current
+    image (a new import mid-run must not be overwritten by the
+    old image's result).
+    """
+    done = Signal(dict)   # image, source
+    failed = Signal(str)  # readable error message
+    cancelled = Signal()
+
+    def __init__(self, image, parent=None):
+        super().__init__(parent)
+        self.image = image
+        self._cancel_event = threading.Event()
+
+    def cancel(self):
+        self._cancel_event.set()
+
+    def run(self):
+        tmp = tempfile.mkdtemp(prefix="pixel-forge-bgremove-")
+        src = os.path.join(tmp, "source.png")
+        dst = os.path.join(tmp, "result.png")
+        try:
+            write_png(self.image, src)
+            bgremove.remove_background_file(
+                src, dst, cancel_event=self._cancel_event)
+            result = load_image(dst)
+        except bgremove.RemovalCancelled:
+            self.cancelled.emit()
+            return
+        except PixelForgeError as exc:
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - window must stay up
+            self.failed.emit("background removal failed: %s" % exc)
+            return
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.done.emit({"image": result, "source": self.image})
 
 
 class SpritesheetDialog(QDialog):
@@ -2441,6 +2493,10 @@ class MainWindow(QMainWindow):
         self._duplicate_fingerprint = None
         self.source_image = None
         self.source_path = None
+        # Background removal (task 41): the worker running the
+        # removal, or None. Like the prompt worker, it is stopped
+        # in closeEvent.
+        self.bgremove_worker = None
         self.result_image = None
         self._updating_size = False
         # Pixel editor (task 33): the result's edit state, the
@@ -3148,6 +3204,34 @@ class MainWindow(QMainWindow):
         self.import_btn.clicked.connect(self._on_import)
         form.addWidget(self.import_btn)
 
+        # Background removal (task 41): runs on this machine
+        # through rembg's u2net model — the subject stays, the
+        # rest goes transparent, and the result replaces the
+        # loaded image. The button is available whenever an
+        # image is loaded; a missing model or missing packages
+        # says plainly what to install when it is pressed.
+        form.addWidget(self._section("Background"))
+        bgremove_row = QHBoxLayout()
+        self.bgremove_btn = QPushButton("Remove background")
+        self.bgremove_btn.setToolTip(
+            "Remove the background from the loaded image, on "
+            "this machine — the subject stays, the rest goes "
+            "transparent")
+        self.bgremove_btn.setEnabled(False)
+        self.bgremove_btn.clicked.connect(
+            self._on_remove_background)
+        bgremove_row.addWidget(self.bgremove_btn)
+        self.bgremove_cancel_btn = QPushButton("Cancel")
+        self.bgremove_cancel_btn.setToolTip(
+            "Stop the background removal — the image is left "
+            "exactly as it was")
+        self.bgremove_cancel_btn.setEnabled(False)
+        self.bgremove_cancel_btn.clicked.connect(
+            self._on_bgremove_cancel)
+        bgremove_row.addWidget(self.bgremove_cancel_btn)
+        bgremove_row.addStretch(1)
+        form.addLayout(bgremove_row)
+
         form.addWidget(self._section("Size"))
         self.size_combo = QComboBox()
         self.size_combo.setToolTip("Sprite size in pixels")
@@ -3445,6 +3529,105 @@ class MainWindow(QMainWindow):
         if path:
             self.load_image(path)
 
+    # -------------------------------------------- background removal
+
+    def _bgremove_running(self):
+        return (self.bgremove_worker is not None
+                and self.bgremove_worker.isRunning())
+
+    def _on_remove_background(self):
+        """Remove the background from the loaded image (task 41).
+
+        Missing packages or a missing model say plainly what to
+        install (the Prompt tab's missing-engine pattern), never
+        a traceback. The check runs against the interpreter the
+        removal runs under, not the GUI's own imports — with
+        the PIXELFORGE_BGREMOVE_PYTHON override set, the GUI
+        venv may not have rembg while the removal python does.
+        A run in progress ignores a second press. The result
+        replaces the loaded image, which throws the pixel edits
+        away — the same discard confirm as a new load guards
+        that.
+        """
+        if self._bgremove_running() or self.source_image is None:
+            return
+        if not self._confirm_discard_edits(
+                "Remove the background?",
+                "Remove the background and lose your edits?"):
+            return
+        try:
+            bgremove.require_child_ready()
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not remove background",
+                        str(exc))
+            return
+        self.bgremove_worker = BgRemoveWorker(self.source_image,
+                                              parent=self)
+        self.bgremove_worker.done.connect(self._on_bgremove_done)
+        self.bgremove_worker.failed.connect(
+            self._on_bgremove_failed)
+        self.bgremove_worker.cancelled.connect(
+            self._on_bgremove_cancelled)
+        self.bgremove_btn.setEnabled(False)
+        self.bgremove_cancel_btn.setEnabled(True)
+        self.import_btn.setEnabled(False)
+        self.statusBar().showMessage("Removing background…")
+        self.bgremove_worker.start()
+
+    def _on_bgremove_cancel(self):
+        if self.bgremove_worker is not None:
+            self.bgremove_worker.cancel()
+            self.bgremove_cancel_btn.setEnabled(False)
+            self.statusBar().showMessage(
+                "Cancelling — stopping the removal…")
+
+    def _bgremove_finished(self):
+        """Buttons back after a run ends, whatever the outcome."""
+        self.bgremove_worker = None
+        self.import_btn.setEnabled(True)
+        self.bgremove_cancel_btn.setEnabled(False)
+        if self.source_image is not None:
+            self.bgremove_btn.setEnabled(True)
+
+    def _on_bgremove_done(self, result):
+        # Only the current worker counts (the Prompt tab's
+        # sender guard), and only when the image it ran on is
+        # still the loaded one — a new import mid-run (a drop
+        # lands even with the button disabled) must not be
+        # overwritten by the old image's result.
+        if self.sender() is not self.bgremove_worker:
+            return
+        self._bgremove_finished()
+        if result["source"] is not self.source_image:
+            self.statusBar().showMessage(
+                "Background removed for an image that is no "
+                "longer loaded — the current image is unchanged")
+            return
+        self.source_image = result["image"]
+        self.update_preview()
+        self.statusBar().showMessage("Background removed")
+
+    def _on_bgremove_failed(self, message):
+        if self.sender() is not self.bgremove_worker:
+            return
+        self._bgremove_finished()
+        warn_dialog(self, "Could not remove background", message)
+        self.statusBar().showMessage("Background removal failed")
+
+    def _on_bgremove_cancelled(self):
+        if self.sender() is not self.bgremove_worker:
+            return
+        self._bgremove_finished()
+        self.statusBar().showMessage(
+            "Cancelled — the image is unchanged")
+
+    def _stop_bgremove_worker(self):
+        if self.bgremove_worker is not None:
+            if self.bgremove_worker.isRunning():
+                self.bgremove_worker.cancel()
+                self.bgremove_worker.wait(10000)
+            self.bgremove_worker = None
+
     def _classify_drop(self, path):
         """'video', 'code', 'image', or None for a dropped path."""
         suffix = Path(path).suffix.lower()
@@ -3697,8 +3880,10 @@ class MainWindow(QMainWindow):
             return
         # Extract works from the source image, not the result —
         # it is available whenever an image is loaded, even if
-        # the pixelize below fails.
+        # the pixelize below fails. Background removal too.
         self.extract_palette_btn.setEnabled(True)
+        if not self._bgremove_running():
+            self.bgremove_btn.setEnabled(True)
         try:
             result = pixelize_image(
                 self.source_image,
@@ -10277,6 +10462,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._save_geometry()
         self._stop_playback()
+        self._stop_bgremove_worker()
         self._stop_prompt_worker()
         self._stop_texture_worker()
         self._stop_video_worker()

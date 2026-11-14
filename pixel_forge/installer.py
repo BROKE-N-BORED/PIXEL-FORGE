@@ -65,11 +65,16 @@ CANCELLED_RC = 125
 # measured in the test venv 2026-11-13) plus pip's download cache
 # and headroom. ENGINE_BUILD_BYTES covers the engine checkout
 # plus its build objects (931 MB measured in the live-proof
-# build, 2026-11-12) with headroom. Both are allowances, not
-# exact sizes: the check refuses only when the disk cannot hold
-# the allowance, and an unreadable disk never refuses.
+# build, 2026-11-12) with headroom. BGREMOVE_BYTES covers the
+# background-removal packages (about 600 MB installed, measured
+# 2026-11-14 — rembg pulls numpy, onnxruntime, Pillow, and the
+# alpha-matting stack with it) plus the 176 MB model and pip's
+# download cache, with headroom. All are allowances, not exact
+# sizes: the check refuses only when the disk cannot hold the
+# allowance, and an unreadable disk never refuses.
 INSTALL_BYTES = 2147483648
 ENGINE_BUILD_BYTES = 2147483648
+BGREMOVE_BYTES = 2147483648
 
 # How many lines of a failed command's output the installer
 # re-prints at the failure (task 76): the tail is what diagnoses
@@ -275,6 +280,7 @@ class InstallContext:
         # not install it — the window passes the checkbox state in.
         self.install_ffmpeg = False
         self.install_image_engine = False
+        self.install_bgremove = False
         self.home = Path(os.path.expanduser("~"))
         # Per-step progress (task 76): a step sets progress_parser
         # (line -> fraction 0..1 or None) while a command that
@@ -1094,6 +1100,164 @@ def step_image_engine(ctx):
     return StepResult(StepResult.DONE)
 
 
+def step_bgremove(ctx):
+    """Background removal (rembg + the u2net model) — optional,
+    only needed for the Image tab's Remove background button.
+
+    Offered, not forced: the window has a checkbox for it, OFF
+    by default — the packages are about 600 MB installed and
+    the model download is about 176 MB. A failed step is a
+    WARNING, never a failure: Pixel Forge still works for
+    everything else without it, and the button says plainly
+    what to install.
+
+    Two parts: pip installs rembg + onnxruntime into the venv
+    (BGREMOVE_PACKAGES, the one list, from bgremove), and the
+    model downloads to rembg's own home (~/.rembg/models/u2net)
+    with curl -C - (resume) and a SHA-256 check against
+    MODEL_SHA256. A download that fails the check is deleted,
+    never kept; a curl failure leaves any partial file in
+    place, so the next run resumes it — and a partial file is
+    never mistaken for the finished model (is_partial_model
+    checks the pinned size). No admin is needed: pip installs
+    into the venv and the model goes to the user's home.
+    """
+    from .bgremove import (BGREMOVE_PACKAGES, MODEL_FILENAME,
+                           MODEL_SIZE_BYTES, check_model_file,
+                           find_model, is_partial_model,
+                           model_download_command)
+
+    ctx.log("Checking background removal (for the Image tab's "
+            "Remove background button)…")
+    venv_python = (ctx.home / ".local" / "share" / "pixel-forge"
+                   / "venv" / "bin" / "python")
+
+    def deps_installed():
+        if not venv_python.is_file():
+            return False
+        rc, _ = ctx.run_output(
+            [str(venv_python), "-c",
+             "import rembg, onnxruntime"])
+        return rc == 0
+
+    model = find_model()
+    if model is not None and is_partial_model(model):
+        # An interrupted download: the file is there but short.
+        # Treat it as missing so the download below resumes it
+        # (curl -C -) instead of the step calling it installed.
+        from .imagegen import format_bytes
+
+        try:
+            have = format_bytes(model.stat().st_size)
+        except OSError:
+            have = "some"
+        ctx.log("The model download was interrupted (%s of %s "
+                "downloaded) — resuming it instead of starting "
+                "over…" % (have, format_bytes(MODEL_SIZE_BYTES)))
+        model = None
+    deps = deps_installed()
+    if deps and model is not None:
+        ctx.log("OK: background removal is already installed")
+        return StepResult(StepResult.DONE, "already installed")
+    if not getattr(ctx, "install_bgremove", False):
+        ctx.log("Skipped: background removal not installed (your "
+                "choice) — the Remove background button will say "
+                "what to install until you tick the box and press "
+                "Install again, or run ./install.sh "
+                "--with-bgremove. Everything else still works.")
+        return StepResult(StepResult.DONE, "skipped")
+    if ctx.dryrun:
+        ctx.log("Would install the background-removal packages "
+                "and download the model (about 176 MB)…")
+        return StepResult(StepResult.DONE, "dry-run")
+    # Disk space first (task 76): the packages plus the model
+    # are close to a gigabyte, and a disk that fills up halfway
+    # through a pip install fails obscurely. A resumed download
+    # only needs what is left — the partial bytes already on
+    # disk count against the allowance.
+    model_home = (ctx.home / ".rembg" / "models" / "u2net")
+    model_path = model_home / MODEL_FILENAME
+    have = model_path.stat().st_size if model_path.is_file() else 0
+    if not check_disk_space(ctx, "background removal",
+                            model_home,
+                            max(0, BGREMOVE_BYTES - have)):
+        return StepResult(StepResult.WARN,
+                          "not enough disk space for background "
+                          "removal — the Remove background button "
+                          "will stay unavailable")
+    if not deps:
+        if not venv_python.is_file():
+            ctx.log("WARNING: no venv python at %s — the venv "
+                    "step must have failed, so the packages "
+                    "cannot be installed" % venv_python)
+            return StepResult(StepResult.WARN,
+                              "no venv to install into — "
+                              "background removal unavailable")
+        ctx.log("Installing the background-removal packages "
+                "(%s)…" % ", ".join(BGREMOVE_PACKAGES))
+        code = ctx.run([str(venv_python), "-m", "pip", "install",
+                        "--quiet"] + BGREMOVE_PACKAGES,
+                       timeout=900)
+        if code != 0 or not deps_installed():
+            ctx.log_tail("pip")
+            ctx.log("WARNING: the background-removal packages "
+                    "could not be installed — the Remove "
+                    "background button will stay unavailable "
+                    "until they install. Check your connection "
+                    "and press Install again.")
+            return StepResult(StepResult.WARN,
+                              "background-removal packages failed "
+                              "— background removal unavailable")
+        ctx.log("OK: background-removal packages installed")
+    if model is None:
+        ctx.log("Downloading the background-removal model "
+                "(%s, about 176 MB)…" % MODEL_FILENAME)
+        ctx.mkdir(model_home)
+        # The download's progress comes from the bytes on disk,
+        # polled while curl runs (curl prints its own meter only
+        # to a terminal — piped, it prints nothing). A resumed
+        # download starts the bar at its partial size, not 0.
+        ctx.progress_poll = lambda: download_fraction(
+            model_path, MODEL_SIZE_BYTES)
+        try:
+            code = ctx.run(model_download_command(model_path),
+                           timeout=1800)
+        finally:
+            ctx.progress_poll = None
+        if code != 0 or not model_path.is_file():
+            # A failed download leaves any partial file in place:
+            # the next run resumes it (-C -) instead of starting
+            # over. Only a completed-but-wrong file is deleted,
+            # below.
+            ctx.log("WARNING: the model download failed (exit %s) "
+                    "— the Remove background button will stay "
+                    "unavailable until the model is in "
+                    "~/.rembg/models/u2net/ or ~/.u2net/." % code)
+            return StepResult(StepResult.WARN,
+                              "model download failed — background "
+                              "removal unavailable")
+        # The download landed — prove it is the pinned model
+        # before accepting it. A mismatched file is deleted,
+        # never kept: a partial or corrupt download must not
+        # pass as the model.
+        try:
+            check_model_file(model_path)
+        except PixelForgeError as exc:
+            try:
+                model_path.unlink()
+            except OSError:
+                pass
+            ctx.log("WARNING: %s — the bad file was removed, so "
+                    "the Remove background button will stay "
+                    "unavailable until the model downloads "
+                    "cleanly." % exc)
+            return StepResult(StepResult.WARN,
+                              "model checksum failed — background "
+                              "removal unavailable")
+        ctx.log("OK: background-removal model downloaded")
+    return StepResult(StepResult.DONE)
+
+
 def step_venv(ctx):
     """Virtual environment under ~/.local/share/pixel-forge/venv."""
     ctx.log("Setting up the virtual environment…")
@@ -1310,6 +1474,7 @@ STEPS = [
     ("ffmpeg", "ffmpeg for video import (optional)", step_ffmpeg),
     ("image-engine", "Image engine for prompt import (optional)",
      step_image_engine),
+    ("bgremove", "Background removal (optional)", step_bgremove),
     ("files", "Shortcuts, icons and menu launcher", step_files),
 ]
 
@@ -1346,11 +1511,13 @@ class InstallWorker(QThread):
     finished = Signal(object)  # list of StepResult
 
     def __init__(self, dryrun=False, install_ffmpeg=False,
-                 install_image_engine=False, parent=None):
+                 install_image_engine=False, install_bgremove=False,
+                 parent=None):
         super().__init__(parent)
         self._dryrun = dryrun
         self._install_ffmpeg = install_ffmpeg
         self._install_image_engine = install_image_engine
+        self._install_bgremove = install_bgremove
         self._ctx = None
 
     def cancel(self):
@@ -1365,6 +1532,7 @@ class InstallWorker(QThread):
         ctx = InstallContext(self.log_line.emit, dryrun=self._dryrun)
         ctx.install_ffmpeg = self._install_ffmpeg
         ctx.install_image_engine = self._install_image_engine
+        ctx.install_bgremove = self._install_bgremove
         self._ctx = ctx
         results = []
         total = len(STEPS)
@@ -1579,6 +1747,17 @@ class InstallerWindow(QMainWindow):
             "still work and prompt import says what to install.")
         layout.addWidget(self.image_engine_check)
 
+        self.bgremove_check = QCheckBox(
+            "Install background removal (about 176 MB model "
+            "download plus packages — removes photo backgrounds "
+            "on this machine)")
+        self.bgremove_check.setChecked(False)
+        self.bgremove_check.setToolTip(
+            "Installs rembg and downloads the u2net model. "
+            "Without it, everything else still works and the "
+            "Remove background button says what to install.")
+        layout.addWidget(self.bgremove_check)
+
         self.steps_list = QListWidget()
         self.steps_list.setMaximumHeight(140)
         for _key, title_text, _func in STEPS:
@@ -1652,6 +1831,7 @@ class InstallerWindow(QMainWindow):
             dryrun=self._dryrun,
             install_ffmpeg=self.ffmpeg_check.isChecked(),
             install_image_engine=self.image_engine_check.isChecked(),
+            install_bgremove=self.bgremove_check.isChecked(),
             parent=self)
         self._worker.log_line.connect(self._log)
         self._worker.step_status.connect(self._on_step_status)

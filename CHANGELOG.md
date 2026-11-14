@@ -1,5 +1,25 @@
 # Pixel Forge changelog
 
+## 0.62 — 2026-11-14
+
+Local background removal (task 41) — the Image tab has a
+Remove background button that runs the loaded image through
+rembg's u2net model on this machine: the subject stays, the
+rest goes transparent, and the result replaces the loaded
+image. It runs in a background process with Cancel, so the
+window never freezes and the model's memory is freed when it
+finishes. The model is the small one (u2net.onnx, about
+176 MB), pinned by exact size and SHA-256; the packages
+(rembg + onnxruntime) and the model are optional — the
+installer offers them as a ticked-off checkbox (or
+install.sh --with-bgremove), and without them the button
+says plainly what to install. The button checks the packages
+under the interpreter the removal runs under, so a
+PIXELFORGE_BGREMOVE_PYTHON override pointing at another
+python with rembg installed works too. Proven on a real
+photo in the sandbox (a corgi: background gone, the whole
+dog kept) with a peak of about 800 MB of memory.
+
 ## 0.61 — 2026-11-14
 
 A 0-size library image reads as broken instead of crashing

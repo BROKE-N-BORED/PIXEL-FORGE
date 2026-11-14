@@ -39,6 +39,14 @@ a one-time job that takes a while):
 bash install.sh --with-image-engine
 ```
 
+To also install background removal for the Image tab's Remove
+background button (installs rembg + onnxruntime and downloads
+the 176 MB u2net model — about 800 MB on disk all told):
+
+```sh
+bash install.sh --with-bgremove
+```
+
 If the engine build or the model download is interrupted (a
 freeze, a lost connection, a closed window), just run the
 installer again — it resumes from where it stopped instead of
@@ -106,7 +114,15 @@ it keeps them and prints the way to remove them by hand.
 
 - **Image tab:** import an image (or drop one on the window), adjust
   the size, palette, and dithering, and press Export PNG. Conversion
-  is live — every change re-pixelizes at once. The pixel preview is
+  is live — every change re-pixelizes at once. **Remove background**
+  runs the loaded image through rembg's u2net model on this machine
+  (no network, CPU only): the subject stays, the rest goes
+  transparent, and the result replaces the loaded image. It runs in
+  the background with Cancel, so the window stays responsive, and it
+  asks first when the result carries edits. It needs the
+  background-removal packages and the 176 MB model — tick the box in
+  the installer, or run `bash install.sh --with-bgremove`; without
+  them the button says what to install. The pixel preview is
   also a canvas: pick a tool above it (Pencil, Eraser, Fill,
   Eyedropper, Line, Rectangle) and a color from the strip of swatches
   — one per color the sprite actually uses — and click or drag on
