@@ -745,15 +745,17 @@ class SpritesheetGuiTests(unittest.TestCase):
         self.assertEqual(self.win.sheet_fps_spin.value(), 12)
 
     def test_fps_controls_keep_own_values_on_new_import(self):
+        # Task 100: the long clip needs the 60 s wait its
+        # siblings use — the 30 s default timed out under load.
         self.win.load_video(self.long_clip)
-        self.assertTrue(self._wait_for_video())
+        self.assertTrue(self._wait_for_video(timeout=60))
         index = self.win.video_fps_combo.findData(4)
         self.win.video_fps_combo.setCurrentIndex(index)
         self.win.video_play_fps_spin.setValue(2)
         self.win.sheet_fps_spin.setValue(12)
-        self.assertTrue(self._wait_for_video())
+        self.assertTrue(self._wait_for_video(timeout=60))
         self.win.load_video(self.clip)
-        self.assertTrue(self._wait_for_video())
+        self.assertTrue(self._wait_for_video(timeout=60))
         self.assertEqual(self.win.video_fps_combo.currentData(), 4)
         self.assertEqual(self.win.video_play_fps_spin.value(), 2)
         self.assertEqual(self.win.sheet_fps_spin.value(), 12)
@@ -5054,6 +5056,33 @@ class VideoGuardrailsTests(unittest.TestCase):
         subprocess.run(["ffmpeg", "-y", "-v", "error",
                         "-i", cls.clip, "-vf", "fps=8,scale=64:48",
                         cls.gif], check=True, timeout=60)
+        # A GIF with DISTINCT per-frame delays (task 83) —
+        # built with the concat demuxer so each frame keeps
+        # its own delay: 0.1, 0.3, 0.2, 0.4 s, plus the
+        # repeated last frame the demuxer adds (5 frames).
+        # ffmpeg quantizes the delays when it writes the GIF,
+        # so the tests below allow 30 ms either way.
+        colors = ["red", "green", "blue", "yellow"]
+        lines = []
+        for index, delay in enumerate([0.1, 0.3, 0.2, 0.4]):
+            png = os.path.join(cls.tmp, "timed-%d.png" % index)
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                 "-i", "color=c=%s:s=32x32:d=0.1" % colors[index],
+                 "-frames:v", "1", png],
+                check=True, timeout=60)
+            lines.append("file '%s'" % png)
+            lines.append("duration %s" % delay)
+        lines.append("file '%s'" % os.path.join(
+            cls.tmp, "timed-3.png"))
+        list_path = os.path.join(cls.tmp, "timed.txt")
+        with open(list_path, "w") as handle:
+            handle.write("\n".join(lines) + "\n")
+        cls.timed_gif = os.path.join(cls.tmp, "timed.gif")
+        subprocess.run(["ffmpeg", "-y", "-v", "error",
+                        "-f", "concat", "-safe", "0",
+                        "-i", list_path, cls.timed_gif],
+                       check=True, timeout=60)
 
     def setUp(self):
         from pixel_forge.gui import MainWindow
@@ -5207,6 +5236,57 @@ class VideoGuardrailsTests(unittest.TestCase):
         self.assertIn(len(self.win.video_frames), (15, 16))
         self.assertEqual(self.win.video_strip.count(),
                          len(self.win.video_frames))
+
+    def test_gif_import_keeps_native_delays(self):
+        # Task 83: a GIF extracts at its own rate, frame for
+        # frame, and each frame keeps the delay from the file
+        # — not the Sheet fps default, and not a resample.
+        self.assertTrue(self.win.load_video(self.timed_gif))
+        self.assertTrue(self._wait_for_video())
+        self.assertEqual(len(self.win.video_frames), 5)
+        durations = self.win.video_durations
+        self.assertEqual(len(durations), 5)
+        for got, want in zip(durations, [100, 300, 200, 400, 40]):
+            self.assertAlmostEqual(got, want, delta=30)
+        self.assertNotEqual(set(durations), {125})
+
+    def test_gif_import_falls_back_when_probe_fails(self):
+        # Task 83: a probe that fails entirely still imports —
+        # every frame gets the Sheet fps default (125 ms).
+        from unittest import mock
+        from pixel_forge import gui as gui_mod
+        with mock.patch.object(gui_mod, "probe_frame_durations",
+                               return_value=None):
+            self.assertTrue(self.win.load_video(self.timed_gif))
+            self.assertTrue(self._wait_for_video())
+        self.assertEqual(len(self.win.video_frames), 5)
+        self.assertEqual(self.win.video_durations, [125] * 5)
+
+    def test_gif_import_falls_back_per_frame(self):
+        # Task 83: a frame with no readable delay keeps the
+        # default while its neighbours keep theirs.
+        from unittest import mock
+        from pixel_forge import gui as gui_mod
+        with mock.patch.object(
+                gui_mod, "probe_frame_durations",
+                return_value=[None, 300, None, None, None]):
+            self.assertTrue(self.win.load_video(self.timed_gif))
+            self.assertTrue(self._wait_for_video())
+        self.assertEqual(self.win.video_durations,
+                         [125, 300, 125, 125, 125])
+
+    def test_gif_import_falls_back_when_probe_miscounts(self):
+        # Task 83: a probe that returns the wrong number of
+        # durations cannot map onto the frames — every frame
+        # gets the default rather than a shifted timing.
+        from unittest import mock
+        from pixel_forge import gui as gui_mod
+        with mock.patch.object(gui_mod, "probe_frame_durations",
+                               return_value=[100, 200]):
+            self.assertTrue(self.win.load_video(self.timed_gif))
+            self.assertTrue(self._wait_for_video())
+        self.assertEqual(len(self.win.video_frames), 5)
+        self.assertEqual(self.win.video_durations, [125] * 5)
 
     def test_dropped_frame_is_dimmed(self):
         self.assertTrue(self.win.load_video(self.clip))

@@ -430,6 +430,89 @@ class VideoProbeTests(unittest.TestCase):
         frames = video_mod.extract_frames(gif, out, fps=8)
         self.assertIn(len(frames), (15, 16))
 
+    def _gif_with_delays(self, name, delays):
+        """A GIF whose frames have the given delays (seconds) —
+        built with the concat demuxer, so each frame keeps its
+        own delay instead of a uniform fps. The last frame is
+        repeated (the demuxer gives the last entry no
+        duration), so the file holds len(delays) + 1 frames.
+        Returns the GIF path."""
+        colors = ["red", "green", "blue", "yellow", "magenta",
+                  "cyan", "white", "black"]
+        lines = []
+        for index, delay in enumerate(delays):
+            png = os.path.join(self.tmp, "%s-%d.png" % (name, index))
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                 "-i", "color=c=%s:s=32x32:d=0.1" % colors[index],
+                 "-frames:v", "1", png],
+                check=True, timeout=60)
+            lines.append("file '%s'" % png)
+            lines.append("duration %s" % delay)
+        lines.append("file '%s'" % os.path.join(
+            self.tmp, "%s-%d.png" % (name, len(delays) - 1)))
+        list_path = os.path.join(self.tmp, "%s.txt" % name)
+        with open(list_path, "w") as handle:
+            handle.write("\n".join(lines) + "\n")
+        gif = os.path.join(self.tmp, "%s.gif" % name)
+        subprocess.run(["ffmpeg", "-y", "-v", "error",
+                        "-f", "concat", "-safe", "0",
+                        "-i", list_path, gif],
+                       check=True, timeout=60)
+        return gif
+
+    def test_probe_frame_durations_reads_gif_delays(self):
+        # Task 83: GIF delays live in duration_time, not
+        # pkt_duration_time (which is empty on GIF frames).
+        # ffmpeg quantizes the delays when it writes the GIF
+        # (0.1 lands as 0.12, 0.3 as 0.28), so the assertions
+        # allow 30 ms either way — the point is the delays are
+        # distinct and per frame, not one uniform value.
+        gif = self._gif_with_delays("delays", [0.1, 0.3, 0.2, 0.4])
+        durations = video_mod.probe_frame_durations(gif)
+        self.assertIsNotNone(durations)
+        self.assertEqual(len(durations), 5)
+        for got, want in zip(durations, [100, 300, 200, 400, 40]):
+            self.assertAlmostEqual(got, want, delta=30)
+        self.assertGreater(len(set(durations)), 1)
+
+    def test_probe_frame_durations_native_count_matches(self):
+        # The probe lists exactly the frames a native-rate
+        # extraction yields — the durations parallel the frames
+        # one to one, which is what makes them usable.
+        gif = self._gif_with_delays("count", [0.1, 0.3, 0.2, 0.4])
+        durations = video_mod.probe_frame_durations(gif)
+        out = os.path.join(self.tmp, "count-frames")
+        frames = video_mod.extract_frames(gif, out, fps=None)
+        self.assertEqual(len(durations), len(frames))
+
+    def test_probe_frame_durations_video_frames_too(self):
+        # The probe is generic — video frames carry
+        # duration_time as well. The GUI only calls it for
+        # GIFs, but the function itself makes no such choice.
+        durations = video_mod.probe_frame_durations(self.clip)
+        self.assertIsNotNone(durations)
+        self.assertEqual(len(durations), 48)
+        for duration in durations:
+            self.assertGreaterEqual(duration, 38)
+            self.assertLessEqual(duration, 45)
+
+    def test_probe_frame_durations_missing_file_is_none(self):
+        self.assertIsNone(video_mod.probe_frame_durations(
+            os.path.join(self.tmp, "nope.gif")))
+
+    def test_probe_frame_durations_garbage_is_none(self):
+        junk = os.path.join(self.tmp, "junk.gif")
+        with open(junk, "wb") as handle:
+            handle.write(b"not a gif at all")
+        self.assertIsNone(video_mod.probe_frame_durations(junk))
+
+    def test_probe_frame_durations_no_ffprobe_is_none(self):
+        with mock.patch.object(video_mod, "find_ffprobe",
+                               return_value=None):
+            self.assertIsNone(video_mod.probe_frame_durations(
+                self.clip))
+
 
 class OnionBlendTests(unittest.TestCase):
     """Task 34: onion skinning is a pure blend — no ffmpeg, no Qt."""

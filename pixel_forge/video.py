@@ -13,6 +13,7 @@ Raw frames live on disk (a temp dir for the GUI, a caller-chosen dir
 for the low-level calls) so RAM stays light even for long videos.
 """
 
+import json
 import math
 import os
 import re
@@ -116,6 +117,56 @@ def probe_duration(video_path):
     if duration <= 0:
         return None
     return duration
+
+
+def probe_frame_durations(video_path):
+    """Per-frame durations of a video in milliseconds, one per
+    frame in order — or None when they cannot be probed (no
+    ffprobe, an unreadable file, no frames). Never raises.
+
+    Reads ffprobe's duration_time per frame: for GIFs the
+    per-frame delay lives there, NOT in pkt_duration_time
+    (task 83 — pkt_duration_time is empty on GIF frames). A
+    frame with no readable duration keeps a None in its
+    place, so the caller can fall back per frame; the list
+    still parallels the frames. Durations round to whole
+    milliseconds — GIF delays are hundredths of a second, so
+    10 ms is the finest step the format has. Meant for short
+    sources (GIFs); a long video has tens of thousands of
+    frames to list.
+    """
+    ffprobe = find_ffprobe()
+    if ffprobe is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [ffprobe, "-v", "error", "-show_frames",
+             "-show_entries", "frame=duration_time",
+             "-of", "json", str(video_path)],
+            capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout or "")
+    except ValueError:
+        return None
+    frames = data.get("frames")
+    if not frames:
+        return None
+    durations = []
+    for frame in frames:
+        try:
+            seconds = float(frame.get("duration_time"))
+        except (TypeError, ValueError):
+            durations.append(None)
+            continue
+        if seconds <= 0:
+            durations.append(None)
+            continue
+        durations.append(int(round(seconds * 1000)))
+    return durations
 
 
 def estimate_frame_count(duration, fps, every=1, start=None, end=None):

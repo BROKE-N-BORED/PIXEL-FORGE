@@ -341,8 +341,10 @@ class LandingTests(unittest.TestCase):
 class GifImportTests(unittest.TestCase):
     """Task 40 check: a GIF imported through the Video tab lands
     its frames in the strip, playable and exportable — the v0.36
-    path, verified end to end here. Durations follow the Sheet
-    fps default, the same as every video import."""
+    path, verified end to end here. Durations come from the file
+    (task 83): this uniform 8 fps GIF's delays land within 10 ms
+    of the 125 ms default, because 125 ms is not representable
+    in GIF hundredths — ffmpeg alternates 120/130 in the file."""
 
     @classmethod
     def setUpClass(cls):
@@ -388,9 +390,17 @@ class GifImportTests(unittest.TestCase):
                          len(self.win.video_frames))
         self.assertEqual(len(self.win.video_durations),
                          len(self.win.video_frames))
-        self.assertTrue(all(
-            duration == self.win._video_default_duration()
-            for duration in self.win.video_durations))
+        # Task 83: the delays come from the file, not the Sheet
+        # fps default — for this uniform 8 fps GIF each one
+        # lands within 10 ms of the 125 ms default (GIF
+        # hundredths cannot hold 125 exactly) and the mean is
+        # the default.
+        default = self.win._video_default_duration()
+        durations = self.win.video_durations
+        self.assertTrue(all(abs(d - default) <= 10
+                            for d in durations))
+        self.assertAlmostEqual(sum(durations) / len(durations),
+                               default, delta=5)
         self.assertTrue(self.win.sheet_export_btn.isEnabled())
         self.assertTrue(self.win.video_gif_btn.isEnabled())
 

@@ -106,7 +106,8 @@ from .undo import UndoStack
 from .video import (DEFAULT_FPS, FPS_PRESETS, FRAME_COUNT_CONFIRM,
                     VIDEO_EXTENSIONS, estimate_frame_count,
                     extract_frames, onion_blend, parse_time,
-                    probe_duration, require_ffmpeg, write_gif)
+                    probe_duration, probe_frame_durations,
+                    require_ffmpeg, write_gif)
 
 SIZE_PRESETS = [16, 32, 48, 64, 128]
 MAX_DISPLAY = 1600  # longest side of a preview pixmap, in pixels
@@ -473,7 +474,8 @@ class VideoWorker(QThread):
     (owns a fresh temp dir, handed over in the result), and
     "repixelize" pixelizes the raw frames it was handed.
     """
-    done = Signal(dict)   # mode, frames, raw, raw_dir, fps, fresh, path
+    done = Signal(dict)   # mode, frames, raw, raw_dir, fps, fresh,
+                          # path, durations
     failed = Signal(str)  # readable error message
 
     def __init__(self, settings, parent=None):
@@ -483,6 +485,7 @@ class VideoWorker(QThread):
     def run(self):
         settings = self.settings
         tmp = None
+        durations = None
         try:
             if settings["mode"] == "reload":
                 tmp = tempfile.mkdtemp(prefix="pixel-forge-frames-")
@@ -490,6 +493,14 @@ class VideoWorker(QThread):
                     settings["path"], tmp,
                     fps=settings["fps"], every=settings["every"],
                     start=settings["start"], end=settings["end"])
+                # Task 83: a GIF's own per-frame delays, probed
+                # from the file — the GUI applies them when the
+                # count matches the extracted frames, and falls
+                # back to the Sheet fps default otherwise. A
+                # failed probe is None, never an error.
+                if Path(settings["path"]).suffix.lower() == ".gif":
+                    durations = probe_frame_durations(
+                        settings["path"])
             else:
                 raw = settings["raw_frames"]
             frames = [pixelize_image(
@@ -519,6 +530,7 @@ class VideoWorker(QThread):
             "fps": settings["fps"],
             "fresh": settings.get("fresh", False),
             "path": settings.get("path"),
+            "durations": durations,
         })
 
 
@@ -4919,11 +4931,20 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Extraction cancelled")
                 return False
         self._stop_playback()
+        # Task 83: a GIF's frames ARE the animation — resampling
+        # them to the extraction fps destroys the GIF's own
+        # timing, and the per-frame delays only map onto the
+        # frames when extraction takes every frame at the source
+        # rate. GIFs extract natively (fps None); the worker
+        # probes the delays from the file. Videos are untouched.
+        fps = self.video_fps_combo.currentData()
+        if Path(self.video_path).suffix.lower() == ".gif":
+            fps = None
         settings = self._video_pixelize_settings()
         settings.update({
             "mode": "reload",
             "path": self.video_path,
-            "fps": self.video_fps_combo.currentData(),
+            "fps": fps,
             "every": self.video_every_spin.value(),
             "start": self.video_start_edit.text().strip() or None,
             "end": self.video_end_edit.text().strip() or None,
@@ -5016,9 +5037,23 @@ class MainWindow(QMainWindow):
             # Durations + tags (task 34): a new extraction is new
             # frames entirely, so every frame starts at the Sheet
             # fps default and the tags go — they named ranges over
-            # frames that no longer exist.
-            self.video_durations = [self._video_default_duration()] \
-                * len(result["frames"])
+            # frames that no longer exist. A GIF import carries
+            # its own per-frame delays instead (task 83): the
+            # worker probed them from the file, and they land
+            # here when there is exactly one per extracted
+            # frame — a frame with no readable delay keeps the
+            # default, and a probe that failed or miscounted
+            # falls back to the default for every frame.
+            durations = result.get("durations")
+            default = self._video_default_duration()
+            if (isinstance(durations, list)
+                    and len(durations) == len(result["frames"])):
+                self.video_durations = [
+                    d if d is not None else default
+                    for d in durations]
+            else:
+                self.video_durations = [default] \
+                    * len(result["frames"])
             self.video_tags = []
             self.video_play_tag = None
             self._refresh_video_tag_list()

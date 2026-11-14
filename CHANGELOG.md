@@ -1,5 +1,18 @@
 # Pixel Forge changelog
 
+## 0.55 — 2026-11-14
+
+Native GIF frame delays preserved on import (task 83) — a GIF
+imported through the Video tab used to be resampled to the
+extraction fps and every frame got the Sheet fps default, so
+the GIF's own timing was lost. A GIF now extracts at its own
+rate, frame for frame, and each frame keeps the delay from the
+file (read with ffprobe, one duration per frame). A GIF or a
+frame whose delay cannot be read still gets the Sheet fps
+default — the import never fails over timing. Video imports
+are unchanged. Also: the fps-controls test waits 60 seconds
+for its video like its siblings (task 100, test-only).
+
 ## 0.54 — 2026-11-14
 
 Keeper/batch mismatch fixed (task 80) — picking a candidate
