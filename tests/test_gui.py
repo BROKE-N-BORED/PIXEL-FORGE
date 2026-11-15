@@ -24,8 +24,8 @@ try:
                          write_image, write_stub_engine)
     from PySide6.QtCore import QRect, QSettings, Qt
     from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, \
-        QFileDialog, QInputDialog, QLabel, QMessageBox, QPushButton, \
-        QTabWidget, QWidget
+        QDialog, QFileDialog, QInputDialog, QLabel, QMessageBox, \
+        QPushButton, QTabWidget, QWidget
 except ImportError as exc:
     # Task 63: every test here needs Qt, so skip the module when
     # PySide6 is what is missing — but a genuinely broken import
@@ -7736,6 +7736,294 @@ class PixelEditorTests(unittest.TestCase):
         back = core_load(os.path.join(self.lib_dir, entry["file"]))
         self.assertEqual(back.pixel(3, 3), self.blue)
         self.assertEqual(back.pixel(3, 4), self.red)
+
+
+class StampTextGuiTests(unittest.TestCase):
+    """Task 47: the Text tool and the stamp dialog — click to
+    place, type the text, stamp onto the active layer, one
+    undo step. The test image is the same two-color 32 x 32
+    as the editor tests, so the stamp's pixels read against
+    known colors."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        from pixel_forge.image import Image, argb
+        source = Image(32, 32)
+        for y in range(32):
+            for x in range(32):
+                source.setPixel(x, y, argb(255, 0, 0) if x < 16
+                                else argb(0, 0, 255))
+        cls.two_color = write_image(
+            source, os.path.join(cls.tmp, "two.png"))
+        from pixel_forge.image import argb as _argb
+        cls.red = _argb(255, 0, 0)
+        cls.blue = _argb(0, 0, 255)
+        cls.black = _argb(0, 0, 0)
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self.win = MainWindow(library_dir=self.lib_dir,
+                              restore=False)
+        self.win.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _load_two_color(self):
+        self.assertTrue(self.win.load_image(self.two_color))
+        self.app.processEvents()
+        self.assertEqual(self.win.result_image.width(), 32)
+
+    def _dialog(self, x=0, y=0, color=None):
+        from pixel_forge.gui import StampTextDialog
+        if color is None:
+            color = self.black
+        dialog = StampTextDialog(self.win, self.win.result_image,
+                                 x, y, color)
+        self.addCleanup(dialog.deleteLater)
+        return dialog
+
+    def test_text_tool_in_row_disabled_before_load(self):
+        button = self.win.editor_tool_buttons["text"]
+        self.assertEqual(button.text(), "Text")
+        self.assertTrue(button.toolTip().strip())
+        self.assertNotIn("—", button.toolTip())
+        self.assertFalse(button.isEnabled())
+        self._load_two_color()
+        self.assertTrue(button.isEnabled())
+        self.assertFalse(button.isChecked())
+
+    def test_text_tool_hint_names_the_click(self):
+        self._load_two_color()
+        self.win.editor_tool_buttons["text"].click()
+        self.app.processEvents()
+        self.assertEqual(self.win._editor_tool, "text")
+        self.assertEqual(self.win.statusBar().currentMessage(),
+                         "Text: click where the text goes")
+
+    def test_click_opens_dialog_at_the_click_and_stamps(self):
+        from unittest import mock
+
+        from PySide6.QtTest import QTest
+        from pixel_forge.gui import QDialog
+        from pixel_forge.textstamp import render_text
+
+        self._load_two_color()
+        before = self.win.result_image.copy()
+        calls = []
+
+        class StubDialog:
+            def __init__(self, parent, image, x, y, color):
+                calls.append((x, y, color))
+                self.text_value = "HI"
+                self.mask = render_text("HI")
+                self.x = x
+                self.y = y
+                self.color = color
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+        self.win.editor_tool_buttons["text"].click()
+        self.app.processEvents()
+        with mock.patch("pixel_forge.gui.StampTextDialog",
+                        StubDialog):
+            QTest.mouseClick(
+                self.win.after_label, Qt.MouseButton.LeftButton,
+                pos=self.win.after_label.pos_for_pixel(5, 6))
+            self.app.processEvents()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], 5)
+        self.assertEqual(calls[0][1], 6)
+        # H's top-left ink lands at the click, in black (no
+        # color was picked, so the dialog starts black).
+        self.assertEqual(self.win.result_image.pixel(5, 6),
+                         self.black)
+        self.assertEqual(len(self.win._undo_stack), 1)
+        self.assertIn("Stamped 'HI' at 5, 6",
+                      self.win.statusBar().currentMessage())
+        self.win._on_undo()
+        self.assertEqual(self.win.result_image, before)
+
+    def test_cancelled_dialog_stamps_nothing(self):
+        from unittest import mock
+
+        from PySide6.QtTest import QTest
+        from pixel_forge.gui import QDialog
+
+        self._load_two_color()
+        before = self.win.result_image.copy()
+
+        class StubDialog:
+            def __init__(self, *args):
+                pass
+
+            def exec(self):
+                return QDialog.DialogCode.Rejected
+
+        self.win.editor_tool_buttons["text"].click()
+        self.app.processEvents()
+        with mock.patch("pixel_forge.gui.StampTextDialog",
+                        StubDialog):
+            QTest.mouseClick(
+                self.win.after_label, Qt.MouseButton.LeftButton,
+                pos=self.win.after_label.pos_for_pixel(5, 6))
+            self.app.processEvents()
+        self.assertEqual(self.win.result_image, before)
+        self.assertEqual(len(self.win._undo_stack), 0)
+
+    def test_dialog_stamp_disabled_until_text_typed(self):
+        self._load_two_color()
+        dialog = self._dialog()
+        self.assertFalse(dialog.stamp_btn.isEnabled())
+        dialog.text_edit.setText("HI")
+        self.assertTrue(dialog.stamp_btn.isEnabled())
+        dialog.text_edit.setText("")
+        self.assertFalse(dialog.stamp_btn.isEnabled())
+
+    def test_dialog_accept_sets_fields_and_mask(self):
+        from pixel_forge.textstamp import render_text
+
+        self._load_two_color()
+        dialog = self._dialog(x=2, y=3)
+        dialog.text_edit.setText("HI")
+        self.assertEqual(dialog.x_spin.value(), 2)
+        self.assertEqual(dialog.y_spin.value(), 3)
+        dialog.stamp_btn.click()
+        self.assertEqual(dialog.result(),
+                         QDialog.DialogCode.Accepted)
+        self.assertEqual(dialog.text_value, "HI")
+        self.assertIsNone(dialog.font_family)
+        self.assertEqual(dialog.size, 1)
+        self.assertEqual((dialog.x, dialog.y), (2, 3))
+        self.assertEqual(dialog.color, self.black)
+        self.assertEqual(dialog.mask, render_text("HI"))
+
+    def test_dialog_info_names_the_stamp_size(self):
+        self._load_two_color()
+        dialog = self._dialog()
+        dialog.text_edit.setText("HI")
+        self.assertIn("Stamp is 11 x 7 pixels.",
+                      dialog.info_label.text())
+        self.assertIsNotNone(dialog.preview_label.pixmap())
+        self.assertFalse(dialog.preview_label.pixmap().isNull())
+
+    def test_dialog_outside_stamp_stays_open(self):
+        self._load_two_color()
+        dialog = self._dialog()
+        dialog.text_edit.setText("I")
+        dialog.x_spin.setValue(31)
+        dialog.y_spin.setValue(31)
+        self.assertIn("sits outside the sprite",
+                      dialog.info_label.text())
+        dialog.stamp_btn.click()
+        self.assertNotEqual(dialog.result(),
+                            QDialog.DialogCode.Accepted)
+
+    def test_dialog_clipped_stamp_says_so(self):
+        self._load_two_color()
+        dialog = self._dialog()
+        dialog.text_edit.setText("HI")
+        dialog.x_spin.setValue(28)
+        self.assertIn("cut off", dialog.info_label.text())
+        dialog.stamp_btn.click()
+        self.assertEqual(dialog.result(),
+                         QDialog.DialogCode.Accepted)
+
+    def test_dialog_names_unsupported_characters(self):
+        self._load_two_color()
+        dialog = self._dialog()
+        dialog.text_edit.setText("café")
+        self.assertIn("cannot draw: é", dialog.info_label.text())
+
+    def test_dialog_scale_changes_the_stamp(self):
+        self._load_two_color()
+        dialog = self._dialog()
+        dialog.text_edit.setText("HI")
+        dialog.size_spin.setValue(2)
+        self.assertIn("Stamp is 22 x 14 pixels.",
+                      dialog.info_label.text())
+        self.assertEqual((dialog.mask.width(),
+                          dialog.mask.height()), (22, 14))
+
+    def test_dialog_system_font_switches_size_control(self):
+        from PySide6.QtGui import QFontDatabase
+
+        families = QFontDatabase.families()
+        if not families:
+            self.skipTest("no system fonts installed")
+        self._load_two_color()
+        dialog = self._dialog()
+        family = families[0]
+        index = dialog.font_combo.findData(family)
+        self.assertGreaterEqual(index, 0)
+        dialog.font_combo.setCurrentIndex(index)
+        self.assertEqual(dialog.size_label.text(), "Size")
+        self.assertEqual(dialog.size_spin.minimum(), 6)
+        self.assertEqual(dialog.size_spin.maximum(), 64)
+        dialog.text_edit.setText("Hi")
+        self.assertEqual(dialog.font_family, family)
+        self.assertGreater(dialog.mask.width(), 0)
+        self.assertGreater(dialog.mask.height(), 0)
+        # Back to the pixel font restores the scale control.
+        dialog.font_combo.setCurrentIndex(0)
+        self.assertEqual(dialog.size_label.text(), "Scale")
+        self.assertEqual(dialog.size_spin.minimum(), 1)
+        self.assertEqual(dialog.size_spin.maximum(), 4)
+
+    def test_dialog_controls_have_tooltips(self):
+        from PySide6.QtWidgets import (QAbstractSpinBox, QComboBox,
+                                       QLineEdit, QPushButton)
+
+        self._load_two_color()
+        dialog = self._dialog()
+        missing = []
+        for cls in (QPushButton, QComboBox, QAbstractSpinBox,
+                    QLineEdit):
+            for widget in dialog.findChildren(cls):
+                if isinstance(widget, QLineEdit) and isinstance(
+                        widget.parent(), QAbstractSpinBox):
+                    continue
+                if not widget.toolTip().strip():
+                    missing.append(widget.__class__.__name__)
+        self.assertEqual(missing, [])
+
+    def test_dialog_visible_strings_have_no_em_dash_or_s(self):
+        from PySide6.QtWidgets import (QComboBox, QLabel, QLineEdit,
+                                       QPushButton)
+
+        self._load_two_color()
+        dialog = self._dialog()
+        dialog.text_edit.setText("HI")
+        strings = [dialog.windowTitle()]
+        for cls in (QPushButton, QLabel, QLineEdit, QComboBox):
+            for widget in dialog.findChildren(cls):
+                strings.append(widget.toolTip())
+                if isinstance(widget, QPushButton):
+                    strings.append(widget.text())
+                if isinstance(widget, QLabel):
+                    strings.append(widget.text())
+                if isinstance(widget, QLineEdit):
+                    strings.append(widget.placeholderText())
+        for text in strings:
+            self.assertNotIn("—", text, text)
+            self.assertNotIn("(s)", text, text)
+
+    def test_dialog_starts_in_the_picked_color(self):
+        self._load_two_color()
+        swatches = list(
+            self.win._editor_swatch_by_color.values())
+        swatches[0].click()
+        self.app.processEvents()
+        dialog = self._dialog(color=self.win._editor_color)
+        self.assertEqual(dialog.color, self.win._editor_color)
 
 
 class AnimationTimelineTests(unittest.TestCase):

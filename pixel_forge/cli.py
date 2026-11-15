@@ -72,6 +72,7 @@ from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
                        load_image, pixelize_file, plural)
 from .presets import PresetStore
 from .skins import extract_skin, reassemble_skin_file
+from .textstamp import parse_hex_color, stamp_text
 from .spritesheet import (find_sibling_metadata, frames_from_grid,
                           load_frame_dir, load_metadata,
                           split_with_metadata, write_sheet)
@@ -486,6 +487,37 @@ def build_parser():
                           "<kind>-<seed>.png in the current "
                           "folder)")
     _add_output_args(generate)
+
+    stamp_text_parser = sub.add_parser(
+        "stamp-text", help="stamp one line of text onto an image "
+        "in the built-in pixel font (a name, a number, a sign)")
+    stamp_text_parser.add_argument(
+        "input", help="image to stamp the text onto (PNG, JPG, "
+        "BMP, WebP, GIF, and more)")
+    stamp_text_parser.add_argument(
+        "text", help="the line of text to stamp (one line: "
+        "line breaks cannot be stamped)")
+    stamp_text_parser.add_argument(
+        "--x", type=int, default=0,
+        help="how far from the left edge the text starts, in "
+        "pixels (default: 0)")
+    stamp_text_parser.add_argument(
+        "--y", type=int, default=0,
+        help="how far from the top edge the text starts, in "
+        "pixels (default: 0)")
+    stamp_text_parser.add_argument(
+        "--color", default="#000000",
+        help="the text color as a hex color, #rrggbb "
+        "(default: #000000)")
+    stamp_text_parser.add_argument(
+        "--scale", type=int, default=1,
+        help="how many image pixels each font pixel becomes, "
+        "1-4 (default: 1)")
+    stamp_text_parser.add_argument(
+        "--out", default=None,
+        help="output PNG path (default: "
+        "<input-stem>-stamped.png next to the input)")
+    _add_output_args(stamp_text_parser)
 
     library = sub.add_parser(
         "library", help="manage the saved sprite library "
@@ -1098,6 +1130,37 @@ def cmd_normal_map(args):
     return 0
 
 
+def cmd_stamp_text(args):
+    from .image import argb
+    src = Path(args.input)
+    if src.is_dir():
+        raise PixelForgeError(
+            "stamp-text takes one image file, not a folder: %s"
+            % args.input)
+    if not src.is_file():
+        raise PixelForgeError("not found: %s" % args.input)
+    color = parse_hex_color(args.color)
+    if color is None:
+        raise PixelForgeError(
+            "not a hex color: %s (use #rrggbb, like #ff8000)"
+            % args.color)
+    image = load_image(src)
+    painted = stamp_text(image, args.text, args.x, args.y,
+                         argb(*color), scale=args.scale)
+    out = args.out
+    if out is None:
+        out = str(src.with_name(src.stem + "-stamped.png"))
+    if not image.save(str(out), "PNG"):
+        raise PixelForgeError("could not write: %s" % out)
+    _emit_json(args, {"output": str(out),
+                      "width": image.width(),
+                      "height": image.height(),
+                      "painted": painted})
+    _info(args, "%s: stamped %r at %d, %d (%d pixels)"
+          % (out, args.text, args.x, args.y, painted))
+    return 0
+
+
 def cmd_generate(args):
     result = generate_procedural(args.kind, args.seed,
                                  size=args.size,
@@ -1663,6 +1726,8 @@ def main(argv=None):
             return cmd_normal_map(args)
         if args.command == "generate":
             return cmd_generate(args)
+        if args.command == "stamp-text":
+            return cmd_stamp_text(args)
         if args.command == "library":
             if args.library_command == "list":
                 return cmd_library_list(args)

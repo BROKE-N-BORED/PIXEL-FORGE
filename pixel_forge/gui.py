@@ -48,9 +48,10 @@ from pathlib import Path
 
 from PySide6.QtCore import (QPoint, QRect, QSettings, QSize, Qt, QThread,
                             QTimer, QUrl, Signal)
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QIcon,
-                           QImage, QImageReader, QKeySequence, QPainter,
-                           QPixmap, QShortcut)
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont,
+                           QFontDatabase, QFontMetrics, QIcon, QImage,
+                           QImageReader, QKeySequence, QPainter, QPixmap,
+                           QShortcut)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup,
                                QCheckBox, QColorDialog, QComboBox, QDialog,
                                QDoubleSpinBox, QFileDialog, QHBoxLayout,
@@ -75,7 +76,7 @@ from .engine_export import (ENGINE_FORMATS, FORMAT_INFO, export_engine,
                             format_files, format_note)
 from .history import (batches_dir, load_history, record_batch,
                       record_prompt, save_history)
-from .image import Image
+from .image import Image, argb
 from .imagegen import (DEFAULT_COUNT, DEFAULT_NEGATIVE, DEFAULT_SIZE,
                        LCM_CFG, LCM_STEPS, MAX_PROMPT_LEN,
                        NEGATIVE_PRESETS, GenerationCancelled,
@@ -96,7 +97,7 @@ from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
 from .pngio import write_png
 from .presets import (BUILTIN_PRESETS, SHEET_COLS_VALUES, PresetStore,
                       read_preset_export)
-from .qtimage import to_qimage
+from .qtimage import from_qimage, to_qimage
 from .session import (load_session, record_recent, save_session,
                       set_last_code, set_last_image, set_last_video)
 from .skins import (detect_skin, extract_skin, pixelize_texture,
@@ -109,6 +110,8 @@ from .spritesheet import (build_metadata, duration_for_fps,
                           grid_layout, load_metadata, pack_frames,
                           split_with_metadata, validate_tags,
                           write_sheet)
+from .textstamp import (MAX_SCALE, MIN_SCALE, render_text,
+                        stamp_image, unsupported_characters)
 from .tileset import (MODE_NAMES, TILESET_MODES, blob_tiles,
                       export_tileset, wang_tiles)
 from .undo import Command as UndoCommand
@@ -1352,6 +1355,304 @@ class SheetSplitDialog(QDialog):
         self.durations = durations
         self.tags = tags
         self.source_name = Path(self.sheet_path).name
+        self.accept()
+
+
+def _render_system_font(text, family, size):
+    """A system font's text as a mask Image: white opaque where
+    the ink goes, transparent elsewhere. Antialiasing is off and
+    the alpha is thresholded at half, so the stamp is crisp
+    whole pixels — the same binary mask the pixel font renders,
+    and the same stamp_image blit serves both."""
+    font = QFont(family)
+    font.setPixelSize(size)
+    font.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
+    metrics = QFontMetrics(font)
+    width = max(1, metrics.horizontalAdvance(text))
+    height = max(1, metrics.height())
+    canvas = QImage(width, height, QImage.Format.Format_ARGB32)
+    canvas.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    painter.setFont(font)
+    painter.setPen(QColor(255, 255, 255))
+    painter.drawText(0, metrics.ascent(), text)
+    painter.end()
+    raw = from_qimage(canvas)
+    mask = Image(width, height)
+    ink = argb(255, 255, 255)
+    for row in range(height):
+        for col in range(width):
+            if (raw.pixel(col, row) >> 24) >= 128:
+                mask.setPixel(col, row, ink)
+    return mask
+
+
+class StampTextDialog(QDialog):
+    """Stamp text onto the sprite (task 47) — a name, a number,
+    a sign. The Text tool opens it at the clicked pixel; the
+    position spins nudge it from there.
+
+    Two fonts: the built-in pixel font (a 5 x 7 bitmap font,
+    pixel art by construction — scale 1-4) and any system
+    font installed on the machine (size 6-64 px, rendered
+    without antialiasing and thresholded to whole pixels, so
+    a system-font stamp is exactly as crisp as a pixel-font
+    one). The preview shows the stamp on the sprite as the
+    settings change, so the color and the placement are judged
+    before anything is stamped.
+
+    Stamp stays disabled until some text is typed. A stamp
+    that would land nothing — the text sits outside the sprite,
+    or it has no letters in it — says so in the info line and
+    the dialog stays open. On accept, the caller reads
+    text_value / font_family (None for the pixel font) / size /
+    color / x / y / mask and stamps once onto the active layer.
+    """
+
+    # System-font sizes in pixels, and the pixel font's scale
+    # range (from textstamp). A 64-character cap keeps the
+    # render small — 64 characters at scale 4 is already
+    # wider than any sprite Pixel Forge makes.
+    SYSTEM_SIZE_MIN = 6
+    SYSTEM_SIZE_MAX = 64
+    SYSTEM_SIZE_DEFAULT = 12
+    TEXT_MAX_LENGTH = 64
+
+    def __init__(self, parent, image, x, y, color):
+        super().__init__(parent)
+        self.setWindowTitle("Stamp text")
+        self.resize(460, 560)
+        self._image = image
+        self.text_value = ""
+        self.font_family = None
+        self.size = MIN_SCALE
+        self.color = color
+        self.x = x
+        self.y = y
+        self.mask = None
+        self._pixel_size = MIN_SCALE
+        self._system_size = self.SYSTEM_SIZE_DEFAULT
+        self._painted = 0
+        self._ink = 0
+
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("Text"))
+        self.text_edit = QLineEdit()
+        self.text_edit.setMaxLength(self.TEXT_MAX_LENGTH)
+        self.text_edit.setPlaceholderText(
+            "Type the word or number to stamp")
+        self.text_edit.setToolTip(
+            "The word, number, or sign to stamp onto the sprite")
+        self.text_edit.textChanged.connect(self._refresh)
+        layout.addWidget(self.text_edit)
+
+        layout.addWidget(QLabel("Font"))
+        self.font_combo = QComboBox()
+        self.font_combo.setToolTip(
+            "Pixel font is the built-in 5 x 7 bitmap font; "
+            "the rest are the fonts installed on this machine")
+        self.font_combo.addItem("Pixel font", None)
+        for family in QFontDatabase.families():
+            self.font_combo.addItem(family, family)
+        self.font_combo.currentIndexChanged.connect(
+            self._on_font_changed)
+        layout.addWidget(self.font_combo)
+
+        size_color_row = QHBoxLayout()
+        self.size_label = QLabel("Scale")
+        size_color_row.addWidget(self.size_label)
+        self.size_spin = QSpinBox()
+        self.size_spin.setRange(MIN_SCALE, MAX_SCALE)
+        self.size_spin.setValue(MIN_SCALE)
+        self.size_spin.setSuffix("x")
+        self.size_spin.setToolTip(
+            "How many sprite pixels each font pixel becomes")
+        self.size_spin.valueChanged.connect(self._refresh)
+        size_color_row.addWidget(self.size_spin)
+        self.color_swatch = QLabel()
+        self.color_swatch.setFixedSize(20, 20)
+        self.color_swatch.setToolTip("The color the text stamps in")
+        size_color_row.addWidget(self.color_swatch)
+        self.color_btn = QPushButton("Pick a color")
+        self.color_btn.setToolTip(
+            "Pick the color the text stamps in")
+        self.color_btn.clicked.connect(self._on_pick_color)
+        size_color_row.addWidget(self.color_btn)
+        size_color_row.addStretch(1)
+        layout.addLayout(size_color_row)
+
+        pos_row = QHBoxLayout()
+        pos_row.addWidget(QLabel("X"))
+        self.x_spin = QSpinBox()
+        self.x_spin.setRange(0, max(0, image.width() - 1))
+        self.x_spin.setValue(x)
+        self.x_spin.setSuffix(" px")
+        self.x_spin.setToolTip(
+            "How far from the sprite's left edge the text starts")
+        self.x_spin.valueChanged.connect(self._refresh)
+        pos_row.addWidget(self.x_spin)
+        pos_row.addWidget(QLabel("Y"))
+        self.y_spin = QSpinBox()
+        self.y_spin.setRange(0, max(0, image.height() - 1))
+        self.y_spin.setValue(y)
+        self.y_spin.setSuffix(" px")
+        self.y_spin.setToolTip(
+            "How far from the sprite's top edge the text starts")
+        self.y_spin.valueChanged.connect(self._refresh)
+        pos_row.addWidget(self.y_spin)
+        pos_row.addStretch(1)
+        layout.addLayout(pos_row)
+
+        self.preview_label = QLabel()
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.preview_label)
+
+        self.info_label = QLabel(
+            "Type the text to stamp, then pick where it goes.")
+        self.info_label.setWordWrap(True)
+        layout.addWidget(self.info_label)
+
+        layout.addStretch(1)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.stamp_btn = QPushButton("Stamp")
+        self.stamp_btn.setObjectName("export")
+        self.stamp_btn.setToolTip(
+            "Stamp the text onto the sprite")
+        self.stamp_btn.setEnabled(False)
+        self.stamp_btn.clicked.connect(self._on_stamp)
+        button_row.addWidget(self.stamp_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setToolTip("Close without stamping anything")
+        cancel_btn.clicked.connect(self.reject)
+        button_row.addWidget(cancel_btn)
+        layout.addLayout(button_row)
+
+        self._paint_swatch()
+        self._refresh()
+
+    def _paint_swatch(self):
+        """The color swatch shows the stamp color."""
+        self.color_swatch.setStyleSheet(
+            "QLabel { background-color: #%06x; "
+            "border: 1px solid #55555e; border-radius: 2px; }"
+            % (self.color & 0xFFFFFF))
+
+    def _on_font_changed(self):
+        """The size spin follows the font: a scale for the pixel
+        font, a pixel size for a system font. Each mode keeps its
+        own last value, so switching back restores it."""
+        if self.font_combo.currentData() is None:
+            self._system_size = self.size_spin.value()
+            self.size_label.setText("Scale")
+            self.size_spin.setRange(MIN_SCALE, MAX_SCALE)
+            self.size_spin.setSuffix("x")
+            self.size_spin.setValue(self._pixel_size)
+            self.size_spin.setToolTip(
+                "How many sprite pixels each font pixel becomes")
+        else:
+            self._pixel_size = self.size_spin.value()
+            self.size_label.setText("Size")
+            self.size_spin.setRange(self.SYSTEM_SIZE_MIN,
+                                    self.SYSTEM_SIZE_MAX)
+            self.size_spin.setSuffix(" px")
+            self.size_spin.setValue(self._system_size)
+            self.size_spin.setToolTip(
+                "How tall the text is, in sprite pixels")
+        self._refresh()
+
+    def _on_pick_color(self):
+        """The color picker: a cancelled pick keeps the color."""
+        picked = QColorDialog.getColor(
+            QColor((self.color >> 16) & 0xFF,
+                   (self.color >> 8) & 0xFF,
+                   self.color & 0xFF),
+            self, "Pick a color")
+        if not picked.isValid():
+            return
+        self.color = argb(picked.red(), picked.green(),
+                          picked.blue())
+        self._paint_swatch()
+        self._refresh()
+
+    def _render_mask(self, text):
+        """The current text as a mask Image, from whichever font
+        is picked. The pixel font renders through the core; a
+        system font renders through Qt, thresholded to a mask."""
+        if self.font_combo.currentData() is None:
+            return render_text(text, self.size_spin.value())
+        return _render_system_font(
+            text, self.font_combo.currentData(),
+            self.size_spin.value())
+
+    def _refresh(self):
+        """Every control change re-renders the mask, re-stamps
+        the preview copy, and rewrites the info line. The public
+        fields (text_value, font_family, size, color, x, y,
+        mask) always hold the current settings, so the caller
+        reads them after accept without asking the widgets."""
+        text = self.text_edit.text()
+        self.text_value = text
+        self.font_family = self.font_combo.currentData()
+        self.size = self.size_spin.value()
+        self.x = self.x_spin.value()
+        self.y = self.y_spin.value()
+        self.stamp_btn.setEnabled(bool(text))
+        if not text:
+            self.mask = None
+            self._painted = 0
+            self._ink = 0
+            self.info_label.setText(
+                "Type the text to stamp, then pick where it goes.")
+            self._show_preview(self._image)
+            return
+        self.mask = self._render_mask(text)
+        self._ink = sum(
+            1 for row in range(self.mask.height())
+            for col in range(self.mask.width())
+            if (self.mask.pixel(col, row) >> 24) != 0)
+        preview = self._image.copy()
+        self._painted = stamp_image(preview, self.mask, self.x,
+                                    self.y, self.color)
+        self._show_preview(preview)
+        width, height = self.mask.width(), self.mask.height()
+        if self._ink == 0:
+            self.info_label.setText(
+                "The text has no letters to stamp.")
+            return
+        if self._painted == 0:
+            self.info_label.setText(
+                "The text sits outside the sprite. "
+                "Move it inside to stamp it.")
+            return
+        message = "Stamp is %d x %d pixels." % (width, height)
+        if self._painted < self._ink:
+            message += (" Some of the text falls outside the "
+                        "sprite and will be cut off.")
+        if self.font_family is None:
+            missing = unsupported_characters(text)
+            if missing:
+                message += (" The pixel font cannot draw: %s."
+                            % ", ".join(missing))
+        self.info_label.setText(message)
+
+    def _show_preview(self, image):
+        """The preview pane: the sprite with the stamp on it,
+        fitted to the dialog, nearest-neighbour so the pixels
+        read exactly as they will stamp."""
+        longest = max(image.width(), image.height())
+        scale = 280.0 / max(1, longest)
+        self.preview_label.setPixmap(
+            checkerboard_pixmap(image, scale, False))
+
+    def _on_stamp(self):
+        """Stamp, unless the stamp would land nothing — then the
+        info line says why and the dialog stays open."""
+        if self._painted == 0:
+            self._refresh()
+            return
         self.accept()
 
 
@@ -3765,7 +4066,9 @@ class MainWindow(QMainWindow):
                 ("line", "Line",
                  "Draw a straight line — drag, then release"),
                 ("rectangle", "Rectangle",
-                 "Draw a rectangle outline — drag, then release")):
+                 "Draw a rectangle outline — drag, then release"),
+                ("text", "Text",
+                 "Stamp a word or number: click where it goes")):
             button = QPushButton(label)
             button.setCheckable(True)
             button.setToolTip(tip)
@@ -4774,8 +5077,14 @@ class MainWindow(QMainWindow):
     def _on_editor_tool(self, tool):
         """A tool button was clicked — it is the active tool
         now. The button group keeps exactly one checked; the
-        canvas reads _editor_tool on every click."""
+        canvas reads _editor_tool on every click. The text tool
+        opens a dialog on click instead of painting, so its
+        hint says so."""
         self._editor_tool = tool
+        if tool == "text":
+            self.statusBar().showMessage(
+                "Text: click where the text goes")
+            return
         self.statusBar().showMessage(
             "%s — click or drag on the pixel preview"
             % tool.capitalize())
@@ -4894,6 +5203,33 @@ class MainWindow(QMainWindow):
             return
         self._commit_edit(layer, before, "Fill")
 
+    def _open_stamp_dialog(self, x, y):
+        """The Text tool's click: open the stamp dialog at the
+        clicked pixel and stamp onto the active layer when it
+        accepts — one undo step, like every other edit. The
+        stamp starts in the picked color when one is picked,
+        black otherwise; the dialog's own picker can change it.
+        A stamp that lands nothing records no undo step."""
+        if self.result_image is None or self._active_layer is None:
+            return
+        initial = self._editor_color
+        if initial is None:
+            initial = argb(0, 0, 0)
+        dialog = StampTextDialog(self, self.result_image, x, y,
+                                 initial)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        layer = self._active_layer
+        before = layer.image.copy()
+        painted = stamp_image(layer.image, dialog.mask, dialog.x,
+                              dialog.y, dialog.color)
+        if painted == 0:
+            return
+        self._commit_edit(layer, before, "Stamp text")
+        self.statusBar().showMessage(
+            "Stamped %r at %d, %d" % (dialog.text_value, dialog.x,
+                                      dialog.y))
+
     def _canvas_press(self, pixel):
         """A click on the pixel canvas, as an image pixel (or
         None when the click missed the image). No tool, no
@@ -4909,6 +5245,9 @@ class MainWindow(QMainWindow):
             return
         if tool == "fill":
             self._editor_fill(pixel)
+            return
+        if tool == "text":
+            self._open_stamp_dialog(pixel[0], pixel[1])
             return
         if tool in ("pencil", "line", "rectangle"):
             if self._editor_color is None:

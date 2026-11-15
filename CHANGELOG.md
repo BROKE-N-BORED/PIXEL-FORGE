@@ -1,5 +1,21 @@
 # Pixel Forge changelog
 
+## 0.68 — 2026-11-14
+
+Text / label tools on sprites (task 47): the pixel preview's
+editor toolbar has a Text tool: click where the text goes and
+a dialog opens with the text, the font, the size, the color,
+and the position, with a preview of the stamp on the sprite.
+Two fonts: the built-in pixel font (a 5 x 7 bitmap font, pixel
+art by construction, at a scale of 1 to 4) and any font
+installed on the machine (size 6 to 64 pixels, rendered
+without antialiasing and thresholded to whole pixels, so a
+system-font stamp is exactly as crisp as a pixel-font one).
+The stamp paints opaque color onto the active layer and is one
+undo step like every other edit. Same step on the command line
+in the pixel font only: pixel-forge stamp-text sprite.png
+"SHOP" --x 4 --y 2 --color "#ffcc00".
+
 ## 0.67 — 2026-11-14
 
 Skin reassembly + 3D preview (task 45): the Code tab's skin

@@ -143,10 +143,14 @@ it keeps them and prints the way to remove them by hand.
   Generate, and the sprite loads into the tab like an imported
   image. The pixel preview is
   also a canvas: pick a tool above it (Pencil, Eraser, Fill,
-  Eyedropper, Line, Rectangle) and a color from the strip of swatches
+  Eyedropper, Line, Rectangle, Text) and a color from the strip of swatches
   — one per color the sprite actually uses — and click or drag on
   the preview to fix pixels in place. Rectangles are outline only.
-  Every edit is one undo step (Ctrl+Z / Ctrl+Y), the info line shows
+  The Text tool stamps a word, a number, or a sign onto the sprite:
+  click where the text goes and a dialog opens with the text, the
+  font, the size, the color, and the position, with a preview of
+  the stamp on the sprite (see Text labels below). Every edit is
+  one undo step (Ctrl+Z / Ctrl+Y), the info line shows
   "(edited)" while the result carries edits, and Export PNG and Save
   to library write the edited sprite. A control change, a preset, or
   a new image load re-pixelizes from the source, so each one asks
@@ -722,6 +726,31 @@ at every pixel.
   the opaque pixels next to the transparent background sit on a
   real height step. A flat or single-color sprite comes out all
   flat (128, 128, 255).
+
+## Text labels
+
+A name above a character, a number on a door, a shop sign: text
+stamped onto the sprite, one line at a time, in the sprite's own
+pixels. The stamp paints opaque color over whatever was there, so
+the text reads, and it is one undo step like every other edit.
+
+- **Image tab:** pick the Text tool above the pixel preview and
+  click where the text goes. The dialog takes the text, the font,
+  the size, the color, and the position, and shows the stamp on
+  the sprite before anything is stamped. Two fonts: the built-in
+  pixel font (a 5 x 7 bitmap font, pixel art by construction, at
+  a scale of 1 to 4) and any font installed on the machine (size
+  6 to 64 pixels, rendered without antialiasing and thresholded
+  to whole pixels, so a system-font stamp is exactly as crisp as
+  a pixel-font one). The pixel font covers printable ASCII; a
+  character it cannot draw stamps as a blank, and the dialog
+  names the characters it skipped. Text that runs past the
+  sprite's edge is cut off at the edge, and a stamp that would
+  land nothing says so instead of stamping.
+- **Command line:** `pixel-forge stamp-text INPUT TEXT [--x N]
+  [--y N] [--color #rrggbb] [--scale 1-4] [--out OUT.png]` stamps
+  in the pixel font only, defaulting to
+  `<input-stem>-stamped.png` next to the input.
 
 ## Procedural generators
 

@@ -15,8 +15,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pixel_forge import __version__  # noqa: E402
 
-from helpers import (make_gradient_image, stub_env,  # noqa: E402
-                     write_image, write_stub_engine)
+from helpers import (make_gradient_image, make_solid_image,  # noqa: E402
+                     stub_env, write_image, write_stub_engine)
 from pixel_forge.cli import main  # noqa: E402
 from pixel_forge.library import LIBRARY_FORMAT  # noqa: E402
 from pixel_forge.pixelize import load_image  # noqa: E402
@@ -570,6 +570,97 @@ class GenerateCliTests(unittest.TestCase):
              "--size", "3"])
         self.assertEqual(code, 1)
         self.assertIn("8 to 512", err)
+        self.assertNotIn("Traceback", err)
+
+
+class StampTextCliTests(unittest.TestCase):
+    """The stamp-text subcommand (task 47). Pixel font only —
+    system fonts are a GUI thing."""
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.src = write_image(
+            make_solid_image(32, 32, 10, 20, 30),
+            os.path.join(cls.tmp, "sprite.png"))
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = main(argv)
+        except SystemExit as exc:
+            code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_stamp_text_help(self):
+        code, out, _err = self._run(["stamp-text", "--help"])
+        self.assertEqual(code, 0)
+        self.assertIn("--x", out)
+        self.assertIn("--y", out)
+        self.assertIn("--color", out)
+        self.assertIn("--scale", out)
+        self.assertIn("--out", out)
+
+    def test_stamp_text_happy_path_matches_module(self):
+        from pixel_forge.image import argb
+        from pixel_forge.textstamp import stamp_text
+
+        out_path = os.path.join(self.tmp, "stamped.png")
+        code, out, err = self._run(
+            ["stamp-text", self.src, "HI", "--x", "2", "--y", "3",
+             "--color", "#ff0000", "--out", out_path])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(out_path))
+        self.assertIn("stamped 'HI' at 2, 3 (28 pixels)", out)
+        want = load_image(self.src)
+        stamp_text(want, "HI", 2, 3, argb(255, 0, 0))
+        self.assertEqual(load_image(out_path), want)
+
+    def test_stamp_text_default_output_name(self):
+        code, _out, err = self._run(
+            ["stamp-text", self.src, "A"])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "sprite-stamped.png")))
+
+    def test_stamp_text_json(self):
+        out_path = os.path.join(self.tmp, "json-stamped.png")
+        code, out, err = self._run(
+            ["stamp-text", self.src, "I", "--out", out_path,
+             "--json"])
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["output"], out_path)
+        self.assertEqual((data["width"], data["height"]), (32, 32))
+        self.assertGreater(data["painted"], 0)
+
+    def test_stamp_text_bad_color_fails_cleanly(self):
+        code, _out, err = self._run(
+            ["stamp-text", self.src, "HI", "--color", "red"])
+        self.assertEqual(code, 1)
+        self.assertIn("not a hex color", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_stamp_text_bad_scale_fails_cleanly(self):
+        code, _out, err = self._run(
+            ["stamp-text", self.src, "HI", "--scale", "9"])
+        self.assertEqual(code, 1)
+        self.assertIn("1 to 4", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_stamp_text_line_break_fails_cleanly(self):
+        code, _out, err = self._run(
+            ["stamp-text", self.src, "a\nb"])
+        self.assertEqual(code, 1)
+        self.assertIn("one line of text at a time", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_stamp_text_missing_file_fails_cleanly(self):
+        code, _out, err = self._run(
+            ["stamp-text", os.path.join(self.tmp, "nope.png"),
+             "HI"])
+        self.assertEqual(code, 1)
+        self.assertIn("not found", err)
         self.assertNotIn("Traceback", err)
 
 
