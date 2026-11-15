@@ -4486,5 +4486,245 @@ class InstallScriptUninstallEntryTests(unittest.TestCase):
         self.assertNotIn('\\"', text)
         self.assertNotIn("%k", text)
 
+
+@unittest.skipUnless(HAS_QT, "PySide6 not available")
+class InstallerFailurePathTests(unittest.TestCase):
+    """Task 59: installer failure paths that had no test. The
+    network, disk-space, cancel, tail, engine-resume, bgremove,
+    icon, and Launch-gating paths are covered elsewhere in this
+    file; these are the branches the audit found untested."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="pf-install-fail-")
+        self.addCleanup(
+            lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+    def _ctx(self, home=None):
+        from pixel_forge.installer import InstallContext
+
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.home = Path(home or self.tmp)
+        return ctx, lines
+
+    # -- venv + packages ---------------------------------------------
+
+    def test_venv_creation_failure_fails_plainly(self):
+        import pixel_forge.installer as installer_mod
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_venv)
+
+        lines = []
+        ctx = InstallContext(lines.append, dryrun=False)
+        ctx.home = Path(self.tmp)
+        ctx.run = lambda _cmd, timeout=None: 1
+        # The disk check is another test's subject — and the
+        # sandbox /tmp is small enough to trip it — so this test
+        # passes the check and fails at the venv creation itself.
+        with mock.patch.object(installer_mod, "check_disk_space",
+                               return_value=True):
+            result = step_venv(ctx)
+        self.assertEqual(result.status, StepResult.FAIL)
+        self.assertEqual(result.detail, "venv creation failed")
+        self.assertIn("could not create the virtual environment",
+                      "\n".join(lines))
+
+    def test_packages_step_fails_without_a_venv(self):
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_packages)
+
+        ctx, lines = self._ctx()
+        result = step_packages(ctx)
+        self.assertEqual(result.status, StepResult.FAIL)
+        self.assertEqual(result.detail, "no venv to install into")
+        log = "\n".join(lines)
+        self.assertIn("no venv python at", log)
+        self.assertIn("venv step must have failed", log)
+
+    def test_packages_step_fails_when_the_import_check_fails(self):
+        # pip exits 0 but the venv still cannot import the app
+        # (a partial install, a broken wheel): the step must fail
+        # on the import check, not on pip's exit code alone.
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_packages)
+
+        venv_bin = os.path.join(self.tmp, ".local", "share",
+                                "pixel-forge", "venv", "bin")
+        os.makedirs(venv_bin)
+        open(os.path.join(venv_bin, "python"), "w").close()
+        ctx, _lines = self._ctx()
+        ctx.run = lambda _cmd, timeout=None: 0
+        ctx.run_output = lambda _cmd, timeout=60: (1, "")
+        result = step_packages(ctx)
+        self.assertEqual(result.status, StepResult.FAIL)
+        self.assertEqual(result.detail, "pip install failed")
+
+    # -- system -------------------------------------------------------
+
+    def test_system_step_failure_names_the_software_manager(self):
+        # The apt tail on this path is covered by AptTailTests;
+        # this pins the failure detail and the plain pointer to
+        # where the user gets the packages by hand.
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_system)
+
+        ctx, lines = self._ctx()
+        ctx.run_output = lambda _cmd, timeout=60: (1, "")
+        ctx.run_admin = lambda _script, timeout=None: 100
+        result = step_system(ctx)
+        self.assertEqual(result.status, StepResult.FAIL)
+        self.assertEqual(result.detail,
+                         "python3-venv or pip missing")
+        log = "\n".join(lines)
+        self.assertIn("Software Manager", log)
+        self.assertIn("python3-pip", log)
+        self.assertIn("apt step exited 100", log)
+
+    def test_system_step_skips_apt_when_everything_is_present(self):
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_system)
+
+        ctx, lines = self._ctx()
+        ctx.run_output = lambda _cmd, timeout=60: (0, "")
+
+        def _no_apt(_script, timeout=None):
+            raise AssertionError("apt must not run")
+
+        ctx.run_admin = _no_apt
+        result = step_system(ctx)
+        self.assertEqual(result.status, StepResult.DONE)
+        self.assertIn("python3-venv and pip are present",
+                      "\n".join(lines))
+
+    # -- files ---------------------------------------------------------
+
+    def test_files_step_warns_when_a_shortcut_cannot_be_written(self):
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_files)
+
+        ctx, _lines = self._ctx()
+        ctx.which = lambda _name: None  # no cache/db tools
+        ctx.link = lambda _t, _l: False
+        result = step_files(ctx)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertEqual(
+            result.detail,
+            "some shortcuts or icons could not be written")
+        # The menu entry is still written — only the PATH links
+        # failed.
+        desktop = (Path(self.tmp) / ".local" / "share"
+                   / "applications" / "pixel-forge.desktop")
+        self.assertTrue(desktop.is_file())
+
+    def test_files_step_warns_when_the_uninstall_script_cannot_be_copied(self):
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_files)
+
+        ctx, _lines = self._ctx()
+        ctx.which = lambda _name: None
+        real_copy = ctx.copy
+
+        def _copy(src, dest):
+            if os.path.basename(str(src)) == "uninstall.sh":
+                return False
+            return real_copy(src, dest)
+
+        ctx.copy = _copy
+        result = step_files(ctx)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("uninstall script could not be copied",
+                      result.detail)
+
+    def test_files_step_warns_when_the_uninstall_script_cannot_be_made_executable(self):
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_files)
+
+        ctx, _lines = self._ctx()
+        ctx.which = lambda _name: None
+        ctx.chmod = lambda _path, _mode: False
+        result = step_files(ctx)
+        self.assertEqual(result.status, StepResult.WARN)
+        self.assertIn("uninstall script could not be made "
+                      "executable", result.detail)
+        # No chmod, no menu entry for the uninstaller.
+        entry = (Path(self.tmp) / ".local" / "share"
+                 / "applications" / "pixel-forge-uninstall.desktop")
+        self.assertFalse(entry.exists())
+
+    def test_files_step_warns_when_no_icons_exist_at_all(self):
+        import pixel_forge.installer as installer_mod
+        from pixel_forge.installer import (InstallContext, StepResult,
+                                           step_files)
+
+        # A source tree with no icons directory at all — no PNGs,
+        # no SVG to render from.
+        src = Path(self.tmp) / "src"
+        src.mkdir(parents=True)
+        old_src = installer_mod.SRC_DIR
+        installer_mod.SRC_DIR = src
+        self.addCleanup(setattr, installer_mod, "SRC_DIR", old_src)
+        ctx, lines = self._ctx()
+        ctx.which = lambda _name: None
+        result = step_files(ctx)
+        self.assertEqual(result.status, StepResult.WARN)
+        log = "\n".join(lines)
+        self.assertIn("no app icons found (no PNGs, no SVG)", log)
+        self.assertIn("generic icon", log)
+
+    # -- the worker -----------------------------------------------------
+
+    def test_worker_marks_a_raising_step_failed_and_carries_on(self):
+        # A step that raises instead of returning a result must
+        # not kill the worker: the step reads failed with the
+        # exception's message, and the remaining steps still run.
+        import pixel_forge.installer as installer_mod
+        from PySide6.QtCore import QEventLoop, QTimer
+        from pixel_forge.installer import InstallWorker, StepResult
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QApplication.instance() or QApplication(sys.argv)
+        calls = []
+
+        def raising(_ctx):
+            calls.append("system")
+            raise RuntimeError("boom")
+
+        def other(key):
+            def _run(_ctx):
+                calls.append(key)
+                return StepResult(StepResult.DONE)
+            return _run
+
+        steps = [(key, title,
+                  raising if key == "system" else other(key))
+                 for key, title, _func in installer_mod.STEPS]
+        old_steps = installer_mod.STEPS
+        installer_mod.STEPS = steps
+        self.addCleanup(setattr, installer_mod, "STEPS", old_steps)
+        results, lines = [], []
+        loop = QEventLoop()
+        worker = InstallWorker(dryrun=True)
+        worker.log_line.connect(lines.append)
+        worker.finished.connect(
+            lambda r: (results.extend(r), loop.quit()))
+        worker.start()
+        QTimer.singleShot(60000, loop.quit)
+        loop.exec()
+        worker.wait(5000)
+        self.assertEqual(calls, [key for key, _t, _f in steps],
+                         "steps after the raising one did not run")
+        self.assertEqual(len(results), len(steps))
+        system_index = [key for key, _t, _f in steps].index(
+            "system")
+        self.assertEqual(results[system_index].status,
+                         StepResult.FAIL)
+        self.assertEqual(results[system_index].detail, "boom")
+        self.assertIn("step failed with an error: boom",
+                      "\n".join(lines))
+        for index, result in enumerate(results):
+            if index != system_index:
+                self.assertEqual(result.status, StepResult.DONE)
+
+
 if __name__ == "__main__":
     unittest.main()

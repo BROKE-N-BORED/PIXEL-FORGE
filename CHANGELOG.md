@@ -1,5 +1,24 @@
 # Pixel Forge changelog
 
+## 0.74 — 2026-11-15
+
+Test coverage (task 59): no product behavior changes, only
+tests. The review's B1-B5 and B9-B11 findings were audited
+first, and every one already has a regression test from the
+version that fixed it, so none needed adding. What was
+genuinely missing is now covered: the installer's apt/pip
+fallback chain has its own test file (the apt path, the pip
+path, the order they are tried, the plain messages when both
+fail); installer failure paths that had no test (a venv that
+fails to create, a packages step with no venv to install into,
+a pip install that exits 0 but leaves nothing importable, a
+files step that cannot write its shortcuts or icons, a step
+that raises instead of returning a result); and a timing
+smoke test (a 4000 x 3000 photo pixelizes to 64 x 64 and to
+its capped texture size inside generous bounds, so a
+regression back to walking all 12 million pixels fails
+loudly instead of freezing the window).
+
 ## 0.73 — 2026-11-15
 
 Performance work (task 60): the same pixel art, faster.
