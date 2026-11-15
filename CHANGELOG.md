@@ -1,5 +1,15 @@
 # Pixel Forge changelog
 
+## 0.72 — 2026-11-14
+
+`sheet` on an existing file says what is wrong (task 81):
+`pixel-forge sheet FILE` used to exit 1 with "not found:
+<path>", which told the user the file did not exist when it
+did. It now says "not a folder: <path>". A path that really
+is missing still says "not found". The fix is in
+load_frame_dir, the one place that loads a frame folder, so
+every path that uses it reports the same plain reason.
+
 ## 0.71 — 2026-11-14
 
 Rounded blob tileset variant (task 82): blob sets now come

@@ -475,6 +475,30 @@ class FrameDirTests(unittest.TestCase):
             load_frame_dir(os.path.join(self.tmp, "nope"))
         self.assertIn("not found", str(ctx.exception))
 
+    def test_file_instead_of_folder_says_not_a_folder(self):
+        # Task 81: a file that exists must never read "not
+        # found" — the file is right there, it just is not a
+        # folder. The message names the path.
+        frame = os.path.join(self.tmp, "frame_001.png")
+        write_image(make_solid_image(32, 32, 1, 2, 3), frame)
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_frame_dir(frame)
+        self.assertIn("not a folder", str(ctx.exception))
+        self.assertIn(frame, str(ctx.exception))
+        self.assertNotIn("not found", str(ctx.exception))
+
+    def test_plain_file_instead_of_folder_says_not_a_folder(self):
+        # The same plain reason for a file that is not even an
+        # image: the check is about the path, not the file type.
+        note = os.path.join(self.tmp, "notes.txt")
+        with open(note, "w") as handle:
+            handle.write("not a folder")
+        with self.assertRaises(PixelForgeError) as ctx:
+            load_frame_dir(note)
+        self.assertIn("not a folder", str(ctx.exception))
+        self.assertIn(note, str(ctx.exception))
+        self.assertNotIn("not found", str(ctx.exception))
+
     def test_empty_dir_fails_cleanly(self):
         with self.assertRaises(PixelForgeError) as ctx:
             load_frame_dir(self.tmp)

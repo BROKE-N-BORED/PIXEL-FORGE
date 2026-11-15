@@ -788,6 +788,17 @@ class SheetCliTests(unittest.TestCase):
         self.assertIn("not found", err)
         self.assertNotIn("Traceback", err)
 
+    def test_sheet_file_instead_of_folder_says_not_a_folder(self):
+        # Task 81 end to end: `sheet` on a file that exists
+        # says "not a folder" and names it — never "not found".
+        frame = os.path.join(self.frames, "frame_001.png")
+        code, _out, err = self._run(["sheet", frame])
+        self.assertEqual(code, 1)
+        self.assertIn("not a folder", err)
+        self.assertIn(frame, err)
+        self.assertNotIn("not found", err)
+        self.assertNotIn("Traceback", err)
+
     def test_sheet_empty_dir_fails_cleanly(self):
         code, _out, err = self._run(["sheet", self.empty])
         self.assertEqual(code, 1)

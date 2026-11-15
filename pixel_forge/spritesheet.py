@@ -242,12 +242,17 @@ def load_frame_dir(directory):
     names with no number are kept but sort after all numbered
     ones, alphabetically among themselves — a stray cover.png
     never becomes frame 0 (review B9). Non-PNG files are
-    ignored. Raises PixelForgeError when the folder is missing,
-    holds no PNGs, or holds a file that is not a readable image.
+    ignored. Raises PixelForgeError when the path is missing,
+    when it exists but is not a folder (task 81: a file used
+    to read "not found", which said the file did not exist
+    when it did), when the folder holds no PNGs, or when it
+    holds a file that is not a readable image.
     """
     folder = Path(directory)
-    if not folder.is_dir():
+    if not folder.exists():
         raise PixelForgeError("not found: %s" % directory)
+    if not folder.is_dir():
+        raise PixelForgeError("not a folder: %s" % directory)
     paths = [p for p in folder.iterdir()
              if p.is_file() and p.suffix.lower() == ".png"]
     if not paths:
