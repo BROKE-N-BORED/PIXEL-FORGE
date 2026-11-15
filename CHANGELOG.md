@@ -1,5 +1,25 @@
 # Pixel Forge changelog
 
+## 0.75 — 2026-11-15
+
+Autosave (task 55): crash recovery for in-progress work. The
+window writes what you have open to a recovery file as you
+work. The writes are debounced and atomic, and skipped when
+nothing changed. A marker notes that a run is in progress.
+If Pixel Forge
+closes unexpectedly, the next launch offers to bring the work
+back: the image + settings (and edited pixels, which are saved
+with the recovery), the video + keep/drop choices, the prompt
+batch + typed prompt, the code import, the tileset bases, and
+the tab you were on. A clean exit leaves no marker and no
+recovery file, so a normal launch starts fresh as before. A
+recovery file that cannot be read starts fresh with a plain
+message instead of breaking startup. There is no toggle: crash
+recovery is always on. Frames from the sheet splitter have no
+video to re-extract from, so they are not recovered; a
+recovered edited result keeps its pixels but not its layer
+structure.
+
 ## 0.74 — 2026-11-15
 
 Test coverage (task 59): no product behavior changes, only

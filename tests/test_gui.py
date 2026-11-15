@@ -10306,5 +10306,371 @@ class OriginalPaneCacheTests(unittest.TestCase):
             self.win._refresh_prompt_pixmaps), 0)
 
 
+class AutosaveGuiTests(unittest.TestCase):
+    """Task 55: autosave — crash recovery for in-progress work.
+
+    A "crash" is simulated by overwriting the running marker with
+    a foreign pid: that is exactly what a crashed run leaves
+    behind (a same-process marker is a sibling window, not a
+    crash). The recovery dialog is stubbed with a lambda on the
+    window under test, so no modal ever blocks the run.
+    """
+
+    FOREIGN_PID = 999999999
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        cls.image = write_image(
+            make_solid_image(64, 64, 10, 200, 30),
+            os.path.join(cls.tmp, "first.png"))
+        cls.image2 = write_image(
+            make_solid_image(48, 48, 200, 30, 10),
+            os.path.join(cls.tmp, "second.png"))
+        cls.game = os.path.join(cls.tmp, "game.py")
+        with open(cls.game, "w") as handle:
+            handle.write('PALETTE = ["#ff0000", "#00ff00"]\n'
+                         "HERO = [[0, 1], [1, 0]]\n")
+        cls.base = write_image(
+            make_solid_image(16, 16, 30, 200, 30),
+            os.path.join(cls.tmp, "base.png"))
+        cls.clip = None
+        try:
+            cls.clip = make_test_video(
+                os.path.join(cls.tmp, "clip.mp4"), duration=2)
+        except Exception:
+            pass  # video test skips below when ffmpeg is missing
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self.auto_dir = os.path.join(tempfile.mkdtemp(), "auto")
+        self.win = MainWindow(library_dir=self.lib_dir,
+                              restore=True,
+                              autosave_dir=self.auto_dir)
+        self._extra_windows = []
+
+    def tearDown(self):
+        for extra in self._extra_windows:
+            extra.close()
+            extra.deleteLater()
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    # -- helpers -------------------------------------------------
+
+    def _show(self, win=None):
+        win = win or self.win
+        win.show()
+        self.app.processEvents()
+        return win
+
+    def _crash(self):
+        """Leave the crash behind: the marker of a dead process."""
+        from pixel_forge.autosave import mark_running
+        mark_running(self.auto_dir, pid=self.FOREIGN_PID)
+
+    def _revived_window(self, answer, lib_dir=None):
+        """A new window over the same autosave folder, with the
+        recovery dialog stubbed to answer True (bring back) or
+        False (start fresh)."""
+        from pixel_forge.gui import MainWindow
+        win = MainWindow(library_dir=lib_dir or self.lib_dir,
+                         restore=True,
+                         autosave_dir=self.auto_dir)
+        win._ask_recovery = lambda summary: answer
+        self._extra_windows.append(win)
+        return self._show(win)
+
+    def _wait_for_video(self, win, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (win.video_worker is None
+                    and not win._video_debounce_timer.isActive()):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _recovery_state(self):
+        from pixel_forge.autosave import load_recovery
+        state, corrupt = load_recovery(self.auto_dir)
+        self.assertFalse(corrupt)
+        return state
+
+    # -- clean exit / no crash -----------------------------------
+
+    def test_clean_exit_removes_marker_and_recovery(self):
+        from pixel_forge.autosave import (
+            crashed, has_recovery, marker_path)
+        self._show()
+        self.win.load_image(self.image)
+        self.win._autosave_write_now()
+        self.assertTrue(marker_path(self.auto_dir).exists())
+        self.assertTrue(has_recovery(self.auto_dir))
+        self.win.close()
+        self.assertFalse(marker_path(self.auto_dir).exists())
+        self.assertFalse(has_recovery(self.auto_dir))
+        self.assertFalse(crashed(self.auto_dir))
+
+    def test_second_window_in_this_process_is_not_a_crash(self):
+        from pixel_forge.gui import MainWindow
+        self._show()
+        win2 = MainWindow(library_dir=self.lib_dir,
+                          restore=True,
+                          autosave_dir=self.auto_dir)
+        self._extra_windows.append(win2)
+        self.assertFalse(win2._autosave_crashed)
+        self.assertFalse(win2._autosave_corrupt)
+
+    def test_crash_with_no_work_offers_nothing(self):
+        from pixel_forge.gui import MainWindow
+        self._show()
+        self._crash()
+        win2 = MainWindow(library_dir=self.lib_dir,
+                          restore=True,
+                          autosave_dir=self.auto_dir)
+
+        def _must_not_ask(summary):
+            raise AssertionError("no dialog when nothing was open")
+
+        win2._ask_recovery = _must_not_ask
+        self._extra_windows.append(win2)
+        self._show(win2)
+        self.assertIsNone(win2.source_path)
+
+    # -- image restore -------------------------------------------
+
+    def test_crash_accept_restores_image_and_settings(self):
+        self._show()
+        self.win.load_image(self.image)
+        self.win.width_spin.setValue(48)
+        self.win.height_spin.setValue(48)
+        self.win.tabs.setCurrentIndex(0)
+        self.win._autosave_write_now()
+        self._crash()
+        win2 = self._revived_window(answer=True)
+        self.assertEqual(win2.source_path, self.image)
+        self.assertEqual(win2.width_spin.value(), 48)
+        self.assertEqual(win2.height_spin.value(), 48)
+        self.assertEqual(win2.tabs.currentIndex(), 0)
+        self.assertIsNotNone(win2.result_image)
+
+    def test_recovery_file_survives_a_restore(self):
+        from pixel_forge.autosave import has_recovery
+        self._show()
+        self.win.load_image(self.image)
+        self.win._autosave_write_now()
+        self._crash()
+        self._revived_window(answer=True)
+        # A second crash during the restore must not lose it.
+        self.assertTrue(has_recovery(self.auto_dir))
+
+    def test_decline_discards_recovery_and_falls_back_to_session(self):
+        from pixel_forge.autosave import has_recovery
+        self._show()
+        self.win.load_image(self.image)
+        self.win._autosave_write_now()
+        self._crash()
+        win2 = self._revived_window(answer=False)
+        self.assertFalse(has_recovery(self.auto_dir))
+        # The session (same library folder) still restores the
+        # last-loaded image — recovery is an extra, not a
+        # replacement.
+        self.assertEqual(win2.source_path, self.image)
+
+    def test_edited_result_round_trips_its_pixels(self):
+        from pixel_forge.autosave import recovery_image_path
+        self._show()
+        self.win.load_image(self.image)
+        layer_image = self.win._layers[0].image
+        layer_image.data[0:4] = bytes((9, 9, 9, 255))
+        self.win._refresh_result()
+        self.assertTrue(self.win._result_edited)
+        self.win._autosave_write_now()
+        self.assertTrue(recovery_image_path(self.auto_dir).exists())
+        self._crash()
+        win2 = self._revived_window(answer=True)
+        self.assertTrue(win2._result_edited)
+        self.assertEqual(bytes(win2.result_image.data[0:4]),
+                         bytes((9, 9, 9, 255)))
+
+    def test_procedural_sprite_restores_by_seed(self):
+        from pixel_forge import procedural
+        self._show()
+        combo = self.win.procedural_kind_combo
+        combo.setCurrentIndex(combo.findData("tree"))
+        self.win.procedural_seed_spin.setValue(42)
+        self.win._on_generate_procedural()
+        self.assertEqual(self.win._generated_kind, "tree")
+        # The tab's width moved on past the generated size:
+        # the recovery must record the sprite's own size.
+        self.win.width_spin.setValue(48)
+        self.win.height_spin.setValue(48)
+        self.win._autosave_write_now()
+        state = self._recovery_state()
+        self.assertEqual(state["image"]["generated"]["kind"],
+                         "tree")
+        self.assertEqual(state["image"]["generated"]["size"], 32)
+        self._crash()
+        win2 = self._revived_window(answer=True)
+        self.assertEqual(win2._generated_kind, "tree")
+        self.assertEqual(win2._generated_seed, 42)
+        self.assertEqual(win2.source_image.width(), 32)
+        self.assertEqual(win2.width_spin.value(), 48)
+        expected = procedural.generate("tree", 42, size=32)
+        self.assertEqual(bytes(win2.source_image.data),
+                         bytes(expected.data))
+
+    # -- corrupt recovery ----------------------------------------
+
+    def test_corrupt_recovery_starts_fresh_without_a_dialog(self):
+        from pixel_forge.autosave import recovery_path
+        self._show()
+        self.win.load_image(self.image)
+        self.win._autosave_write_now()
+        path = recovery_path(self.auto_dir)
+        path.write_text("{broken", encoding="utf-8")
+        self._crash()
+        from pixel_forge.gui import MainWindow
+        # A fresh library folder: the session would restore the
+        # image on its own, and this test is about the recovery
+        # path, not the session fallback.
+        win2 = MainWindow(
+            library_dir=os.path.join(tempfile.mkdtemp(), "lib"),
+            restore=True,
+            autosave_dir=self.auto_dir)
+
+        def _must_not_ask(summary):
+            raise AssertionError("no dialog on corrupt recovery")
+
+        win2._ask_recovery = _must_not_ask
+        self._extra_windows.append(win2)
+        self._show(win2)
+        self.assertTrue(win2._autosave_corrupt)
+        self.assertIn("recovery file could not be read",
+                      win2.statusBar().currentMessage())
+        self.assertIsNone(win2.source_path)
+
+    # -- write gating --------------------------------------------
+
+    def test_no_write_when_nothing_changed(self):
+        import pixel_forge.gui as gui_mod
+        self._show()
+        self.win.load_image(self.image)
+        calls = []
+        real = gui_mod.save_recovery
+
+        def counting(directory, state):
+            calls.append(1)
+            return real(directory, state)
+
+        with mock.patch.object(gui_mod, "save_recovery",
+                               side_effect=counting):
+            self.win._autosave_write_now()
+            self.win._autosave_write_now()
+            self.win._autosave_write_now()
+        self.assertEqual(len(calls), 1)
+
+    def test_debounce_timer_writes_after_two_seconds(self):
+        from pixel_forge.autosave import has_recovery
+        self._show()
+        self.win.load_image(self.image)
+        self.assertFalse(has_recovery(self.auto_dir))
+        # A control change marks the state dirty; the timer
+        # writes it on its own, with no explicit flush.
+        self.win.width_spin.setValue(24)
+        deadline = time.monotonic() + 6
+        while (time.monotonic() < deadline
+               and not has_recovery(self.auto_dir)):
+            self.app.processEvents()
+            time.sleep(0.05)
+        self.assertTrue(has_recovery(self.auto_dir))
+
+    # -- video / prompt / code / tileset restore -----------------
+
+    def test_video_restore_brings_back_keep_and_drop(self):
+        if self.clip is None:
+            self.skipTest("ffmpeg not available")
+        self._show()
+        self.win.load_video(self.clip)
+        self.assertTrue(self._wait_for_video(self.win))
+        self.assertGreater(len(self.win.video_frames), 1)
+        self.win.video_keep[1] = False
+        self.win._refresh_after_keep_change()
+        self.win._autosave_write_now()
+        self._crash()
+        win2 = self._revived_window(answer=True)
+        self.assertEqual(win2.video_path, self.clip)
+        self.assertTrue(self._wait_for_video(win2))
+        self.assertEqual(len(win2.video_frames),
+                         len(self.win.video_frames))
+        self.assertFalse(win2.video_keep[1])
+        self.assertTrue(win2.video_keep[0])
+        self.assertIn("Brought back your video work",
+                      win2.statusBar().currentMessage())
+
+    def test_prompt_restore_brings_back_batch_and_typed_prompt(self):
+        from pixel_forge.imagegen import (
+            load_batch, new_batch, save_batch, set_keeper)
+        self._show()
+        batch, bdir = new_batch(
+            os.path.join(self.tmp, "batches"),
+            "a wooden stool", count=2)
+        for i, name in enumerate(("cand-01.png", "cand-02.png")):
+            write_image(make_solid_image(64, 64, 30 + i * 40,
+                                         100, 60),
+                        str(bdir / name))
+            batch["candidates"].append({"file": name,
+                                        "seed": 100 + i,
+                                        "status": "pending"})
+        save_batch(bdir, batch)
+        set_keeper(bdir, "cand-02.png")
+        batch = load_batch(bdir)
+        self.win._load_prompt_batch(batch, bdir,
+                                    batch["candidates"])
+        # The typed prompt moved on past the batch's own prompt.
+        self.win.prompt_edit.setText("a wooden chair")
+        self.win._autosave_write_now()
+        self._crash()
+        win2 = self._revived_window(answer=True)
+        self.assertEqual(str(win2.prompt_batch_dir), str(bdir))
+        self.assertEqual(win2.prompt_edit.text(),
+                         "a wooden chair")
+        self.assertEqual(win2.prompt_keeper, "cand-02.png")
+        self.assertEqual(len(win2.prompt_candidates), 2)
+
+    def test_code_restore_brings_back_import_and_asset(self):
+        self._show()
+        self.win.load_code([self.game])
+        self.assertEqual(len(self.win.code_assets), 2)
+        self.win._show_code_asset(1)
+        self.win._autosave_write_now()
+        self._crash()
+        win2 = self._revived_window(answer=True)
+        self.assertEqual(len(win2.code_assets), 2)
+        self.assertEqual(win2.code_current, 1)
+        self.assertEqual(win2.code_kind, "code")
+
+    def test_tileset_restore_regenerates_the_set(self):
+        self._show()
+        combo = self.win.tileset_mode_combo
+        combo.setCurrentIndex(combo.findData("blob"))
+        shape = self.win.tileset_shape_combo
+        shape.setCurrentIndex(shape.findData("rounded"))
+        self.assertTrue(self.win.load_tileset_base(self.base, "a"))
+        self.win._autosave_write_now()
+        self._crash()
+        win2 = self._revived_window(answer=True)
+        self.assertEqual(win2.tileset_mode, "blob")
+        self.assertEqual(win2.tileset_shape, "rounded")
+        self.assertEqual(win2.tileset_base_a_path, self.base)
+        self.assertIsNotNone(win2.tileset_tiles)
+        self.assertEqual(len(win2.tileset_tiles), 47)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1203,6 +1203,22 @@ tabs. A file given on the command line wins over the session: no
 restore happens then. A corrupt session file reads as empty and
 warns once in the status bar; the file itself is left alone.
 
+Autosave (v0.75) covers a crash, which the session does not:
+the window writes what you have open to a recovery file in
+~/.local/share/pixel-forge/autosave/ as you work (debounced,
+atomic, skipped when nothing changed), and a marker notes that
+a run is in progress. If Pixel Forge closes unexpectedly, the
+next launch asks whether to bring the work back: the image and
+its settings (edited pixels included), the video and its
+keep/drop choices, the prompt batch and the typed prompt, the
+code import, the tileset bases, and the tab you were on. A
+clean exit removes the marker and the recovery file, so a
+normal launch starts fresh. A recovery file that cannot be read
+starts fresh with a plain message. There is no toggle: crash
+recovery is always on. Frames from the sheet splitter have no
+video to re-extract from, so they are not recovered; a recovered
+edited result keeps its pixels but not its layer structure.
+
 ## What v0.30 does and does not do
 
 v0.30 is Items 1–6 of the plan: image to pixel sprite core, video to

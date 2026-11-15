@@ -94,9 +94,15 @@ from .palettes import NAMED_PALETTES, PALETTE_LABELS
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
                        count_opaque_colors, load_image, pixelize_image,
                        plural)
+from .autosave import (autosave_home, crashed, discard_recovery,
+                       empty_recovery, load_recovery,
+                       load_recovery_image, mark_clean_exit,
+                       mark_running, recovery_image_path,
+                       recovery_path, save_recovery,
+                       save_recovery_image)
 from .pngio import write_png
 from .presets import (BUILTIN_PRESETS, SHEET_COLS_VALUES, PresetStore,
-                      read_preset_export)
+                      read_preset_export, validate_settings)
 from .qtimage import from_qimage, to_qimage
 from .session import (load_session, record_recent, save_session,
                       set_last_code, set_last_image, set_last_video)
@@ -136,6 +142,10 @@ VIDEO_DEBOUNCE_MS = 300  # ms of no control changes before a Video
 TEXTURE_DEBOUNCE_MS = 300  # same idea for the Code tab's
 # texture controls (task 26): a dragged size spin fires dozens
 # of changes, and only the settled one needs a re-render.
+AUTOSAVE_DEBOUNCE_MS = 2000  # ms of no changes before the
+# autosave writes (task 55): a dragged slider or fast typing
+# marks the state dirty again and again, and only the settled
+# state is written.
 
 # Export-button contrast (task 22): the text is #e8e6e3 on the
 # button background. The old orange (#b35a1b) measured 3.84:1 —
@@ -2892,7 +2902,8 @@ def clamp_geometry(rect, available):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, library_dir=None, restore=True, settings=None):
+    def __init__(self, library_dir=None, restore=True, settings=None,
+                 autosave_dir=None):
         super().__init__()
         self.setWindowTitle("Pixel Forge %s" % __version__)
         # Geometry persistence (task 66): settings is a test hook
@@ -2900,6 +2911,20 @@ class MainWindow(QMainWindow):
         # a window built without one behaves exactly as before
         # (1020x640, nothing saved).
         self._settings = settings
+        # Autosave flags (task 55) live here, before the tabs are
+        # built: control signals fire during construction, and
+        # the dirty-marking hooks read these flags. The crash
+        # check and the timer come at the end of __init__.
+        self._autosave_ready = False
+        self._autosave_broken = False
+        self._autosave_dirty = False
+        self._autosave_last = None
+        self._autosave_offered = False
+        self._autosave_pending_video = None
+        self._autosave_video_restored = False
+        self._autosave_crashed = False
+        self._autosave_recovery = None
+        self._autosave_corrupt = False
         self._restore_geometry()
         # Theme (task 67): the saved choice, or dark on first
         # launch. Applied before the widgets are built, so they
@@ -3103,6 +3128,11 @@ class MainWindow(QMainWindow):
         self.code_assets = []
         self.code_not_rendered = []
         self.code_skipped = []
+        # The paths the current Code tab import was given, in
+        # order (task 55: the autosave restores from these — the
+        # session's last_code only covers code imports, not
+        # skins and textures, which load through load_game_asset).
+        self.code_paths = None
         self.code_source = None
         # The first source file of the current import — code_source
         # is a joined display string, so exports default next to
@@ -3164,6 +3194,31 @@ class MainWindow(QMainWindow):
         self._refresh_prompt_status()
         self._load_prompt_history()
         self._load_session()
+        # Autosave (task 55): crash recovery for in-progress
+        # work. The crash check runs first — a marker from a
+        # previous run means it crashed — then this run writes
+        # its own marker. Nothing is written until the recovery
+        # question is settled in showEvent: an early write would
+        # overwrite the recovery file with an empty state.
+        self._autosave_dir = (Path(autosave_dir)
+                              if autosave_dir is not None
+                              else autosave_home())
+        self._autosave_crashed = crashed(self._autosave_dir)
+        if self._autosave_crashed:
+            (self._autosave_recovery,
+             self._autosave_corrupt) = load_recovery(
+                 self._autosave_dir)
+        try:
+            mark_running(self._autosave_dir)
+        except OSError:
+            self._autosave_broken = True
+            self.statusBar().showMessage(
+                "Autosave is off. The recovery folder could not "
+                "be written")
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.setInterval(AUTOSAVE_DEBOUNCE_MS)
+        self._autosave_timer.timeout.connect(self._autosave_write)
         # Undo snapshots (task 30): the tabs exist now, so the
         # first control change has a "before" to record against.
         self._sync_tab_settings()
@@ -3379,6 +3434,7 @@ class MainWindow(QMainWindow):
         self._push_undo(_ControlChangeCommand(
             self, tab, before, current,
             self._control_change_text(before, current)))
+        self._mark_autosave_dirty()
 
     def _control_change_text(self, before, after):
         """A short name for a control change, for the Edit menu.
@@ -5204,6 +5260,7 @@ class MainWindow(QMainWindow):
         self._refresh_pixmaps()
         self._refresh_info_label()
         self._refresh_editor_colors()
+        self._mark_autosave_dirty()
 
     def _clear_normal_map(self):
         """Drop the generated normal map and go back to showing
@@ -6167,15 +6224,20 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------- input
 
-    def load_video(self, path):
+    def load_video(self, path, keep_range=False):
         """Import a video: start a background extract + pixelize
         run and return True at once — the window stays responsive
         while the frames land in _on_video_run_done. Returns False
         (with a message box) when ffmpeg is missing; that check is
         cheap and stays synchronous so a missing ffmpeg still fails
         fast, exactly as before. Also False when the user declines
-        the big-extraction confirm (task 25).
+        the big-extraction confirm (task 25). keep_range is the
+        crash-recovery path (task 55): the range belongs to the
+        same clip, so the fresh-import clear is skipped.
         """
+        # Autosave (task 55): a new video replaces whatever a
+        # pending crash-recovery set was meant for.
+        self._autosave_pending_video = None
         self._stop_playback()
         try:
             require_ffmpeg()
@@ -6196,9 +6258,11 @@ class MainWindow(QMainWindow):
         # import always starts from the whole clip (empty = full
         # range, the fresh-tab default). The other settings (fps,
         # size, palette, colors, dither, every-Nth, preset) are the
-        # user's working choices and stay.
-        self.video_start_edit.clear()
-        self.video_end_edit.clear()
+        # user's working choices and stay. Crash recovery (task
+        # 55) keeps the range: it belongs to the same clip.
+        if not keep_range:
+            self.video_start_edit.clear()
+            self.video_end_edit.clear()
         self._refresh_video_estimate()
         started = self._reload_video_frames(fresh=True)
         if started:
@@ -6262,6 +6326,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             "Split %s (%s)"
             % (source_name, plural(len(frames), "frame")))
+        self._mark_autosave_dirty()
 
     def _cleanup_video_raw(self):
         if self.video_raw_dir is not None:
@@ -6319,6 +6384,9 @@ class MainWindow(QMainWindow):
         the frames land in _on_video_run_done, and a failure
         lands in _on_video_run_failed with a message box, the
         old frames still in place."""
+        # Autosave (task 55): a run is a long operation, so the
+        # work is written down before it starts.
+        self._autosave_write_now()
         if self.video_path is None:
             return False
         # Guardrail (task 25): a long clip at a high fps would
@@ -6491,6 +6559,9 @@ class MainWindow(QMainWindow):
         if len(self.video_durations) != len(self.video_frames):
             self.video_durations = [self._video_default_duration()] \
                 * len(self.video_frames)
+        # Autosave (task 55): a crash-recovery keep/drop set
+        # lands here, before the strip is rebuilt from it.
+        self._apply_pending_video_restore()
         kept = self._kept_indices()
         self.video_current = kept[0] if kept else 0
         self._rebuild_strip()
@@ -6512,6 +6583,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "Pixelized %d frames" % len(result["frames"]))
         self._show_drop_summary()
+        if self._autosave_video_restored:
+            self._autosave_video_restored = False
+            self.statusBar().showMessage(
+                "Brought back your video work from last time.")
 
     def _show_drop_summary(self):
         """Put a multi-file drop's summary back after a video
@@ -6535,6 +6610,9 @@ class MainWindow(QMainWindow):
             self._video_orphans.discard(worker)
             return
         self.video_worker = None
+        # Autosave (task 55): no frames landed, so a pending
+        # crash-recovery keep/drop set has nothing to land on.
+        self._autosave_pending_video = None
         settings = worker.settings
         if settings["mode"] == "repixelize":
             # Same as the old synchronous path: a pixelize
@@ -6808,6 +6886,7 @@ class MainWindow(QMainWindow):
                     self.video_tag_list.setCurrentRow(row)
                     break
         self._on_video_tag_selected()
+        self._mark_autosave_dirty()
 
     def _selected_video_tag(self):
         """The picked tag, or None when nothing is picked."""
@@ -6986,6 +7065,7 @@ class MainWindow(QMainWindow):
         self._clamp_video_tags()
         self._refresh_video_preview()
         self._update_video_info()
+        self._mark_autosave_dirty()
 
     def _set_all_keep(self, keep):
         self.video_keep = [keep] * len(self.video_frames)
@@ -7983,6 +8063,9 @@ class MainWindow(QMainWindow):
     def _on_prompt_generate(self):
         if self._prompt_generating():
             return
+        # Autosave (task 55): generation is a long operation, so
+        # the work is written down before it starts.
+        self._autosave_write_now()
         self._refresh_prompt_status()
         try:
             prompt = validate_prompt(self.prompt_edit.text())
@@ -8373,6 +8456,7 @@ class MainWindow(QMainWindow):
             set_last_video(self._session, str(path))
         self._save_session()
         self._refresh_recent_menu()
+        self._mark_autosave_dirty()
 
     def _record_code_session(self, paths, files):
         """A code import loaded successfully (task 29): the paths
@@ -8387,6 +8471,7 @@ class MainWindow(QMainWindow):
             record_recent(self._session, str(found), "code")
         self._save_session()
         self._refresh_recent_menu()
+        self._mark_autosave_dirty()
 
     def _refresh_recent_menu(self):
         """Rebuild the Recent files submenu from the session —
@@ -8475,6 +8560,530 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "Could not restore %s — no longer there"
                 % ", ".join(skipped))
+
+    # --------------------------------------------------------- autosave
+    # Task 55: crash recovery for in-progress work. The state is
+    # references + settings (see pixel_forge/autosave.py for the
+    # payload per tab); only an edited Image result carries
+    # pixels. Writes are debounced, atomic, and skipped when
+    # nothing changed — a quiet window costs one comparison per
+    # flush, never a disk write.
+
+    def _autosave_state(self):
+        """The current work as a recovery state (see
+        pixel_forge/autosave.py). Cheap: paths, control values,
+        and small lists — no pixel reads."""
+        from datetime import datetime, timezone
+
+        state = empty_recovery()
+        state["saved_at"] = datetime.now(timezone.utc).isoformat()
+        state["current_tab"] = self.tabs.currentIndex()
+        generated = None
+        if (self._generated_kind is not None
+                and self.source_image is not None):
+            # The size is the sprite's own size — the tab's
+            # width spin may have moved on since generation.
+            generated = {"kind": self._generated_kind,
+                         "seed": self._generated_seed,
+                         "size": self.source_image.width()}
+        state["image"] = {
+            "source": self.source_path,
+            "generated": generated,
+            "settings": self._read_tab_settings("image"),
+            "preset": self._tab_controls("image")[
+                "preset_combo"].currentData(),
+            "edited": bool(self._result_edited),
+        }
+        state["video"] = {
+            "source": self.video_path,
+            "settings": self._read_tab_settings("video"),
+            "preset": self._tab_controls("video")[
+                "preset_combo"].currentData(),
+            "start": self.video_start_edit.text(),
+            "end": self.video_end_edit.text(),
+            "every": self.video_every_spin.value(),
+            "count": len(self.video_frames),
+            "keep": list(self.video_keep),
+            "order": list(self.video_order),
+            "durations": list(self.video_durations),
+            "tags": [dict(tag) for tag in self.video_tags],
+        }
+        state["prompt"] = {
+            "batch_dir": (str(self.prompt_batch_dir)
+                          if self.prompt_batch_dir is not None
+                          else None),
+            "prompt": self.prompt_edit.text(),
+            "negative": self.prompt_negative_edit.text(),
+            "steps": self.prompt_steps_spin.value(),
+            "cfg": self.prompt_cfg_spin.value(),
+            "size": self.prompt_gen_size_spin.value(),
+            "settings": self._read_tab_settings("prompt"),
+            "preset": self._tab_controls("prompt")[
+                "preset_combo"].currentData(),
+        }
+        state["code"] = {
+            "paths": (list(self.code_paths)
+                      if self.code_paths else []),
+            "kind": self.code_kind,
+            "current": self.code_current,
+        }
+        state["tileset"] = {
+            "mode": self.tileset_mode,
+            "shape": self.tileset_shape,
+            "base_a": self.tileset_base_a_path,
+            "base_b": self.tileset_base_b_path,
+        }
+        return state
+
+    def _mark_autosave_dirty(self):
+        """The work changed — restart the debounce timer. A
+        no-op until the recovery question is settled, and while
+        autosave is broken."""
+        if not self._autosave_ready or self._autosave_broken:
+            return
+        self._autosave_dirty = True
+        self._autosave_timer.start()
+
+    def _autosave_write_now(self):
+        """Flush the autosave at once (tab switch, long
+        operation) — the change check still applies, so a quiet
+        tab costs one comparison."""
+        if not self._autosave_ready or self._autosave_broken:
+            return
+        self._autosave_dirty = True
+        self._autosave_timer.stop()
+        self._autosave_write()
+
+    def _autosave_write(self):
+        """Write the recovery state when the work changed. The
+        saved_at timestamp is not part of the comparison — it
+        moves on every write, so comparing it would defeat the
+        check. A missing recovery file also counts as changed:
+        another window may have discarded it, and the next write
+        must put the state back."""
+        if (not self._autosave_ready or self._autosave_broken
+                or not self._autosave_dirty):
+            return
+        state = self._autosave_state()
+        comparable = {key: value for key, value in state.items()
+                      if key != "saved_at"}
+        last = self._autosave_last
+        last_comparable = None if last is None else {
+            key: value for key, value in last.items()
+            if key != "saved_at"}
+        if (comparable == last_comparable
+                and recovery_path(self._autosave_dir).is_file()):
+            self._autosave_dirty = False
+            return
+        try:
+            save_recovery(self._autosave_dir, state)
+            if (state["image"]["edited"]
+                    and self.result_image is not None):
+                save_recovery_image(self._autosave_dir,
+                                    self.result_image)
+            else:
+                # No unsaved edits — drop a stale recovery image
+                # so an old edited result is never restored by
+                # mistake.
+                recovery_image_path(
+                    self._autosave_dir).unlink(missing_ok=True)
+        except (PixelForgeError, OSError, ValueError) as exc:
+            self.statusBar().showMessage(
+                "Autosave could not write: %s" % exc)
+            return
+        self._autosave_last = state
+        self._autosave_dirty = False
+
+    def _offer_recovery(self):
+        """Offer the crashed run's work back, once. Returns True
+        when a recovery was accepted and restored — the caller
+        then skips the normal session restore. Anything else
+        returns False and the session restore runs as usual."""
+        if not self._autosave_crashed:
+            return False
+        if self._autosave_corrupt:
+            self.statusBar().showMessage(
+                "Pixel Forge closed unexpectedly last time, and "
+                "the recovery file could not be read, so this "
+                "is a fresh start")
+            return False
+        state = self._autosave_recovery
+        if state is None or not self._recovery_has_work(state):
+            return False
+        if not self._ask_recovery(self._recovery_summary(state)):
+            # Declined: the user said to start fresh, so the
+            # recovery file goes — it is an explicit discard.
+            discard_recovery(self._autosave_dir)
+            return False
+        self._restore_recovery(state)
+        return True
+
+    def _recovery_has_work(self, state):
+        """True when the recovered state holds anything worth
+        offering — a crash with nothing open starts fresh
+        silently, with no dialog."""
+        image = state.get("image") or {}
+        video = state.get("video") or {}
+        prompt = state.get("prompt") or {}
+        code = state.get("code") or {}
+        tileset = state.get("tileset") or {}
+        return bool(
+            image.get("source") or image.get("generated")
+            or video.get("source")
+            or prompt.get("batch_dir")
+            or (prompt.get("prompt") or "").strip()
+            or code.get("paths")
+            or tileset.get("base_a") or tileset.get("base_b"))
+
+    def _recovery_summary(self, state):
+        """One plain line per tab with work in it, for the
+        recovery dialog — file names, not paths."""
+        lines = []
+        image = state.get("image") or {}
+        if image.get("source"):
+            line = "Image: %s" % Path(image["source"]).name
+            if image.get("edited"):
+                line += " (with edits not saved yet)"
+            lines.append(line)
+        elif image.get("generated"):
+            lines.append("Image: a generated sprite")
+        video = state.get("video") or {}
+        if video.get("source"):
+            lines.append("Video: %s" % Path(video["source"]).name)
+        prompt = state.get("prompt") or {}
+        if prompt.get("batch_dir"):
+            text = (prompt.get("prompt") or "").strip()
+            if text:
+                lines.append("Prompt: %s" % text)
+            else:
+                lines.append("Prompt: a generated batch")
+        elif (prompt.get("prompt") or "").strip():
+            lines.append("Prompt: %s"
+                         % (prompt["prompt"] or "").strip())
+        code = state.get("code") or {}
+        if code.get("paths"):
+            lines.append("Code: %s"
+                         % Path(code["paths"][0]).name)
+        tileset = state.get("tileset") or {}
+        if tileset.get("base_a") or tileset.get("base_b"):
+            lines.append("Tileset: base tiles picked")
+        return "\n".join(lines)
+
+    def _ask_recovery(self, summary):
+        """The recovery dialog. "Bring back" is the default —
+        starting fresh discards the recovery file, so it is the
+        destructive choice and never the default (U23)."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Bring back your work?")
+        box.setText("Pixel Forge closed unexpectedly last time. "
+                    "Bring back the work you had open?")
+        box.setInformativeText(summary)
+        bring = box.addButton(
+            "Bring back", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(
+            "Start fresh", QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(bring)
+        box.exec()
+        return box.clickedButton() is bring
+
+    def _apply_recovery_settings(self, tab, tab_state):
+        """Apply a recovered tab's pixelize settings + preset.
+        A stored settings dict that fails validation is skipped
+        — the tab keeps its defaults instead of applying
+        nonsense from a hand-edited file. Goes through the undo
+        path's apply, so the restore itself records no undo step
+        and the next real change records against the restored
+        state."""
+        if not isinstance(tab_state, dict):
+            return
+        settings = tab_state.get("settings")
+        if isinstance(settings, dict):
+            try:
+                clean = validate_settings(settings)
+            except PixelForgeError:
+                clean = None
+            if clean is not None:
+                clean["preset"] = tab_state.get("preset")
+                self._apply_control_state(tab, clean)
+
+    def _restore_recovery(self, state):
+        """Bring the crashed run's work back, tab by tab. A file
+        that no longer exists is skipped and named at the end —
+        one missing file never blocks the rest. The recovery
+        file is NOT deleted here: restoring must never destroy
+        the only copy (a second crash during restore would lose
+        it). It is replaced by the next autosave write, and
+        discarded on a clean exit."""
+        skipped = []
+        self._restore_recovery_image(state.get("image"), skipped)
+        self._restore_recovery_video(state.get("video"), skipped)
+        self._restore_recovery_prompt(state.get("prompt"), skipped)
+        self._restore_recovery_code(state.get("code"), skipped)
+        self._restore_recovery_tileset(state.get("tileset"),
+                                       skipped)
+        tab = state.get("current_tab")
+        if (isinstance(tab, int) and not isinstance(tab, bool)
+                and 0 <= tab < self.tabs.count()):
+            self.tabs.setCurrentIndex(tab)
+        # The restored state IS the recovery file's content, so
+        # the next autosave write is correctly skipped as
+        # unchanged.
+        self._autosave_last = state
+        if skipped:
+            self.statusBar().showMessage(
+                "Brought back your work from last time. Could "
+                "not bring back %s (no longer there)"
+                % ", ".join(skipped))
+        else:
+            self.statusBar().showMessage(
+                "Brought back your work from last time.")
+
+    def _restore_recovery_image(self, image_state, skipped):
+        if not isinstance(image_state, dict):
+            return
+        self._apply_recovery_settings("image", image_state)
+        source = image_state.get("source")
+        if source:
+            if not Path(source).is_file():
+                skipped.append(Path(source).name)
+                return
+            if not self.load_image(source):
+                skipped.append(Path(source).name)
+                return
+        else:
+            generated = image_state.get("generated")
+            if isinstance(generated, dict):
+                self._restore_generated_sprite(generated)
+                if self.source_image is None:
+                    skipped.append("the generated sprite")
+        if image_state.get("edited"):
+            recovered = load_recovery_image(self._autosave_dir)
+            if recovered is None and self.result_image is not None:
+                # The edits were recorded but their pixels are
+                # gone — say so instead of pretending.
+                name = (Path(source).name if source
+                        else "the generated sprite")
+                skipped.append("the edits to %s" % name)
+            if recovered is not None and self.result_image \
+                    is not None:
+                # The edited pixels come back as the base layer;
+                # the fresh pixelize result stays the original,
+                # so _recompute_edited still derives the flag
+                # from the stack (recovered != original). The
+                # layer structure is not recovered — only the
+                # composited result.
+                self._layers = [Layer("Background", recovered,
+                                      True)]
+                self._active_layer = self._layers[0]
+                self._refresh_result()
+                self._refresh_layer_list()
+                self._update_editor_enabled()
+
+    def _restore_generated_sprite(self, generated):
+        """Regenerate a procedural sprite from its recorded kind
+        + seed + size — the same sprite, exactly (task 44)."""
+        kind = generated.get("kind")
+        seed = generated.get("seed")
+        size = generated.get("size")
+        if (kind not in procedural.KINDS
+                or not isinstance(seed, int)
+                or not isinstance(size, int)
+                or not 8 <= size <= 512):
+            return
+        try:
+            sprite = procedural.generate(kind, seed, size=size)
+        except PixelForgeError:
+            return
+        self.source_image = sprite
+        self.source_path = None
+        self._generated_kind = kind
+        self._generated_seed = seed
+        self.procedural_seed_label.setText(
+            "Seed %d, %s. Type the seed in to make this "
+            "sprite again." % (seed, procedural.KIND_LABELS[kind]))
+        self.update_preview()
+        self._on_fit_image_zoom()
+
+    def _restore_recovery_video(self, video_state, skipped):
+        if not isinstance(video_state, dict):
+            return
+        self._apply_recovery_settings("video", video_state)
+        start = video_state.get("start")
+        if isinstance(start, str):
+            self.video_start_edit.setText(start)
+        end = video_state.get("end")
+        if isinstance(end, str):
+            self.video_end_edit.setText(end)
+        every = video_state.get("every")
+        if (isinstance(every, int) and not isinstance(every, bool)
+                and 1 <= every <= 60):
+            self.video_every_spin.setValue(every)
+        source = video_state.get("source")
+        if not source:
+            return
+        if not Path(source).is_file():
+            skipped.append(Path(source).name)
+            return
+        # The range belongs to THIS clip (the same file), so the
+        # fresh-import clear is skipped — otherwise the
+        # re-extraction would cover the whole clip and the
+        # keep/drop set would name the wrong frames.
+        if not self.load_video(source, keep_range=True):
+            return
+        # The frames land asynchronously; the keep/drop set is
+        # applied in _on_video_run_done, once the frame count is
+        # known.
+        self._autosave_pending_video = {
+            "source": str(source),
+            "count": video_state.get("count"),
+            "keep": video_state.get("keep"),
+            "order": video_state.get("order"),
+            "durations": video_state.get("durations"),
+            "tags": video_state.get("tags"),
+        }
+
+    def _apply_pending_video_restore(self):
+        """Apply a crash-recovery keep/drop set to the frames
+        that just landed. The set names frames by position, so
+        it applies only when the re-extraction yielded the same
+        video and the same frame count — anything else drops
+        the set instead of mislabeling frames."""
+        pending = self._autosave_pending_video
+        self._autosave_pending_video = None
+        if pending is None:
+            return
+        if pending.get("source") != self.video_path:
+            return
+        count = pending.get("count")
+        keep = pending.get("keep")
+        order = pending.get("order")
+        durations = pending.get("durations")
+        tags = pending.get("tags")
+        if (not isinstance(count, int)
+                or isinstance(count, bool)
+                or count != len(self.video_frames)
+                or not isinstance(keep, list)
+                or len(keep) != count
+                or not isinstance(order, list)
+                or len(order) != count
+                or not all(isinstance(item, int)
+                           and not isinstance(item, bool)
+                           for item in order)
+                or sorted(order) != list(range(count))
+                or not isinstance(durations, list)
+                or len(durations) != count
+                or not all(isinstance(item, int)
+                           and not isinstance(item, bool)
+                           for item in durations)
+                or not isinstance(tags, list)):
+            return
+        self.video_keep = [bool(item) for item in keep]
+        self.video_order = [int(item) for item in order]
+        self.video_durations = [int(item) for item in durations]
+        self.video_tags = [dict(item) for item in tags
+                           if isinstance(item, dict)]
+        self._refresh_video_tag_list()
+        self._autosave_video_restored = True
+
+    def _restore_recovery_prompt(self, prompt_state, skipped):
+        if not isinstance(prompt_state, dict):
+            return
+        self._apply_recovery_settings("prompt", prompt_state)
+        bdir = prompt_state.get("batch_dir")
+        if bdir:
+            if not Path(bdir).is_dir():
+                skipped.append(Path(bdir).name)
+            else:
+                try:
+                    batch = load_batch(bdir)
+                except PixelForgeError:
+                    skipped.append(Path(bdir).name)
+                    batch = None
+                if batch is not None:
+                    landed = [c for c in batch["candidates"]
+                              if c["status"]
+                              in ("pending", "kept")]
+                    if landed:
+                        self._load_prompt_batch(batch, Path(bdir),
+                                                landed)
+                    else:
+                        skipped.append(Path(bdir).name)
+        # The edit boxes may hold a newer prompt than the batch
+        # (typed after the last generation), so their text wins.
+        if isinstance(prompt_state.get("prompt"), str):
+            self.prompt_edit.setText(prompt_state["prompt"])
+        if isinstance(prompt_state.get("negative"), str):
+            self.prompt_negative_edit.setText(
+                prompt_state["negative"])
+        steps = prompt_state.get("steps")
+        if (isinstance(steps, int) and not isinstance(steps, bool)
+                and self.prompt_steps_spin.minimum()
+                <= steps <= self.prompt_steps_spin.maximum()):
+            self.prompt_steps_spin.setValue(steps)
+        cfg = prompt_state.get("cfg")
+        if (isinstance(cfg, (int, float))
+                and not isinstance(cfg, bool)
+                and self.prompt_cfg_spin.minimum()
+                <= cfg <= self.prompt_cfg_spin.maximum()):
+            self.prompt_cfg_spin.setValue(cfg)
+        size = prompt_state.get("size")
+        if (isinstance(size, int) and not isinstance(size, bool)
+                and self.prompt_gen_size_spin.minimum()
+                <= size <= self.prompt_gen_size_spin.maximum()):
+            self.prompt_gen_size_spin.setValue(size)
+
+    def _restore_recovery_code(self, code_state, skipped):
+        if not isinstance(code_state, dict):
+            return
+        paths = code_state.get("paths") or []
+        existing = [p for p in paths
+                    if isinstance(p, str) and Path(p).exists()]
+        if not existing:
+            if paths:
+                skipped.extend(Path(p).name for p in paths
+                               if isinstance(p, str))
+            return
+        kind = code_state.get("kind")
+        if kind in ("skin", "texture"):
+            if not self.load_game_asset(existing[0]):
+                return
+        else:
+            if not self.load_code(existing):
+                return
+        current = code_state.get("current")
+        if (isinstance(current, int)
+                and not isinstance(current, bool)
+                and 0 <= current < len(self.code_assets)):
+            self._show_code_asset(current)
+
+    def _restore_recovery_tileset(self, tileset_state, skipped):
+        if not isinstance(tileset_state, dict):
+            return
+        mode = tileset_state.get("mode")
+        if mode in ("wang", "blob"):
+            index = self.tileset_mode_combo.findData(mode)
+            if index >= 0:
+                self.tileset_mode_combo.setCurrentIndex(index)
+        shape = tileset_state.get("shape")
+        if shape in ("square", "rounded"):
+            index = self.tileset_shape_combo.findData(shape)
+            if index >= 0:
+                self.tileset_shape_combo.setCurrentIndex(index)
+        base_a = tileset_state.get("base_a")
+        if base_a:
+            if Path(base_a).is_file():
+                self.load_tileset_base(base_a, "a")
+            else:
+                skipped.append(Path(base_a).name)
+        base_b = tileset_state.get("base_b")
+        if base_b:
+            if Path(base_b).is_file():
+                self.load_tileset_base(base_b, "b")
+            else:
+                skipped.append(Path(base_b).name)
+        if (self.tileset_mode is not None
+                and self.tileset_base_a is not None):
+            self._on_tileset_generate()
 
     def _record_prompt_text(self, prompt):
         if self._prompt_history is None:
@@ -8590,6 +9199,17 @@ class MainWindow(QMainWindow):
                 self, "No usable candidates",
                 "that batch has no usable candidates left")
             return
+        self._load_prompt_batch(batch, bdir, landed)
+        self.statusBar().showMessage(
+            "Reopened batch from History: %s" % batch["prompt"])
+
+    def _load_prompt_batch(self, batch, bdir, landed):
+        """Land a batch on the Prompt tab: its candidates and
+        keeper come back, with the prompt, negative prompt, and
+        generation settings it was made with. Shared by History
+        reopen and crash recovery (task 55) — the keeper comes
+        from batch.json, where set_keeper already persisted it.
+        The caller guarantees landed is non-empty."""
         self._cleanup_prompt_batch()
         self.prompt_batch_dir = bdir
         self.prompt_candidates = landed
@@ -8611,8 +9231,6 @@ class MainWindow(QMainWindow):
         else:
             self._pick_prompt_keeper(landed[0]["file"])
         self._update_prompt_iter_buttons()
-        self.statusBar().showMessage(
-            "Reopened batch from History: %s" % batch["prompt"])
 
     def _on_negative_preset_picked(self, index):
         name = self.prompt_negative_preset_combo.itemData(index)
@@ -9160,6 +9778,7 @@ class MainWindow(QMainWindow):
         self.code_assets = result["assets"]
         self.code_not_rendered = result["not_rendered"]
         self.code_skipped = result["skipped"]
+        self.code_paths = [str(p) for p in paths]
         self.code_source = ", ".join(str(p) for p in paths)
         self.code_source_first = str(paths[0]) if paths else None
         self.code_kind = "code"
@@ -9198,6 +9817,7 @@ class MainWindow(QMainWindow):
             warn_dialog(self, "Could not import game asset", str(exc))
             return False
         layout = detect_skin(image)
+        self.code_paths = [str(path)]
         self.code_source = str(path)
         self.code_source_first = str(path)
         self.code_not_rendered = []
@@ -10660,6 +11280,7 @@ class MainWindow(QMainWindow):
             "Choose terrain A" if is_wang else "Choose base tile")
         self._clear_tileset()
         self._refresh_tileset_buttons()
+        self._mark_autosave_dirty()
 
     def _on_tileset_shape_changed(self, _index):
         """A blob shape was picked (or unpicked): record it and
@@ -10669,6 +11290,7 @@ class MainWindow(QMainWindow):
         self.tileset_shape = self.tileset_shape_combo.currentData()
         self._clear_tileset()
         self._refresh_tileset_buttons()
+        self._mark_autosave_dirty()
 
     def _tileset_shape(self):
         """The blob shape to generate with: the picked shape, or
@@ -10755,6 +11377,7 @@ class MainWindow(QMainWindow):
             role = "base tile"
         self.statusBar().showMessage("Loaded %s as %s"
                                      % (Path(path).name, role))
+        self._mark_autosave_dirty()
         return True
 
     def _on_tileset_pick_a(self):
@@ -10917,6 +11540,9 @@ class MainWindow(QMainWindow):
             default, self.save_tileset_to_library)
 
     def _on_tab_changed(self, index):
+        # Autosave (task 55): leaving a tab writes the work down
+        # at once, so a crash on the next tab never loses it.
+        self._autosave_write_now()
         # The library can change outside this tab (a save from the
         # Image tab, a CLI add) — re-read it whenever the tab is
         # opened, so the grid is never stale.
@@ -11684,7 +12310,19 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         if not self._session_restored:
             self._session_restored = True
-            self.restore_session()
+            # Autosave (task 55): a crash leaves a marker + a
+            # recovery file, and the work is offered back. A
+            # restore replaces the session restore (it covers
+            # the same files and more); anything else falls
+            # through to the normal restore.
+            if not self._offer_recovery():
+                self.restore_session()
+        # Autosave writes start only now, once the recovery
+        # question is settled — an earlier write would have
+        # overwritten the recovery file with an empty state.
+        if not self._autosave_offered:
+            self._autosave_offered = True
+            self._autosave_ready = True
         # Update check (task 48): once per launch, after the
         # window is shown, and only when the user opted in —
         # off by default, so a fresh install makes no request.
@@ -11880,6 +12518,17 @@ class MainWindow(QMainWindow):
         self._stop_video_worker()
         self._cleanup_video_raw()
         self._cleanup_prompt_batch()
+        # Autosave (task 55): a clean exit leaves no marker and
+        # no recovery file — the next launch starts fresh (the
+        # session still restores the last files). A crash skips
+        # all of this, which is exactly what the next launch
+        # detects.
+        self._autosave_timer.stop()
+        try:
+            mark_clean_exit(self._autosave_dir)
+            discard_recovery(self._autosave_dir)
+        except OSError:
+            pass
         # Undo is per-window-session only (task 30): clearing
         # the stack discards every entry, which is what
         # permanently deletes the files of undone deletes.
