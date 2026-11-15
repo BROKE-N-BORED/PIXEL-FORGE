@@ -67,6 +67,7 @@ from .library import Library, normalize_tags
 from .normalmap import generate_normal_map
 from .procedural import KINDS, generate as generate_procedural
 from .palette_io import (PaletteStore, extract_palette_from_image)
+from .selftest import format_duration, run_self_test, self_test_home
 from .palettes import NAMED_PALETTES, PALETTE_LABELS
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
                        load_image, pixelize_file, plural)
@@ -269,8 +270,29 @@ def build_parser():
     parser.add_argument(
         "--quiet", dest="quiet", action="store_true", default=False,
         help="no info lines on stdout (errors still print)")
+    parser.add_argument(
+        "--self-test", dest="self_test", action="store_true",
+        default=False,
+        help="run the live generation self-test: check the image "
+        "engine and model, generate one picture, pixelize it, "
+        "and report timing and output (same as the self-test "
+        "command)")
+    # --out at the top level, for the --self-test flag: the flag
+    # is the same command as the subcommand, so it takes the
+    # same option. dest is self_test_out, not out — a top-level
+    # dest of "out" would leak into every other subcommand that
+    # has its own --out.
+    parser.add_argument(
+        "--out", dest="self_test_out", default=None,
+        metavar="DIR",
+        help="folder to write the self-test run into (with "
+        "--self-test; default: "
+        "~/.local/share/pixel-forge/self-test/)")
     sub = parser.add_subparsers(dest="command", metavar="command")
-    sub.required = True
+    # Not required: the top-level --self-test flag is a command
+    # on its own. main() still requires a command or the flag —
+    # a bare `pixel-forge` prints help and exits 2, as before.
+    sub.required = False
 
     convert = sub.add_parser(
         "convert", help="convert one image, or every image in a "
@@ -346,6 +368,17 @@ def build_parser():
                         help="output folder for the candidates, their "
                         "pixelized versions, and batch.json (default: "
                         "<prompt-slug>-prompt in the current folder)")
+
+    self_test = sub.add_parser(
+        "self-test", help="prove the live generation path works: "
+        "check the image engine and model, generate one picture "
+        "from a fixed prompt, pixelize it, and report timing "
+        "and output (also available as pixel-forge --self-test)")
+    self_test.add_argument(
+        "--out", default=None,
+        help="folder to write the run into (default: "
+        "~/.local/share/pixel-forge/self-test/)")
+    _add_output_args(self_test)
 
     sheet = sub.add_parser(
         "sheet", help="pack a folder of PNG frames into "
@@ -896,6 +929,37 @@ def cmd_prompt(args):
                   % (record["file"], record["pixel_error"]),
                   file=sys.stderr)
     return 0
+
+
+def cmd_self_test(args):
+    """The self-test command (task 70): prove the live generation
+    path works, in one step. The report is the command's output
+    — on failure it names the reason in plain words and the
+    exit code is 1, so a script can use it; nothing prints a
+    traceback."""
+    def _progress(stage, message):
+        _info(args, message)
+
+    # --out can come from either spelling of the command: the
+    # self-test subcommand's --out when it is there, else the
+    # top-level --out given with the --self-test flag. Another
+    # subcommand's --out never applies here.
+    if getattr(args, "command", None) == "self-test":
+        out_dir = getattr(args, "out", None)
+    else:
+        out_dir = None
+    if out_dir is None:
+        out_dir = getattr(args, "self_test_out", None)
+    report = run_self_test(out_dir=out_dir, progress=_progress)
+    _emit_json(args, report)
+    if report["state"] == "ok":
+        _info(args, "self-test passed in %s: %s and %s in %s"
+              % (format_duration(report["timings"]["total"]),
+                 report["candidate"], report["pixel_file"],
+                 report["batch_dir"]))
+        return 0
+    _info(args, "self-test failed: %s" % report["reason"])
+    return 1
 
 
 def cmd_sheet(args):
@@ -1712,12 +1776,19 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        # The top-level --self-test flag is a command on its own
+        # (task 70): it wins over a subcommand given alongside
+        # it, and it works with no subcommand at all.
+        if args.self_test:
+            return cmd_self_test(args)
         if args.command == "convert":
             return cmd_convert(args)
         if args.command == "frames":
             return cmd_frames(args)
         if args.command == "prompt":
             return cmd_prompt(args)
+        if args.command == "self-test":
+            return cmd_self_test(args)
         if args.command == "sheet":
             return cmd_sheet(args)
         if args.command == "split-sheet":
@@ -1785,8 +1856,10 @@ def main(argv=None):
         message = str(exc) or exc.__class__.__name__
         print("pixel-forge: %s" % message, file=sys.stderr)
         return 1
-    parser.print_help()
-    return 2
+    # No command and no --self-test: the argparse usage error on
+    # stderr, exit 2 — the same behavior sub.required=True gave
+    # from parse_args before the flag existed.
+    parser.error("a command is required")
 
 
 if __name__ == "__main__":

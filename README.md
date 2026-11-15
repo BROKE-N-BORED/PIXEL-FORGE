@@ -373,6 +373,7 @@ pixel-forge frames clip.mp4 --fps 8 --out frames/
 pixel-forge frames clip.mp4 --fps 12 --every 2 --start 1.5 --end 10 --size 48
 pixel-forge prompt "a knight with a red shield" --out knight/
 pixel-forge prompt "a slime" --count 3 --size 32 --colors 16 --palette pico8
+pixel-forge --self-test
 pixel-forge sheet walk-frames/ --out walk-sheet.png --meta walk-sheet.json
 pixel-forge sheet walk-frames/ --cols 4 --padding 2 --fps 12
 pixel-forge split-sheet walk-sheet.png --out walk-frames/
@@ -773,6 +774,25 @@ information. A failed check (no network, a timeout, an answer
 the app does not understand) never crashes anything: a manual
 check says why it could not run, and an automatic one leaves
 a line in the status bar.
+
+## Self-test
+
+`pixel-forge --self-test` (or `pixel-forge self-test`) proves
+the Prompt tab's live path works, in one step. It checks the
+image engine and the model are really there, runs one real
+4-step generation from a fixed prompt and seed through the
+same path the Prompt tab uses, pixelizes the result the same
+way, and reports timing and output in plain words. A missing
+engine or model, a partial model, a failed generation, or a
+failed pixelize is a plain report naming the stage that
+failed and why, and the command exits 1.
+
+Runs live in `~/.local/share/pixel-forge/self-test/`, one
+timestamped folder per run with the candidate, its pixelized
+version, and batch.json. The fixed prompt and seed mean the
+same machine produces the same picture every time, so a
+second run that differs says something changed. `--out` writes
+the run somewhere else; `--json` prints the report as JSON.
 
 ## Procedural generators
 

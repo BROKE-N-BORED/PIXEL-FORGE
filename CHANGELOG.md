@@ -1,5 +1,19 @@
 # Pixel Forge changelog
 
+## 0.70 — 2026-11-14
+
+Live generation verification harness (task 70): pixel-forge
+--self-test (or pixel-forge self-test) proves the Prompt
+tab's live path in one step. It checks the image engine and
+the model are really there (a partial model is not a model),
+runs one real 4-step generation from a fixed prompt and seed
+through the same path the Prompt tab uses, pixelizes the
+result the same way, and reports timing and output in plain
+words. Runs live in ~/.local/share/pixel-forge/self-test/,
+one timestamped folder per run. A failed run names the stage
+that failed and why, and exits 1. --out works with the
+--self-test flag too, the same as with the subcommand.
+
 ## 0.69 — 2026-11-14
 
 Update mechanism (task 48): the Help menu has Check for

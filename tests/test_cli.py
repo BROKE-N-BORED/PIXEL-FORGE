@@ -2432,5 +2432,128 @@ class PalettesCliTests(unittest.TestCase):
         self.assertNotIn("Traceback", err)
 
 
+class SelfTestCliTests(unittest.TestCase):
+    """The self-test command (task 70), plus the top-level
+    --self-test flag. Stub engine only — no test here runs a
+    real generation."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.stub = write_stub_engine(cls.tmp)
+        cls.model = os.path.join(cls.tmp, "dummy.gguf")
+        with open(cls.model, "wb") as f:
+            f.write(b"not a real model")
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = main(argv)
+        except SystemExit as exc:
+            code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_self_test_help(self):
+        code, out, _err = self._run(["self-test", "--help"])
+        self.assertEqual(code, 0)
+        self.assertIn("--out", out)
+
+    def test_self_test_happy_path(self):
+        out_dir = os.path.join(self.tmp, "cli-ok")
+        with stub_env(self.stub, self.model):
+            code, out, err = self._run(
+                ["self-test", "--out", out_dir])
+        self.assertEqual(code, 0, err)
+        self.assertIn("engine:", out)
+        self.assertIn("model:", out)
+        self.assertIn("generated cand-01.png", out)
+        self.assertIn("pixelized cand-01-pixel.png", out)
+        self.assertIn("self-test passed", out)
+        self.assertNotIn("Traceback", err)
+        runs = os.listdir(out_dir)
+        self.assertEqual(len(runs), 1)
+        run_dir = os.path.join(out_dir, runs[0])
+        self.assertTrue(
+            os.path.isfile(os.path.join(run_dir, "cand-01.png")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(run_dir, "cand-01-pixel.png")))
+
+    def test_self_test_flag_matches_the_subcommand(self):
+        from unittest import mock
+
+        home = os.path.join(self.tmp, "flag-home")
+        with stub_env(self.stub, self.model), mock.patch(
+                "pixel_forge.selftest.self_test_home",
+                return_value=home):
+            code, out, err = self._run(["--self-test"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("self-test passed", out)
+        self.assertEqual(len(os.listdir(home)), 1)
+
+    def test_self_test_flag_takes_out(self):
+        # The flag is the same command as the subcommand, so it
+        # takes the same --out (v0.70 verification fix: the flag
+        # used to reject --out with an argparse error).
+        out_dir = os.path.join(self.tmp, "cli-flag-out")
+        with stub_env(self.stub, self.model):
+            code, out, err = self._run(
+                ["--self-test", "--out", out_dir])
+        self.assertEqual(code, 0, err)
+        self.assertIn("self-test passed", out)
+        self.assertEqual(len(os.listdir(out_dir)), 1)
+
+    def test_self_test_missing_engine_exits_1_plainly(self):
+        from unittest import mock
+
+        out_dir = os.path.join(self.tmp, "cli-no-engine")
+        with stub_env(self.stub, self.model), mock.patch(
+                "pixel_forge.selftest.find_engine",
+                return_value=None):
+            code, out, err = self._run(
+                ["self-test", "--out", out_dir])
+        self.assertEqual(code, 1)
+        self.assertIn("self-test failed", out)
+        self.assertIn("not installed", out)
+        self.assertNotIn("Traceback", err)
+
+    def test_self_test_json_reports_the_report(self):
+        out_dir = os.path.join(self.tmp, "cli-json")
+        with stub_env(self.stub, self.model):
+            code, out, err = self._run(
+                ["self-test", "--out", out_dir, "--json"])
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["state"], "ok")
+        self.assertEqual(payload["seed"], 42)
+        self.assertEqual(payload["steps"], 4)
+        self.assertEqual(payload["prompt"], "a wooden stool")
+        self.assertIn("timings", payload)
+        self.assertIn("checks", payload)
+
+    def test_self_test_quiet_prints_nothing(self):
+        out_dir = os.path.join(self.tmp, "cli-quiet")
+        with stub_env(self.stub, self.model):
+            code, out, err = self._run(
+                ["self-test", "--out", out_dir, "--quiet"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out, "")
+
+    def test_flag_wins_over_a_subcommand(self):
+        # --self-test given alongside a subcommand runs the
+        # self-test; the subcommand is not run.
+        from unittest import mock
+
+        home = os.path.join(self.tmp, "flag-wins-home")
+        with stub_env(self.stub, self.model), mock.patch(
+                "pixel_forge.selftest.self_test_home",
+                return_value=home):
+            code, out, err = self._run(
+                ["--self-test", "convert", self.tmp])
+        self.assertEqual(code, 0, err)
+        self.assertIn("self-test passed", out)
+        self.assertEqual(len(os.listdir(home)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
