@@ -71,7 +71,7 @@ from .palettes import NAMED_PALETTES, PALETTE_LABELS
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
                        load_image, pixelize_file, plural)
 from .presets import PresetStore
-from .skins import extract_skin
+from .skins import extract_skin, reassemble_skin_file
 from .spritesheet import (find_sibling_metadata, frames_from_grid,
                           load_frame_dir, load_metadata,
                           split_with_metadata, write_sheet)
@@ -643,11 +643,21 @@ def build_parser():
 
     skin = sub.add_parser(
         "skin", help="extract a Minecraft skin's parts (64x64 or "
-        "64x32 PNG) into one PNG per part plus the figure")
+        "64x32 PNG) into one PNG per part plus the figure, or "
+        "rebuild it as one canonical 64x64 PNG with "
+        "--reassemble")
     skin.add_argument("file", help="skin PNG to extract")
+    skin.add_argument("--reassemble", action="store_true",
+                      help="rebuild the skin as one canonical "
+                      "64x64 PNG instead of extracting its parts "
+                      "(a 64x32 skin gets its left limbs mirrored "
+                      "in and its overlays left transparent)")
     skin.add_argument("--out", default=None,
-                      help="output folder (default: "
-                      "<skin-stem>-skin-parts next to the file)")
+                      help="output folder for parts (default: "
+                      "<skin-stem>-skin-parts next to the file); "
+                      "with --reassemble, the output PNG path "
+                      "(default: <skin-stem>-64x64.png next to "
+                      "the file)")
     _add_output_args(skin)
 
     tileset = sub.add_parser(
@@ -1578,6 +1588,16 @@ def _cmd_code_all(args, result):
 
 
 def cmd_skin(args):
+    if args.reassemble:
+        out = args.out
+        if out is None:
+            src = Path(args.file)
+            out = str(src.with_name(src.stem + "-64x64.png"))
+        written = reassemble_skin_file(args.file, out)
+        _emit_json(args, {"output": str(written),
+                          "width": 64, "height": 64})
+        _info(args, "reassembled as a 64 x 64 skin in %s" % written)
+        return 0
     out = args.out
     if out is None:
         src = Path(args.file)

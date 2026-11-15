@@ -1,5 +1,18 @@
 # Pixel Forge changelog
 
+## 0.67 — 2026-11-14
+
+Skin reassembly + 3D preview (task 45): the Code tab's skin
+view has an Export skin PNG button that rebuilds the loaded
+skin as one canonical 64x64 PNG — a classic 64x32 skin comes
+out with its left limbs mirrored in and its overlays left
+transparent, and a 64x64 skin comes back unchanged — and a 3D
+preview button that opens the skin on a blocky figure in its
+own window. Drag the figure to turn it around and see every
+side; the overlay layers (hat, jacket, sleeves, pants) show
+when the skin has them. Same step on the command line:
+pixel-forge skin steve.png --reassemble.
+
 ## 0.66 — 2026-11-14
 
 Seeded procedural generators (task 44): the Image tab has a

@@ -4816,6 +4816,176 @@ class CodeTextureControlsTests(unittest.TestCase):
         self.assertTrue(self.win.code_treat_texture_btn.isHidden())
 
 
+class SkinPreviewGuiTests(unittest.TestCase):
+    """Task 45 — the Code tab's skin export + 3D preview
+    buttons, and the preview dialog's scene. The dialog is
+    never shown here: offscreen has no GL context, so the live
+    render is proven by the Xvfb proof script instead."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        from pixel_forge.image import argb
+        skin = make_solid_image(64, 64, 10, 20, 30)
+        for y in range(8, 16):
+            for x in range(8, 16):
+                skin.setPixel(x, y, argb(255, 0, 0, 255))
+        cls.skin = write_image(
+            skin, os.path.join(cls.tmp, "steve.png"))
+        cls.texture = write_image(
+            make_solid_image(16, 16, 1, 2, 3),
+            os.path.join(cls.tmp, "grass.png"))
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self.win = MainWindow(library_dir=self.lib_dir)
+        self.win.tabs.setCurrentIndex(3)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _wait_for_texture(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.code_kind == "texture"
+                    and self.win.texture_worker is None):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_buttons_disabled_with_nothing_loaded(self):
+        self.assertFalse(self.win.code_export_skin_btn.isEnabled())
+        self.assertFalse(self.win.code_preview_skin_btn.isEnabled())
+        self.assertIn("Load a Minecraft skin",
+                      self.win.code_export_skin_btn.toolTip())
+        self.assertIn("Load a Minecraft skin",
+                      self.win.code_preview_skin_btn.toolTip())
+
+    def test_buttons_enable_with_skin_loaded(self):
+        self.assertTrue(self.win.load_game_asset(self.skin))
+        self.assertTrue(self.win.code_export_skin_btn.isEnabled())
+        self.assertTrue(self.win.code_preview_skin_btn.isEnabled())
+        self.assertIn("64x64",
+                      self.win.code_export_skin_btn.toolTip())
+        self.assertIn("3D figure",
+                      self.win.code_preview_skin_btn.toolTip())
+
+    def test_buttons_stay_disabled_for_texture(self):
+        self.assertTrue(self.win.load_game_asset(self.texture))
+        self.assertTrue(self._wait_for_texture())
+        self.assertFalse(self.win.code_export_skin_btn.isEnabled())
+        self.assertFalse(self.win.code_preview_skin_btn.isEnabled())
+        self.assertIn("Only Minecraft skins",
+                      self.win.code_export_skin_btn.toolTip())
+
+    def test_treat_as_texture_disables_and_back_enables(self):
+        self.assertTrue(self.win.load_game_asset(self.skin))
+        self.assertTrue(self.win.code_export_skin_btn.isEnabled())
+        self.win.code_treat_texture_btn.click()
+        self.assertTrue(self._wait_for_texture())
+        self.assertFalse(self.win.code_export_skin_btn.isEnabled())
+        self.assertFalse(self.win.code_preview_skin_btn.isEnabled())
+        self.assertIn("being treated as a texture",
+                      self.win.code_export_skin_btn.toolTip())
+        self.win.code_treat_texture_btn.click()
+        self.app.processEvents()
+        self.assertTrue(self.win.code_export_skin_btn.isEnabled())
+        self.assertTrue(self.win.code_preview_skin_btn.isEnabled())
+
+    def test_export_skin_png_writes_file(self):
+        from unittest import mock
+        from pixel_forge.pixelize import load_image
+        self.assertTrue(self.win.load_game_asset(self.skin))
+        out = os.path.join(self.tmp, "exported-skin.png")
+        with mock.patch(
+                "pixel_forge.gui.QFileDialog.getSaveFileName",
+                return_value=(out, "PNG image")):
+            self.win.code_export_skin_btn.click()
+        self.assertTrue(os.path.isfile(out))
+        back = load_image(out)
+        self.assertEqual((back.width(), back.height()), (64, 64))
+        self.assertEqual(bytes(back.data),
+                         bytes(load_image(self.skin).data))
+        self.assertIn("Exported the skin",
+                      self.win.statusBar().currentMessage())
+
+    def test_export_cancelled_writes_nothing(self):
+        from unittest import mock
+        self.assertTrue(self.win.load_game_asset(self.skin))
+        with mock.patch(
+                "pixel_forge.gui.QFileDialog.getSaveFileName",
+                return_value=("", "")):
+            self.win.code_export_skin_btn.click()
+        self.assertFalse(os.path.isfile(
+            os.path.join(self.tmp, "steve-skin.png")))
+
+    def test_preview_button_opens_dialog(self):
+        from unittest import mock
+        self.assertTrue(self.win.load_game_asset(self.skin))
+        opened = []
+
+        class StubDialog:
+            def __init__(self, parent, image):
+                opened.append((parent, image))
+
+            def exec(self):
+                return 0
+
+        with mock.patch("pixel_forge.gui.SkinPreviewDialog",
+                        StubDialog):
+            self.win.code_preview_skin_btn.click()
+        self.assertEqual(len(opened), 1)
+        parent, image = opened[0]
+        self.assertIs(parent, self.win)
+        self.assertEqual((image.width(), image.height()), (64, 64))
+
+    def test_preview_dialog_scene_has_six_body_boxes(self):
+        from pixel_forge.pixelize import load_image
+        from pixel_forge.skinview import SkinPreviewDialog
+        dialog = SkinPreviewDialog(self.win,
+                                   load_image(self.skin))
+        try:
+            parts = [box["part"]
+                     for box in dialog.preview.boxes]
+            for name in ("head", "body", "right_arm", "left_arm",
+                         "right_leg", "left_leg"):
+                self.assertIn(name, parts)
+            # The solid test skin has every overlay opaque, so
+            # all twelve boxes are present.
+            self.assertEqual(len(dialog.preview.boxes), 12)
+            self.assertEqual(len(dialog.preview.vertices),
+                             12 * 36 * 6)
+            self.assertEqual(dialog.windowTitle(),
+                             "3D skin preview")
+            self.assertIn("Drag the figure",
+                          dialog.findChild(QLabel).text())
+            # The default view is a three-quarter angle, not
+            # straight on.
+            self.assertEqual(dialog.preview.yaw, -30.0)
+            self.assertEqual(dialog.preview.pitch, 12.0)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self.app.processEvents()
+
+    def test_no_em_dash_or_parens_s_in_new_strings(self):
+        texts = [
+            self.win.code_export_skin_btn.text(),
+            self.win.code_export_skin_btn.toolTip(),
+            self.win.code_preview_skin_btn.text(),
+            self.win.code_preview_skin_btn.toolTip(),
+        ]
+        for text in texts:
+            self.assertNotIn("\u2014", text, text)
+            self.assertNotIn("(s)", text, text)
+
+
 class B15MinorGroupTests(unittest.TestCase):
     """Task 19 (B15 minor group): the GUI items — negative-prompt
     scroll, Code info duplication, frame-export overwrite confirm,

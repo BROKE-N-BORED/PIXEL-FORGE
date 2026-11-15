@@ -19,9 +19,13 @@ from helpers import (make_gradient_image, make_noisy_image,  # noqa: E402
 from pixel_forge.image import Image, argb  # noqa: E402
 from pixel_forge.palettes import NAMED_PALETTES  # noqa: E402
 from pixel_forge.pixelize import (PixelForgeError,  # noqa: E402
-                                 count_opaque_colors, pixelize_image)
-from pixel_forge.skins import (detect_skin, extract_skin,  # noqa: E402
-                               pixelize_texture, skin_figure,
+                                 count_opaque_colors, load_image,
+                                 pixelize_image)
+from pixel_forge.skins import (PART_FACES, REGIONS_64,  # noqa: E402
+                               detect_skin, extract_skin,
+                               figure_boxes, pixelize_texture,
+                               reassemble_skin,
+                               reassemble_skin_file, skin_figure,
                                skin_parts, texture_target_size)
 
 # The QApplication must exist before the first load_image
@@ -336,6 +340,248 @@ class TextureSettingsTests(unittest.TestCase):
         over = pixelize_texture(image, width=1024, height=1024)
         self.assertEqual((over.width(), over.height()),
                          (512, 512))
+
+
+def clear_part(image, name):
+    """Zero every face rect of a part (for overlay tests)."""
+    for rect in PART_FACES[name].values():
+        x, y, w, h = rect
+        for yy in range(y, y + h):
+            for xx in range(x, x + w):
+                image.setPixel(xx, yy, argb(0, 0, 0, 0))
+
+
+def make_full_skin():
+    """A 64x64 skin with every pixel set: each pixel's color
+    depends on its position, so a byte comparison proves a
+    copy is exact everywhere, not just in the face regions."""
+    image = Image(64, 64)
+    for y in range(64):
+        for x in range(64):
+            image.setPixel(x, y, argb((x * 3) % 256,
+                                      (y * 5) % 256,
+                                      (x + y * 7) % 256, 255))
+    return image
+
+
+class SkinReassemblyTests(unittest.TestCase):
+    """Task 45: parts -> one canonical 64x64 skin PNG."""
+
+    def test_regions_derive_from_faces(self):
+        # The single source of truth: REGIONS_64 is the front
+        # face of each part in PART_FACES, never a second copy.
+        for name, faces in PART_FACES.items():
+            self.assertEqual(REGIONS_64[name], faces["front"], name)
+        self.assertEqual(set(REGIONS_64), set(PART_FACES))
+
+    def test_64x64_reassembly_is_byte_identical(self):
+        skin = make_full_skin()
+        out = reassemble_skin(skin)
+        self.assertEqual((out.width(), out.height()), (64, 64))
+        self.assertEqual(bytes(out.data), bytes(skin.data))
+        self.assertIsNot(out, skin)
+
+    def test_64x32_reassembly_places_classic_parts(self):
+        skin = make_skin("64x32")
+        out = reassemble_skin(skin)
+        self.assertEqual((out.width(), out.height()), (64, 64))
+        for name in ("head", "hat", "body", "right_arm",
+                     "right_leg"):
+            x, y, w, h = FRONTS[name]
+            rgb = REGION_COLORS[name]
+            self.assertEqual(pixel(out, x, y), rgb + (255,), name)
+            self.assertEqual(pixel(out, x + w - 1, y + h - 1),
+                             rgb + (255,), name)
+
+    def test_64x32_reassembly_mirrors_left_limbs(self):
+        skin = make_skin("64x32")
+        # Asymmetric right arm: left column red, right blue;
+        # asymmetric right leg: top row green, bottom yellow.
+        for y in range(20, 32):
+            skin.setPixel(44, y, argb(255, 0, 0, 255))
+            skin.setPixel(47, y, argb(0, 0, 255, 255))
+        for x in range(4, 8):
+            skin.setPixel(x, 20, argb(0, 255, 0, 255))
+            skin.setPixel(x, 31, argb(255, 255, 0, 255))
+        # Asymmetric side faces: the right arm's right face red,
+        # its left face blue — the mirror swaps them.
+        for y in range(20, 32):
+            skin.setPixel(40, y, argb(255, 0, 0, 255))
+            skin.setPixel(48, y, argb(0, 0, 255, 255))
+        out = reassemble_skin(skin)
+        # Left arm front is the right arm front mirrored.
+        self.assertEqual(pixel(out, 36, 52), (0, 0, 255, 255))
+        self.assertEqual(pixel(out, 39, 52), (255, 0, 0, 255))
+        # Left leg front is the right leg front mirrored
+        # (top/bottom rows survive the horizontal mirror).
+        self.assertEqual(pixel(out, 20, 52), (0, 255, 0, 255))
+        self.assertEqual(pixel(out, 20, 63), (255, 255, 0, 255))
+        # Side faces swap AND mirror: the left arm's left face
+        # shows the right arm's right face, so the red column
+        # painted at the right face's left edge (x=40) lands at
+        # the left face's right edge (x=43); the blue column
+        # painted at the left face's left edge (x=48) lands at
+        # the right face's right edge (x=35).
+        self.assertEqual(pixel(out, 43, 52), (255, 0, 0, 255))
+        self.assertEqual(pixel(out, 35, 52), (0, 0, 255, 255))
+
+    def test_64x32_reassembly_leaves_overlays_transparent(self):
+        skin = make_skin("64x32")
+        out = reassemble_skin(skin)
+        for name in ("jacket", "right_sleeve", "left_sleeve",
+                     "right_pants", "left_pants"):
+            for (x, y, w, h) in PART_FACES[name].values():
+                for yy in range(y, y + h):
+                    for xx in range(x, x + w):
+                        self.assertEqual(
+                            pixel(out, xx, yy)[3], 0,
+                            "%s not transparent at %d,%d"
+                            % (name, xx, yy))
+
+    def test_round_trip_same_parts_64x64(self):
+        skin = make_full_skin()
+        before = skin_parts(skin)
+        after = skin_parts(reassemble_skin(skin))
+        self.assertEqual(list(after), list(before))
+        for name in before:
+            self.assertEqual(bytes(after[name].data),
+                             bytes(before[name].data), name)
+
+    def test_round_trip_same_parts_64x32(self):
+        skin = make_skin("64x32")
+        before = skin_parts(skin)
+        after = skin_parts(reassemble_skin(skin))
+        for name in before:
+            self.assertEqual(bytes(after[name].data),
+                             bytes(before[name].data), name)
+        # The reassembled skin also has the mirrored limbs as
+        # real parts now, not just mirrored views.
+        self.assertIn("left_arm", after)
+        self.assertIn("left_leg", after)
+
+    def test_blank_parts_stay_transparent(self):
+        skin = Image(64, 64)
+        fill_rect(skin, FRONTS["head"], (255, 0, 0))
+        out = reassemble_skin(skin)
+        opaque = sum(1 for i in range(3, len(out.data), 4)
+                     if out.data[i])
+        self.assertEqual(opaque, 64)  # the head front only
+        classic = Image(64, 32)
+        fill_rect(classic, FRONTS["head"], (255, 0, 0))
+        out = reassemble_skin(classic)
+        opaque = sum(1 for i in range(3, len(out.data), 4)
+                     if out.data[i])
+        self.assertEqual(opaque, 64)
+
+    def test_wrong_size_refused(self):
+        with self.assertRaises(PixelForgeError) as caught:
+            reassemble_skin(make_solid_image(16, 16, 1, 2, 3))
+        self.assertIn("not a Minecraft skin", str(caught.exception))
+        with self.assertRaises(PixelForgeError):
+            reassemble_skin(make_solid_image(64, 16, 1, 2, 3))
+
+    def test_reassemble_file_writes_png(self):
+        tmp = tempfile.mkdtemp()
+        path = write_image(make_full_skin(),
+                           os.path.join(tmp, "steve.png"))
+        out = os.path.join(tmp, "steve-64x64.png")
+        written = reassemble_skin_file(path, out)
+        self.assertEqual(str(written), out)
+        back = load_image(out)
+        self.assertEqual((back.width(), back.height()), (64, 64))
+        self.assertEqual(bytes(back.data),
+                         bytes(make_full_skin().data))
+
+    def test_reassemble_file_missing_file_fails(self):
+        tmp = tempfile.mkdtemp()
+        with self.assertRaises(PixelForgeError):
+            reassemble_skin_file(os.path.join(tmp, "nope.png"),
+                                 os.path.join(tmp, "out.png"))
+
+
+class FigureBoxTests(unittest.TestCase):
+    """Task 45: the 3D preview's boxes."""
+
+    def test_six_boxes_without_overlays(self):
+        skin = make_skin("64x64")
+        for name in ("hat", "jacket", "right_sleeve",
+                     "left_sleeve", "right_pants", "left_pants"):
+            clear_part(skin, name)
+        boxes = figure_boxes(skin)
+        self.assertEqual([b["part"] for b in boxes],
+                         ["head", "body", "right_arm", "left_arm",
+                          "right_leg", "left_leg"])
+        self.assertTrue(all(not b["overlay"] for b in boxes))
+
+    def test_twelve_boxes_with_all_overlays(self):
+        boxes = figure_boxes(make_skin("64x64"))
+        self.assertEqual(len(boxes), 12)
+        overlays = [b["part"] for b in boxes if b["overlay"]]
+        self.assertEqual(overlays,
+                         ["hat", "jacket", "right_sleeve",
+                          "left_sleeve", "right_pants",
+                          "left_pants"])
+
+    def test_only_present_overlays_get_boxes(self):
+        skin = make_skin("64x64")
+        for name in ("jacket", "right_sleeve", "left_sleeve",
+                     "right_pants", "left_pants"):
+            clear_part(skin, name)
+        boxes = figure_boxes(skin)
+        self.assertEqual(len(boxes), 7)
+        self.assertEqual(boxes[-1]["part"], "hat")
+
+    def test_box_centers_and_sizes(self):
+        boxes = {b["part"]: b
+                 for b in figure_boxes(make_skin("64x64"))}
+        self.assertEqual(boxes["head"]["center"], (0, 28, 0))
+        self.assertEqual(boxes["head"]["size"], (8, 8, 8))
+        self.assertEqual(boxes["body"]["center"], (0, 18, 0))
+        self.assertEqual(boxes["body"]["size"], (8, 12, 4))
+        self.assertEqual(boxes["right_arm"]["center"], (-6, 18, 0))
+        self.assertEqual(boxes["left_arm"]["center"], (6, 18, 0))
+        self.assertEqual(boxes["right_leg"]["center"], (-2, 6, 0))
+        self.assertEqual(boxes["left_leg"]["center"], (2, 6, 0))
+        # The figure stands 32 tall: legs 0-12, body 12-24,
+        # head 24-32.
+        self.assertEqual(boxes["right_leg"]["center"][1] - 6, 0)
+        self.assertEqual(boxes["head"]["center"][1] + 4, 32)
+
+    def test_overlay_boxes_are_bigger(self):
+        boxes = {b["part"]: b
+                 for b in figure_boxes(make_skin("64x64"))}
+        self.assertEqual(boxes["hat"]["size"], (8.5, 8.5, 8.5))
+        self.assertEqual(boxes["hat"]["center"],
+                         boxes["head"]["center"])
+        self.assertEqual(boxes["jacket"]["size"], (8.5, 12.5, 4.5))
+        self.assertEqual(boxes["right_sleeve"]["size"],
+                         (4.5, 12.5, 4.5))
+
+    def test_face_uvs_are_normalized_rects(self):
+        boxes = {b["part"]: b
+                 for b in figure_boxes(make_skin("64x64"))}
+        self.assertEqual(boxes["head"]["faces"]["front"],
+                         (0.125, 0.125, 0.25, 0.25))
+        self.assertEqual(boxes["body"]["faces"]["front"],
+                         (0.3125, 0.3125, 0.4375, 0.5))
+        for box in boxes.values():
+            self.assertEqual(set(box["faces"]),
+                             {"top", "bottom", "right", "front",
+                              "left", "back"})
+            for (u0, v0, u1, v1) in box["faces"].values():
+                self.assertLess(u0, u1)
+                self.assertLess(v0, v1)
+                self.assertGreaterEqual(u0, 0.0)
+                self.assertLessEqual(u1, 1.0)
+
+    def test_classic_skin_refused(self):
+        with self.assertRaises(PixelForgeError) as caught:
+            figure_boxes(make_skin("64x32"))
+        self.assertIn("reassemble", str(caught.exception))
+
+    def test_non_skin_refused(self):
+        with self.assertRaises(PixelForgeError):
+            figure_boxes(make_solid_image(16, 16, 1, 2, 3))
 
 
 if __name__ == "__main__":

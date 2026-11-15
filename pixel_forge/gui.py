@@ -100,7 +100,9 @@ from .qtimage import to_qimage
 from .session import (load_session, record_recent, save_session,
                       set_last_code, set_last_image, set_last_video)
 from .skins import (detect_skin, extract_skin, pixelize_texture,
-                    skin_figure, skin_parts, texture_target_size)
+                    reassemble_skin_file, skin_figure, skin_parts,
+                    texture_target_size)
+from .skinview import SkinPreviewDialog
 from .spritesheet import (build_metadata, duration_for_fps,
                           extract_frame, find_sibling_metadata,
                           frames_from_grid, frames_from_sheet,
@@ -8588,6 +8590,25 @@ class MainWindow(QMainWindow):
             self._on_export_code_parts)
         form.addWidget(self.code_export_parts_btn)
 
+        # Skin reassembly + 3D preview (task 45): the same
+        # lifecycle as Export parts — enabled only while a skin
+        # is loaded, with tooltips that say why when disabled.
+        self.code_export_skin_btn = QPushButton("Export skin PNG")
+        self.code_export_skin_btn.setToolTip(
+            "Load a Minecraft skin to export it as one 64x64 PNG")
+        self.code_export_skin_btn.setEnabled(False)
+        self.code_export_skin_btn.clicked.connect(
+            self._on_export_skin_png)
+        form.addWidget(self.code_export_skin_btn)
+
+        self.code_preview_skin_btn = QPushButton("3D preview")
+        self.code_preview_skin_btn.setToolTip(
+            "Load a Minecraft skin to see it on a 3D figure")
+        self.code_preview_skin_btn.setEnabled(False)
+        self.code_preview_skin_btn.clicked.connect(
+            self._on_preview_skin)
+        form.addWidget(self.code_preview_skin_btn)
+
         self.code_export_all_btn = QPushButton("Export all")
         self.code_export_all_btn.setObjectName("export")
         self.code_export_all_btn.setToolTip(
@@ -8659,6 +8680,16 @@ class MainWindow(QMainWindow):
         self.code_export_parts_btn.setEnabled(enabled)
         self.code_export_parts_btn.setToolTip(tooltip)
 
+    def _set_skin_buttons(self, enabled, export_tip, preview_tip):
+        """The Export skin PNG and 3D preview buttons' state and
+        tooltips together — same pattern as _set_parts_button:
+        while disabled the tooltips say why, so the user is
+        never left guessing."""
+        self.code_export_skin_btn.setEnabled(enabled)
+        self.code_export_skin_btn.setToolTip(export_tip)
+        self.code_preview_skin_btn.setEnabled(enabled)
+        self.code_preview_skin_btn.setToolTip(preview_tip)
+
     def load_code(self, paths):
         """Parse code files or folders and list the assets
         found. Returns True on success. On failure shows a message
@@ -8695,6 +8726,10 @@ class MainWindow(QMainWindow):
         self.code_skin_layout = None
         self._set_parts_button(
             False, "Only Minecraft skins have parts to export")
+        self._set_skin_buttons(
+            False,
+            "Only Minecraft skins can be exported as one PNG",
+            "Only Minecraft skins have a 3D preview")
         self._rebuild_code_list()
         self._update_code_texture_controls()
         message = ("%s from %s"
@@ -8783,6 +8818,9 @@ class MainWindow(QMainWindow):
             "detail": "combined figure, overlays included"})
         self._set_parts_button(
             True, "Export the skin's parts as separate PNGs")
+        self._set_skin_buttons(
+            True, "Export the skin as one 64x64 PNG",
+            "See the skin on a 3D figure")
         self._rebuild_code_list()
         self._update_code_texture_controls()
         self.statusBar().showMessage(
@@ -8807,11 +8845,21 @@ class MainWindow(QMainWindow):
                 False,
                 "This image is being treated as a texture — "
                 "switch back to a skin to export its parts")
+            self._set_skin_buttons(
+                False,
+                "This image is being treated as a texture. "
+                "Switch back to a skin to export the skin PNG",
+                "This image is being treated as a texture. "
+                "Switch back to a skin to see the 3D preview")
         else:
             self.code_skin_path = None
             self.code_skin_layout = None
             self._set_parts_button(
                 False, "Only Minecraft skins have parts to export")
+            self._set_skin_buttons(
+                False,
+                "Only Minecraft skins can be exported as one PNG",
+                "Only Minecraft skins have a 3D preview")
         src_w, src_h = (result["source_width"],
                         result["source_height"])
         # Capped means the 512 px cap shrank the source — not
@@ -8993,6 +9041,12 @@ class MainWindow(QMainWindow):
             False,
             "This image is being treated as a texture — switch "
             "back to a skin to export its parts")
+        self._set_skin_buttons(
+            False,
+            "This image is being treated as a texture. "
+            "Switch back to a skin to export the skin PNG",
+            "This image is being treated as a texture. "
+            "Switch back to a skin to see the 3D preview")
         self._reset_code_texture_controls(self.code_texture_image)
         self._start_texture_worker()
 
@@ -9168,6 +9222,50 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             "Exported %s to %s"
             % (plural(len(written), "skin part"), folder))
+
+    def _on_export_skin_png(self):
+        """Export the loaded skin as one canonical 64x64 PNG
+        (task 45): a classic 64x32 skin comes out with its left
+        limbs mirrored in and its overlays left transparent."""
+        if self.code_skin_path is None:
+            return
+        stem = Path(self.code_skin_path).stem
+        default = self._export_default("%s-skin.png" % stem,
+                                       self.code_skin_path)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export skin PNG", default, "PNG image (*.png)")
+        if not path:
+            return
+        try:
+            reassemble_skin_file(self.code_skin_path, path)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not export the skin", str(exc))
+            return
+        self._remember_export_dir(Path(path).parent)
+        self.statusBar().showMessage(
+            "Exported the skin as a 64x64 PNG to %s" % path)
+
+    def _on_preview_skin(self):
+        """Open the 3D skin preview in its own window (task 45).
+        The source image is already in memory from the load, so
+        no re-read is needed."""
+        if self.code_skin_path is None:
+            return
+        image = self.code_texture_image
+        if image is None:
+            try:
+                image = load_image(self.code_skin_path)
+            except PixelForgeError as exc:
+                warn_dialog(self, "Could not open the 3D preview",
+                            str(exc))
+                return
+        try:
+            dialog = SkinPreviewDialog(self, image)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not open the 3D preview",
+                        str(exc))
+            return
+        dialog.exec()
 
     def export_code_assets(self, folder):
         """Write every Code tab asset to folder as PNG, one file

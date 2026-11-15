@@ -16,6 +16,17 @@ sprite (head above body, arms at the sides, legs below), with
 each overlay composited over its base part where the overlay has
 opaque pixels.
 
+Reassembly (task 45) rebuilds a canonical 64x64 skin from a
+skin of either layout: a 64x64 skin comes back unchanged, a
+64x32 skin gets its classic parts placed at the 64x64 positions
+with the left limbs mirrored in from the right side, and the
+overlays the classic layout never had stay transparent — nothing
+is invented. Reassembling and re-loading gives the same parts
+(the round-trip guarantee). The 3D preview's boxes come from
+figure_boxes: six body boxes plus an overlay box for each
+overlay layer that has any opaque pixel, each face carrying its
+UV rect into the 64x64 texture.
+
 A PNG that is not a skin falls back to texture handling: it is
 pixelized through the Item 1 core at its native size (a 16x16
 texture stays 16x16) with a 256-color from-image palette and no
@@ -41,22 +52,73 @@ from .pixelize import (PixelForgeError, compute_target_size,
 # aspect ratio) before the pixelize core runs.
 TEXTURE_MAX_DIMENSION = 512
 
-# Front-view regions on the 64x64 layout: name -> (x, y, w, h).
-# The 64x32 layout shares head, hat, body, right arm, right leg.
-REGIONS_64 = {
-    "head": (8, 8, 8, 8),
-    "hat": (40, 8, 8, 8),
-    "body": (20, 20, 8, 12),
-    "jacket": (20, 36, 8, 12),
-    "right_arm": (44, 20, 4, 12),
-    "right_sleeve": (44, 36, 4, 12),
-    "left_arm": (36, 52, 4, 12),
-    "left_sleeve": (52, 52, 4, 12),
-    "right_leg": (4, 20, 4, 12),
-    "right_pants": (4, 36, 4, 12),
-    "left_leg": (20, 52, 4, 12),
-    "left_pants": (4, 52, 4, 12),
+# Every face of every part on the 64x64 layout: part -> face ->
+# (x, y, w, h). The single source of truth for the layout — the
+# front-view regions below are derived from it, so the split,
+# the reassembly, and the 3D preview can never disagree about
+# where a face lives. Each part's block holds its faces in the
+# same arrangement: top above the front, bottom right of the
+# top, right left of the front, left right of the front, back
+# right of the left. The 64x32 layout shares head, hat, body,
+# right arm, right leg.
+PART_FACES = {
+    "head": {"top": (8, 0, 8, 8), "bottom": (16, 0, 8, 8),
+             "right": (0, 8, 8, 8), "front": (8, 8, 8, 8),
+             "left": (16, 8, 8, 8), "back": (24, 8, 8, 8)},
+    "hat": {"top": (40, 0, 8, 8), "bottom": (48, 0, 8, 8),
+            "right": (32, 8, 8, 8), "front": (40, 8, 8, 8),
+            "left": (48, 8, 8, 8), "back": (56, 8, 8, 8)},
+    "body": {"top": (20, 16, 8, 4), "bottom": (28, 16, 8, 4),
+             "right": (16, 20, 4, 12), "front": (20, 20, 8, 12),
+             "left": (28, 20, 4, 12), "back": (32, 20, 8, 12)},
+    "jacket": {"top": (20, 32, 8, 4), "bottom": (28, 32, 8, 4),
+               "right": (16, 36, 4, 12), "front": (20, 36, 8, 12),
+               "left": (28, 36, 4, 12), "back": (32, 36, 8, 12)},
+    "right_arm": {"top": (44, 16, 4, 4), "bottom": (48, 16, 4, 4),
+                  "right": (40, 20, 4, 12),
+                  "front": (44, 20, 4, 12),
+                  "left": (48, 20, 4, 12),
+                  "back": (52, 20, 4, 12)},
+    "right_sleeve": {"top": (44, 32, 4, 4),
+                     "bottom": (48, 32, 4, 4),
+                     "right": (40, 36, 4, 12),
+                     "front": (44, 36, 4, 12),
+                     "left": (48, 36, 4, 12),
+                     "back": (52, 36, 4, 12)},
+    "left_arm": {"top": (36, 48, 4, 4), "bottom": (40, 48, 4, 4),
+                 "right": (32, 52, 4, 12),
+                 "front": (36, 52, 4, 12),
+                 "left": (40, 52, 4, 12),
+                 "back": (44, 52, 4, 12)},
+    "left_sleeve": {"top": (52, 48, 4, 4),
+                    "bottom": (56, 48, 4, 4),
+                    "right": (48, 52, 4, 12),
+                    "front": (52, 52, 4, 12),
+                    "left": (56, 52, 4, 12),
+                    "back": (60, 52, 4, 12)},
+    "right_leg": {"top": (4, 16, 4, 4), "bottom": (8, 16, 4, 4),
+                  "right": (0, 20, 4, 12), "front": (4, 20, 4, 12),
+                  "left": (8, 20, 4, 12), "back": (12, 20, 4, 12)},
+    "right_pants": {"top": (4, 32, 4, 4), "bottom": (8, 32, 4, 4),
+                    "right": (0, 36, 4, 12),
+                    "front": (4, 36, 4, 12),
+                    "left": (8, 36, 4, 12),
+                    "back": (12, 36, 4, 12)},
+    "left_leg": {"top": (20, 48, 4, 4), "bottom": (24, 48, 4, 4),
+                 "right": (16, 52, 4, 12),
+                 "front": (20, 52, 4, 12),
+                 "left": (24, 52, 4, 12),
+                 "back": (28, 52, 4, 12)},
+    "left_pants": {"top": (4, 48, 4, 4), "bottom": (8, 48, 4, 4),
+                   "right": (0, 52, 4, 12), "front": (4, 52, 4, 12),
+                   "left": (8, 52, 4, 12),
+                   "back": (12, 52, 4, 12)},
 }
+
+# Front-view regions on the 64x64 layout: name -> (x, y, w, h).
+# Derived from PART_FACES — never edited by hand.
+REGIONS_64 = {name: faces["front"]
+              for name, faces in PART_FACES.items()}
 
 # Display/export order: base part, then its overlay, top to bottom.
 PART_ORDER_64 = ["head", "hat", "body", "jacket",
@@ -156,6 +218,147 @@ def skin_figure(image):
                 if (px >> 24) & 0xFF:
                     figure.setPixel(fx + x, fy + y, px)
     return figure
+
+
+# Mirroring a part (the classic layout's left limbs): each face
+# is flipped left-right, and the side faces swap — the mirrored
+# part's left face shows the source part's right face, and its
+# right face the source's left.
+_MIRROR_FACE = {"top": "top", "bottom": "bottom",
+                "right": "left", "front": "front",
+                "left": "right", "back": "back"}
+
+# Classic parts: the ones a 64x32 skin actually carries.
+_CLASSIC_PARTS = ("head", "hat", "body", "right_arm", "right_leg")
+
+
+def _copy_rect(src, rect, dst):
+    """One rectangle copied at the same coordinates, pixels
+    intact (transparent stays transparent)."""
+    x, y, w, h = rect
+    for row in range(h):
+        s = ((y + row) * src.width() + x) * 4
+        d = ((y + row) * dst.width() + x) * 4
+        dst.data[d:d + w * 4] = src.data[s:s + w * 4]
+
+
+def _copy_rect_mirrored(src, src_rect, dst, dst_rect):
+    """One rectangle copied left-right mirrored into another
+    rectangle of the same size."""
+    sx, sy, w, h = src_rect
+    dx, dy, _, _ = dst_rect
+    for row in range(h):
+        for col in range(w):
+            dst.setPixel(dx + col, dy + row,
+                         src.pixel(sx + w - 1 - col, sy + row))
+
+
+def reassemble_skin(image):
+    """A canonical 64x64 skin from a skin of either layout.
+
+    A 64x64 skin comes back unchanged (a copy). A 64x32 skin
+    gets its classic parts placed at the 64x64 positions, its
+    left limbs mirrored in from the right side, and the overlays
+    the classic layout never had left transparent — no pixels
+    are invented. Reassembling and re-loading gives the same
+    parts. Raises PixelForgeError when the image is not
+    skin-sized."""
+    layout = detect_skin(image)
+    if layout is None:
+        raise PixelForgeError(
+            "not a Minecraft skin: %d x %d — skins are 64x64 or "
+            "64x32" % (image.width(), image.height()))
+    if layout == "64x64":
+        return image.copy()
+    out = Image(64, 64)
+    for name in _CLASSIC_PARTS:
+        for rect in PART_FACES[name].values():
+            _copy_rect(image, rect, out)
+    for target, source in MIRROR_32.items():
+        for face, src_face in _MIRROR_FACE.items():
+            _copy_rect_mirrored(image, PART_FACES[source][src_face],
+                                out, PART_FACES[target][face])
+    return out
+
+
+def reassemble_skin_file(path, out_path):
+    """Reassemble a skin file into a canonical 64x64 PNG at
+    out_path. Returns the output path. Raises PixelForgeError
+    when the file is missing, unreadable, or not a skin, or
+    when the PNG cannot be written."""
+    skin = reassemble_skin(load_image(path))
+    if not skin.save(str(out_path), "PNG"):
+        raise PixelForgeError("could not write: %s" % out_path)
+    return Path(out_path)
+
+
+# Body boxes for the 3D preview: part -> ((center x, y, z),
+# (width, height, depth)). Units are texture pixels, y up, feet
+# at y=0; the figure stands 32 tall and 16 wide.
+FIGURE_BOXES = {
+    "head": ((0, 28, 0), (8, 8, 8)),
+    "body": ((0, 18, 0), (8, 12, 4)),
+    "right_arm": ((-6, 18, 0), (4, 12, 4)),
+    "left_arm": ((6, 18, 0), (4, 12, 4)),
+    "right_leg": ((-2, 6, 0), (4, 12, 4)),
+    "left_leg": ((2, 6, 0), (4, 12, 4)),
+}
+
+# How much bigger an overlay box is than its base box on every
+# side, so the layer sits proud of the skin beneath it.
+OVERLAY_GROW = 0.5
+
+_OVERLAY_BASE = {overlay: base
+                 for base, overlay in OVERLAYS.items()}
+
+
+def _part_has_pixels(image, name):
+    """True when any face of the part has an opaque pixel."""
+    for (x, y, w, h) in PART_FACES[name].values():
+        for row in range(y, y + h):
+            off = (row * image.width() + x) * 4
+            for col in range(w):
+                if image.data[off + col * 4 + 3]:
+                    return True
+    return False
+
+
+def _box_for(name, overlay):
+    """One preview box: part, center, size, overlay flag, and a
+    (u0, v0, u1, v1) rect per face into the 64x64 texture, u and
+    v measured from the texture's top-left corner."""
+    base = _OVERLAY_BASE[name] if overlay else name
+    center, size = FIGURE_BOXES[base]
+    if overlay:
+        size = tuple(dim + OVERLAY_GROW for dim in size)
+    faces = {}
+    for face, (x, y, w, h) in PART_FACES[name].items():
+        faces[face] = (x / 64.0, y / 64.0,
+                       (x + w) / 64.0, (y + h) / 64.0)
+    return {"part": name, "center": center, "size": size,
+            "overlay": overlay, "faces": faces}
+
+
+def figure_boxes(image):
+    """The 3D preview's boxes for a 64x64 skin: six body boxes
+    plus an overlay box for each overlay layer that has any
+    opaque pixel (a blank overlay draws nothing). Each box is a
+    dict with part, center, size, overlay, and faces — see
+    _box_for. Raises PixelForgeError unless the image is 64x64:
+    a classic skin goes through reassemble_skin first, so the
+    preview always works from the canonical layout."""
+    if image.width() != 64 or image.height() != 64:
+        raise PixelForgeError(
+            "not a 64x64 skin: %d x %d — reassemble a classic "
+            "skin first" % (image.width(), image.height()))
+    boxes = [_box_for(name, False)
+             for name in ("head", "body", "right_arm", "left_arm",
+                          "right_leg", "left_leg")]
+    for overlay in ("hat", "jacket", "right_sleeve",
+                    "left_sleeve", "right_pants", "left_pants"):
+        if _part_has_pixels(image, overlay):
+            boxes.append(_box_for(overlay, True))
+    return boxes
 
 
 def texture_target_size(image):

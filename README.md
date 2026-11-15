@@ -267,7 +267,10 @@ it keeps them and prints the way to remove them by hand.
   rendered" with the reason. Import
   game asset loads a Minecraft skin (64x64 or 64x32) and splits
   it into its parts — head, body, arms, legs, overlays — plus the
-  combined figure; Export parts writes one PNG per part. Any
+  combined figure; Export parts writes one PNG per part, Export
+  skin PNG rebuilds the skin as one canonical 64x64 PNG, and
+  3D preview opens the skin on a blocky figure in its own
+  window (see Skin reassembly and 3D preview below). Any
   other image pixelizes as a texture instead, and says so.
   A texture bigger than 512 px on its longest side is
   downscaled to fit that cap first (the info line says so),
@@ -386,6 +389,7 @@ pixel-forge code game.py --asset HERO --out hero.png
 pixel-forge code game.py --all --out game-sprites/
 pixel-forge code src/ --list
 pixel-forge skin steve.png --out steve-parts/
+pixel-forge skin steve.png --reassemble --out steve-64x64.png
 pixel-forge tileset --wang grass.png water.png --out grass-tileset/
 pixel-forge tileset --blob grass.png --out grass-tileset/ --export tmx --map-size 12
 pixel-forge --help
@@ -751,6 +755,29 @@ it made.
   sprite, defaulting to `<kind>-<seed>.png` in the current
   folder. `--palette` takes the colors from a named palette
   instead of the curated ones; the shapes stay the same.
+
+## Skin reassembly and 3D preview
+
+A Minecraft skin comes in two layouts: the new 64x64 one and
+the classic 64x32 one, which has no left arm or leg and no
+jacket, sleeves, or pants. Reassembly rebuilds either layout
+as one canonical 64x64 PNG: a 64x64 skin comes back unchanged,
+and a 64x32 skin gets its classic parts placed at the 64x64
+positions, its left limbs mirrored in from the right side, and
+the overlays the classic layout never had left transparent —
+no pixels are invented. Reassembling and re-loading gives the
+same parts, so the round trip is safe.
+
+- **Code tab:** with a skin loaded, Export skin PNG writes the
+  reassembled 64x64 PNG, and 3D preview opens the skin on a
+  blocky figure in its own window. Drag the figure to turn it
+  around and see every side; the overlay layers (hat, jacket,
+  sleeves, pants) show when the skin has them. Both buttons
+  stay quiet until a skin is loaded, and say so in their
+  tooltips.
+- **Command line:** `pixel-forge skin steve.png --reassemble
+  [--out OUT.png]` writes the reassembled PNG, defaulting to
+  `<skin-stem>-64x64.png` next to the file.
 
 ## Engine-ready export
 

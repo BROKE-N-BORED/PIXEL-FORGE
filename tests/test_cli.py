@@ -1489,6 +1489,99 @@ class SkinCliTests(unittest.TestCase):
         self.assertNotIn("Traceback", err)
 
 
+class SkinReassembleCliTests(unittest.TestCase):
+    """Task 45: skin --reassemble writes one 64x64 PNG."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        from helpers import make_solid_image
+        from pixel_forge.image import argb
+        skin = make_solid_image(64, 64, 10, 20, 30)
+        for y in range(8, 16):
+            for x in range(8, 16):
+                skin.setPixel(x, y, argb(255, 0, 0, 255))
+        cls.skin = write_image(skin, os.path.join(cls.tmp,
+                                                  "steve.png"))
+        classic = make_solid_image(64, 32, 40, 50, 60)
+        # An asymmetric right arm front: red left column, blue
+        # right column — the mirrored left arm must swap them.
+        for y in range(20, 32):
+            classic.setPixel(44, y, argb(255, 0, 0, 255))
+            classic.setPixel(47, y, argb(0, 0, 255, 255))
+        cls.classic = write_image(
+            classic, os.path.join(cls.tmp, "alex.png"))
+        cls.texture = write_image(
+            make_solid_image(16, 16, 1, 2, 3),
+            os.path.join(cls.tmp, "grass.png"))
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = main(argv)
+        except SystemExit as exc:
+            code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_reassemble_64x64_byte_identical(self):
+        out = os.path.join(self.tmp, "steve-64.png")
+        code, _out, err = self._run(
+            ["skin", self.skin, "--reassemble", "--out", out])
+        self.assertEqual(code, 0, err)
+        back = load_image(out)
+        self.assertEqual((back.width(), back.height()), (64, 64))
+        self.assertEqual(bytes(back.data),
+                         bytes(load_image(self.skin).data))
+
+    def test_reassemble_64x32_to_64x64(self):
+        out = os.path.join(self.tmp, "alex-64.png")
+        code, _out, err = self._run(
+            ["skin", self.classic, "--reassemble", "--out", out])
+        self.assertEqual(code, 0, err)
+        back = load_image(out)
+        self.assertEqual((back.width(), back.height()), (64, 64))
+        # The left arm front is the mirrored right arm front.
+        left = (back.pixel(36, 52) >> 16) & 0xFF
+        right = (back.pixel(39, 52) >> 16) & 0xFF
+        self.assertEqual((left, right), (0, 255))
+        # The jacket region stays transparent.
+        self.assertEqual((back.pixel(20, 32) >> 24) & 0xFF, 0)
+
+    def test_reassemble_default_out_name(self):
+        code, _out, err = self._run(
+            ["skin", self.skin, "--reassemble"])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "steve-64x64.png")))
+
+    def test_reassemble_json(self):
+        out = os.path.join(self.tmp, "steve-json.png")
+        code, out_text, err = self._run(
+            ["skin", self.skin, "--reassemble", "--out", out,
+             "--json"])
+        self.assertEqual(code, 0, err)
+        data = json.loads(out_text)
+        self.assertEqual(data["output"], out)
+        self.assertEqual((data["width"], data["height"]),
+                         (64, 64))
+
+    def test_reassemble_not_a_skin_fails_cleanly(self):
+        code, _out, err = self._run(
+            ["skin", self.texture, "--reassemble"])
+        self.assertEqual(code, 1)
+        self.assertIn("not a Minecraft skin", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_reassemble_missing_file_fails_cleanly(self):
+        code, _out, err = self._run(
+            ["skin", os.path.join(self.tmp, "nope.png"),
+             "--reassemble"])
+        self.assertEqual(code, 1)
+        self.assertIn("not found", err)
+        self.assertNotIn("Traceback", err)
+
+
 class TilesetCliTests(unittest.TestCase):
     """Task 37: the tileset command — Wang 16 / blob 47 from base
     tiles, with the export picker and the demo map size."""
