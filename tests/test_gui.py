@@ -9151,6 +9151,86 @@ class TilesetGuiTests(unittest.TestCase):
                     missing.append(widget.__class__.__name__)
         self.assertEqual(missing, [])
 
+    # -- blob shape (task 82) ------------------------------------
+
+    def _pick_shape(self, shape):
+        combo = self.win.tileset_shape_combo
+        combo.setCurrentIndex(combo.findData(shape))
+        self.app.processEvents()
+
+    def test_blob_shape_starts_unpicked_and_hidden(self):
+        # Nothing is picked until the user picks one, and the
+        # section only shows in blob mode.
+        self.assertTrue(self.win.tileset_shape_section.isHidden())
+        self.assertEqual(self.win.tileset_shape_combo.currentIndex(),
+                         -1)
+        self.assertIsNone(self.win.tileset_shape)
+        self.assertEqual(self.win._tileset_shape(), "square")
+        combo = self.win.tileset_shape_combo
+        self.assertEqual([combo.itemText(i)
+                          for i in range(combo.count())],
+                         ["Square", "Rounded"])
+        self.assertEqual([combo.itemData(i)
+                          for i in range(combo.count())],
+                         ["square", "rounded"])
+        self.assertTrue(combo.toolTip().strip())
+        from PySide6.QtWidgets import QLabel
+        texts = [label.text() for label in
+                 self.win.tileset_shape_section.findChildren(QLabel)]
+        self.assertIn("Square is the current look. Rounded makes "
+                      "a lone cell a rounded diamond and rounds "
+                      "the corners.", texts)
+
+    def test_blob_mode_shows_shape_section(self):
+        self._pick_mode("blob")
+        self.assertFalse(self.win.tileset_shape_section.isHidden())
+        self._pick_mode("wang")
+        self.assertTrue(self.win.tileset_shape_section.isHidden())
+
+    def test_generate_with_no_shape_picked_builds_square(self):
+        # No shape picked: the square construction is what the
+        # app already does — mask 0 (index 0) fully transparent.
+        self._generate_blob()
+        self.assertIsNone(self.win.tileset_shape)
+        tile0 = self.win.tileset_tiles[0]
+        self.assertEqual(tile0.pixel(8, 8), 0)
+        self.assertEqual(tile0.pixel(7, 7), 0)
+
+    def test_pick_rounded_generates_rounded(self):
+        from pixel_forge.image import argb
+        self._pick_mode("blob")
+        self._pick_shape("rounded")
+        self.assertEqual(self.win.tileset_shape, "rounded")
+        self.assertTrue(self.win.load_tileset_base(self.tile_a, "a"))
+        self.win.tileset_generate_btn.click()
+        self.app.processEvents()
+        self.assertEqual(len(self.win.tileset_tiles), 47)
+        # Mask 0 (index 0) is the rounded diamond: opaque at
+        # the center, transparent at the corners.
+        tile0 = self.win.tileset_tiles[0]
+        self.assertEqual(tile0.pixel(7, 7), argb(255, 0, 0))
+        self.assertEqual(tile0.pixel(0, 0), 0)
+        # Mask 255 (index 46) is still the base tile unchanged.
+        tile46 = self.win.tileset_tiles[46]
+        self.assertEqual(tile46.pixel(8, 8), argb(255, 0, 0))
+
+    def test_shape_change_clears_generated_set(self):
+        self._generate_blob()
+        self.assertIsNotNone(self.win.tileset_tiles)
+        self._pick_shape("rounded")
+        self.assertIsNone(self.win.tileset_tiles)
+        self.assertIsNone(self.win.tileset_sheet)
+        self.assertEqual(self.win.tileset_count_label.text(),
+                         "No tileset yet")
+        self.assertFalse(self.win.tileset_export_png_btn.isEnabled())
+        # Regenerating under the new shape builds the rounded set.
+        self.win.tileset_generate_btn.click()
+        self.app.processEvents()
+        self.assertIsNotNone(self.win.tileset_tiles)
+        from pixel_forge.image import argb
+        self.assertEqual(self.win.tileset_tiles[0].pixel(7, 7),
+                         argb(255, 0, 0))
+
 
 class PaletteEditorGuiTests(unittest.TestCase):
     """Task 39: the palette editor dialog, the four palette

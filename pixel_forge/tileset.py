@@ -33,6 +33,26 @@ toward the tile center; exactly one edge present -> the half of
 the quadrant next to that edge; no adjacent edges -> transparent.
 Mask 255 is the base tile unchanged; mask 0 is fully transparent.
 
+Blob shapes (task 82): "square" is the construction above, the
+default. "rounded" is the classic sub-blob construction (Boris
+the Brave's quarter-tile rules): the same 47 masks, but the two
+cases that square draws straight get curves instead. A quadrant
+with no adjacent edges is an outer curve — the quarter-ellipse
+centered on the tile center, through the midpoints of the tile's
+edges — so an isolated cell renders as a rounded diamond (the
+inscribed ellipse: opaque at the center and near the edge
+midpoints, transparent at the tile corners — the curve reaches
+to one pixel short of the midpoints, so the outermost row and
+column of the tile stay transparent) instead of nothing. A quadrant
+with both edges but a missing corner gets a curved notch instead
+of the straight diagonal cut: a quarter-ellipse arc through the
+same two edge midpoints, centered on the quadrant's outer corner,
+so the notch is a smooth concave curve. Quadrants that are whole
+or one-edge are identical in both shapes, and mask 255 is the
+base tile unchanged either way. Both curves are tested with
+exact integer arithmetic, the same style as the square diagonal
+cut — no floats anywhere.
+
 The blob mask bits are in Tiled's wangid order (top, top-right,
 right, bottom-right, bottom, bottom-left, left, top-left), so a
 blob tile's wangid is its mask bits as 0/1 values. A Wang tile's
@@ -93,6 +113,16 @@ BLOB_TILE_COUNT = 47
 # Modes, in the order the GUI lists them.
 TILESET_MODES = ("wang", "blob")
 MODE_NAMES = {"wang": "Wang 16", "blob": "Blob 47"}
+
+# Blob shapes, in the order the GUI lists them (task 82):
+# "square" is the v0.47 construction (straight cuts, mask 0
+# transparent), "rounded" the classic sub-blob one (outer
+# curves, an isolated cell renders as a rounded diamond).
+# Square is the default — existing behavior does not change
+# unless the rounded shape is picked.
+BLOB_SHAPES = ("square", "rounded")
+SHAPE_NAMES = {"square": "Square", "rounded": "Rounded"}
+DEFAULT_BLOB_SHAPE = "square"
 
 # What one export writes (the PNG always comes along — a .tsx,
 # .tmx, or .tres without its image is useless, and the .tmx needs
@@ -262,15 +292,23 @@ def _wang_tile(tile_a, tile_b, mask):
     return out
 
 
-def blob_tiles(tile):
+def blob_tiles(tile, shape=DEFAULT_BLOB_SHAPE):
     """The 47 blob tiles from one base tile: index is the mask's
-    position in BLOB_MASKS (mask 0 -> index 0, fully transparent;
-    mask 255 -> index 46, the base tile unchanged)."""
+    position in BLOB_MASKS (mask 0 -> index 0; mask 255 ->
+    index 46, the base tile unchanged). shape is "square" (the
+    default: straight cuts, mask 0 fully transparent) or
+    "rounded" (the classic sub-blob construction: a no-edge
+    quadrant is an outer curve, so mask 0 is a rounded diamond,
+    and the corner cut is a curve instead of a diagonal)."""
     _check_tile(tile, "base tile")
-    return [_blob_tile(tile, mask) for mask in BLOB_MASKS]
+    if shape not in BLOB_SHAPES:
+        raise PixelForgeError(
+            "unknown blob shape %r (want square or rounded)"
+            % (shape,))
+    return [_blob_tile(tile, mask, shape) for mask in BLOB_MASKS]
 
 
-def _blob_tile(tile, mask):
+def _blob_tile(tile, mask, shape=DEFAULT_BLOB_SHAPE):
     width, height = tile.width(), tile.height()
     out = Image(width, height)
     src_data, o_data = tile.data, out.data
@@ -281,7 +319,28 @@ def _blob_tile(tile, mask):
         u_on = bool(mask & (1 << BLOB_BITS[u_edge]))
         c_on = bool(mask & (1 << BLOB_BITS[corner]))
         if not v_on and not u_on:
-            continue  # no adjacent neighbors: transparent
+            if shape == "square":
+                continue  # no adjacent neighbors: transparent
+            # Rounded: the outer curve — the quarter-ellipse
+            # centered on the tile center (the quadrant's inner
+            # corner), through the midpoints of the tile's edges.
+            # Terrain is inside the ellipse, toward the center;
+            # the four quadrants together make the inscribed
+            # ellipse, an isolated cell's rounded diamond.
+            # Exact integers: ((qw-u)/qw)^2 + ((qh-v)/qh)^2 <= 1.
+            area = qw * qw * qh * qh
+            for v in range(qh):
+                for u in range(qw):
+                    du, dv = qw - u, qh - v
+                    if (du * du * qh * qh + dv * dv * qw * qw
+                            > area):
+                        continue
+                    x = x0 + (qw - 1 - u if flip_u else u)
+                    y = y0 + (qh - 1 - v if flip_v else v)
+                    offset = (y * width + x) * 4
+                    o_data[offset:offset + 4] = \
+                        src_data[offset:offset + 4]
+            continue
         if v_on and u_on and c_on:
             # The corner's neighbors are all present: whole.
             _blit_quadrant(src_data, o_data, width, x0, y0, qw, qh)
@@ -289,11 +348,26 @@ def _blob_tile(tile, mask):
         for v in range(qh):
             for u in range(qw):
                 if v_on and u_on:
-                    # Both edges, corner missing: diagonal cut,
-                    # terrain toward the tile center. The cut runs
-                    # from the midpoint of one outer edge to the
-                    # midpoint of the other (u/qw + v/qh >= 1/2).
-                    show = (2 * (u * qh + v * qw) >= qw * qh)
+                    if shape == "square":
+                        # Both edges, corner missing: diagonal
+                        # cut, terrain toward the tile center.
+                        # The cut runs from the midpoint of one
+                        # outer edge to the midpoint of the other
+                        # (u/qw + v/qh >= 1/2).
+                        show = (2 * (u * qh + v * qw) >= qw * qh)
+                    else:
+                        # Rounded: the same two midpoints, joined
+                        # by a curve instead of a straight line —
+                        # a quarter-ellipse centered on the
+                        # quadrant's outer corner, terrain outside
+                        # it. The notch is a smooth concave curve,
+                        # deeper than the diagonal in the middle,
+                        # meeting it at the midpoints.
+                        # Exact integers: (2u/qw)^2 + (2v/qh)^2
+                        # >= 1.
+                        show = (4 * u * u * qh * qh
+                                + 4 * v * v * qw * qw
+                                >= qw * qw * qh * qh)
                 elif v_on:
                     # Only the horizontal edge: the half next to it.
                     show = 2 * v < qh

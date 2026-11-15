@@ -933,10 +933,14 @@ paint terrain that connects to itself. Two kinds:
   255) is the base tile unchanged; the no-neighbors tile (mask
   0) is fully transparent — so an isolated painted cell shows
   nothing, and you need at least two adjacent cells to see
-  terrain. This follows the task's construction, which differs
-  from the classic sub-blob one (where a no-edge quadrant is an
-  outer curve and an isolated cell renders as a diamond); if
-  the rounded variant is wanted later it is a small follow-up.
+  terrain. That is the square shape, the default. The rounded
+  shape is the classic sub-blob construction: a no-edge
+  quadrant is an outer curve, so an isolated cell renders as
+  a rounded diamond, and the corner cut is a curve instead of
+  a straight diagonal. Same 47 masks either way; quadrants
+  that are whole or one-edge are identical in both shapes.
+  Pick the shape on the Tileset tab (Blob shape, shown in
+  blob mode) or with --blob-shape on the command line.
 
 The tileset PNG packs the tiles in a grid (4x4 for Wang, 7x7
 for blob at the default auto columns) with no padding, in tile
@@ -983,10 +987,12 @@ exports as `grass.png`, `grass.tsx`, `grass-demo.tmx`,
 **Command line:** `pixel-forge tileset --wang A.png B.png
 --out DIR` or `pixel-forge tileset --blob TILE.png --out DIR`,
 plus `--export {png,tsx,tmx,tres,all}` (default all — the PNG
-always comes along, and the .tmx brings its .tsx) and
-`--map-size N` (default 10, the demo .tmx size). `--wang` and
-`--blob` together is an error. `--json` reports the mode, the
-written files, the tile count, and the export kind.
+always comes along, and the .tmx brings its .tsx),
+`--blob-shape {square,rounded}` (default square, blob sets
+only), and `--map-size N` (default 10, the demo .tmx size).
+`--wang` and `--blob` together is an error. `--json` reports
+the mode, the written files, the tile count, and the export
+kind.
 
 Verification: the exports are checked structurally — the .tsx
 and .tmx parse back through xml.etree in the tests (tilecount,

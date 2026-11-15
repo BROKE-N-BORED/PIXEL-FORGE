@@ -112,7 +112,8 @@ from .spritesheet import (build_metadata, duration_for_fps,
                           write_sheet)
 from .textstamp import (MAX_SCALE, MIN_SCALE, render_text,
                         stamp_image, unsupported_characters)
-from .tileset import (MODE_NAMES, TILESET_MODES, blob_tiles,
+from .tileset import (BLOB_SHAPES, DEFAULT_BLOB_SHAPE, MODE_NAMES,
+                      SHAPE_NAMES, TILESET_MODES, blob_tiles,
                       export_tileset, wang_tiles)
 from .undo import Command as UndoCommand
 from .undo import UndoStack
@@ -3120,7 +3121,13 @@ class MainWindow(QMainWindow):
         # "blob", None until one is picked), the base tiles, and
         # the generated set. A new mode or a new base tile clears
         # the generated set — it was built from the old ones.
+        # Task 82: the picked blob shape ("square" / "rounded",
+        # None until one is picked — until then the square
+        # construction is what the app already does, so the
+        # effective shape is "square"). A new shape clears the
+        # generated set too.
         self.tileset_mode = None
+        self.tileset_shape = None
         self.tileset_base_a = None
         self.tileset_base_a_path = None
         self.tileset_base_b = None
@@ -10443,6 +10450,38 @@ class MainWindow(QMainWindow):
             self._on_tileset_mode_changed)
         form.addWidget(self.tileset_mode_combo)
 
+        # Blob shape (task 82; blob mode only): how a blob
+        # quadrant is drawn. Square is the current look —
+        # straight cuts, an isolated cell shows nothing.
+        # Rounded is the classic sub-blob look — outer curves,
+        # an isolated cell is a rounded diamond and the corners
+        # are rounded. Nothing is picked until the user picks
+        # one; until then the square construction is what the
+        # app already does. The whole section hides as a unit
+        # unless blob mode is picked.
+        self.tileset_shape_section = QWidget()
+        shape_form = QVBoxLayout(self.tileset_shape_section)
+        shape_form.setContentsMargins(0, 0, 0, 0)
+        shape_form.addWidget(self._section("Blob shape"))
+        self.tileset_shape_combo = QComboBox()
+        self.tileset_shape_combo.setToolTip(
+            "How a blob quadrant is drawn: Square is the current "
+            "look, straight cuts. Rounded is the classic "
+            "sub-blob look, outer curves.")
+        for key in BLOB_SHAPES:
+            self.tileset_shape_combo.addItem(SHAPE_NAMES[key], key)
+        self.tileset_shape_combo.setCurrentIndex(-1)
+        self.tileset_shape_combo.currentIndexChanged.connect(
+            self._on_tileset_shape_changed)
+        shape_form.addWidget(self.tileset_shape_combo)
+        shape_note = QLabel("Square is the current look. "
+                            "Rounded makes a lone cell a rounded "
+                            "diamond and rounds the corners.")
+        shape_note.setWordWrap(True)
+        shape_form.addWidget(shape_note)
+        self.tileset_shape_section.setVisible(False)
+        form.addWidget(self.tileset_shape_section)
+
         form.addWidget(self._section("Base tiles"))
         self.tileset_pick_a_btn = QPushButton("Choose base tile")
         self.tileset_pick_a_btn.setToolTip(
@@ -10579,15 +10618,32 @@ class MainWindow(QMainWindow):
 
     def _on_tileset_mode_changed(self, _index):
         """A mode was picked (or unpicked): show or hide the
-        second base tile, rename the first picker, and clear the
-        generated set — it was built under the old mode."""
+        second base tile and the blob shape section, rename the
+        first picker, and clear the generated set — it was built
+        under the old mode."""
         self.tileset_mode = self.tileset_mode_combo.currentData()
         is_wang = self.tileset_mode == "wang"
         self.tileset_b_section.setVisible(is_wang)
+        self.tileset_shape_section.setVisible(
+            self.tileset_mode == "blob")
         self.tileset_pick_a_btn.setText(
             "Choose terrain A" if is_wang else "Choose base tile")
         self._clear_tileset()
         self._refresh_tileset_buttons()
+
+    def _on_tileset_shape_changed(self, _index):
+        """A blob shape was picked (or unpicked): record it and
+        clear the generated set — it was built under the old
+        shape. Nothing picked means the square construction,
+        which is what the app already does."""
+        self.tileset_shape = self.tileset_shape_combo.currentData()
+        self._clear_tileset()
+        self._refresh_tileset_buttons()
+
+    def _tileset_shape(self):
+        """The blob shape to generate with: the picked shape, or
+        the square default when nothing is picked."""
+        return self.tileset_shape or DEFAULT_BLOB_SHAPE
 
     def _clear_tileset(self):
         """Drop the generated set (the mode or a base tile
@@ -10694,7 +10750,8 @@ class MainWindow(QMainWindow):
                 tiles = wang_tiles(self.tileset_base_a,
                                    self.tileset_base_b)
             else:
-                tiles = blob_tiles(self.tileset_base_a)
+                tiles = blob_tiles(self.tileset_base_a,
+                                   shape=self._tileset_shape())
         except PixelForgeError as exc:
             warn_dialog(self, "Could not generate tileset", str(exc))
             return

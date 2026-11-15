@@ -1,5 +1,21 @@
 # Pixel Forge changelog
 
+## 0.71 — 2026-11-14
+
+Rounded blob tileset variant (task 82): blob sets now come
+in two shapes. Square is the current look and stays the
+default: straight cuts, and an isolated painted cell shows
+nothing. Rounded is the classic sub-blob look: a quadrant
+with no adjacent neighbors is an outer curve, so an isolated
+cell renders as a rounded diamond, and convex corners are
+rounded curves instead of square notches. Same 47 masks
+either way; quadrants that are whole or one-edge are
+identical in both shapes. Pick the shape on the Tileset tab
+(Blob shape, shown in blob mode) or with --blob-shape on
+the command line. Nothing is picked by default: until a
+shape is picked, the square construction is what the app
+already does.
+
 ## 0.70 — 2026-11-14
 
 Live generation verification harness (task 70): pixel-forge

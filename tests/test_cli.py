@@ -1798,6 +1798,60 @@ class TilesetCliTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(
             os.path.join(self.tmp, "grass-tileset", "grass.png")))
 
+    def test_tileset_blob_shape_rounded(self):
+        # --blob-shape rounded: tile 0 of the sheet (mask 0) is
+        # the rounded diamond — opaque at its center, transparent
+        # at its corners. The sheet packs the 47 tiles in 7
+        # columns, so tile 0 sits at the top-left.
+        from pixel_forge.image import argb
+        out_dir = os.path.join(self.tmp, "rounded-out")
+        code, _out, err = self._run(
+            ["tileset", "--blob", self.tile_a, "--out", out_dir,
+             "--export", "png", "--blob-shape", "rounded"])
+        self.assertEqual(code, 0, err)
+        sheet = load_image(os.path.join(out_dir, "grass.png"))
+        self.assertEqual(sheet.pixel(7, 7), argb(255, 0, 0))
+        self.assertEqual(sheet.pixel(0, 0), 0)
+
+    def test_tileset_blob_shape_default_is_square(self):
+        # No --blob-shape: the square construction, tile 0 fully
+        # transparent.
+        out_dir = os.path.join(self.tmp, "square-out")
+        code, _out, err = self._run(
+            ["tileset", "--blob", self.tile_a, "--out", out_dir,
+             "--export", "png"])
+        self.assertEqual(code, 0, err)
+        sheet = load_image(os.path.join(out_dir, "grass.png"))
+        self.assertEqual(sheet.pixel(7, 7), 0)
+        self.assertEqual(sheet.pixel(0, 0), 0)
+
+    def test_tileset_blob_shape_with_wang_fails_cleanly(self):
+        code, _out, err = self._run(
+            ["tileset", "--wang", self.tile_a, self.tile_b,
+             "--blob-shape", "rounded",
+             "--out", os.path.join(self.tmp, "shape-wang-out")])
+        self.assertEqual(code, 1)
+        self.assertIn("only applies to blob sets", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_tileset_blob_shape_square_with_wang_is_fine(self):
+        # Explicitly passing the default with --wang is harmless.
+        out_dir = os.path.join(self.tmp, "shape-wang-ok-out")
+        code, _out, err = self._run(
+            ["tileset", "--wang", self.tile_a, self.tile_b,
+             "--blob-shape", "square", "--out", out_dir,
+             "--export", "png"])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(
+            os.path.join(out_dir, "grass.png")))
+
+    def test_tileset_blob_shape_bogus_is_argparse_error(self):
+        code, _out, err = self._run(
+            ["tileset", "--blob", self.tile_a,
+             "--blob-shape", "wobbly"])
+        self.assertEqual(code, 2)
+        self.assertIn("invalid choice", err)
+
 
 class BatchProcessingCliTests(unittest.TestCase):
     """Task 28: folder convert, code --all, library remove/rename,

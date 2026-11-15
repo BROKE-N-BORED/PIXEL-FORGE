@@ -77,8 +77,9 @@ from .textstamp import parse_hex_color, stamp_text
 from .spritesheet import (find_sibling_metadata, frames_from_grid,
                           load_frame_dir, load_metadata,
                           split_with_metadata, write_sheet)
-from .tileset import (DEMO_MAP_SIZE, TILESET_EXPORTS, blob_tiles,
-                      export_tileset, wang_tiles)
+from .tileset import (BLOB_SHAPES, DEFAULT_BLOB_SHAPE, DEMO_MAP_SIZE,
+                      TILESET_EXPORTS, blob_tiles, export_tileset,
+                      wang_tiles)
 from .video import DEFAULT_FPS, video_to_frames
 
 PALETTE_CHOICES = ["image", "pico8", "gameboy", "grayscale",
@@ -736,6 +737,15 @@ def build_parser():
                        help="one base tile (the terrain, drawn "
                        "against transparency) for a 47-tile blob "
                        "set")
+    tileset.add_argument("--blob-shape", default=DEFAULT_BLOB_SHAPE,
+                         choices=list(BLOB_SHAPES),
+                         help="how a blob quadrant is drawn "
+                         "(default: square, straight cuts, an "
+                         "isolated cell shows nothing; rounded "
+                         "is the classic sub-blob look, outer "
+                         "curves, an isolated cell is a rounded "
+                         "diamond and the corners are rounded). "
+                         "Only applies to blob sets.")
     tileset.add_argument("--out", default=None,
                          help="output folder (default: "
                          "<base-stem>-tileset next to the first "
@@ -1740,6 +1750,12 @@ def cmd_skin(args):
 
 def cmd_tileset(args):
     if args.wang is not None:
+        if args.blob_shape != DEFAULT_BLOB_SHAPE:
+            # --blob-shape square is the default, so passing it
+            # with --wang is harmless; only a real choice is a
+            # mistake worth refusing.
+            raise PixelForgeError(
+                "--blob-shape only applies to blob sets")
         mode = "wang"
         first = Path(args.wang[0])
         tile_a = load_image(args.wang[0])
@@ -1748,7 +1764,8 @@ def cmd_tileset(args):
     else:
         mode = "blob"
         first = Path(args.blob)
-        tiles = blob_tiles(load_image(args.blob))
+        tiles = blob_tiles(load_image(args.blob),
+                           shape=args.blob_shape)
     out = args.out
     if out is None:
         out = str(first.with_name(first.stem + "-tileset"))

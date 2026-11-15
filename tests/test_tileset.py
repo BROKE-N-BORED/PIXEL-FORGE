@@ -9,6 +9,7 @@ this is a structural verification — the README says so.
 
 Qt-free (task 64): runs without PySide6.
 """
+import hashlib
 import os
 import sys
 import tempfile
@@ -21,9 +22,10 @@ from helpers import make_solid_image, write_image  # noqa: E402
 from pixel_forge.image import Image, argb  # noqa: E402
 from pixel_forge.pixelize import PixelForgeError, load_image  # noqa: E402
 from pixel_forge.tileset import (  # noqa: E402
-    BLOB_MASK_TO_INDEX, BLOB_MASKS, DEMO_MAP_SIZE, autotile_map,
-    blob_id, blob_tiles, demo_cells, export_tileset, wang_center_terrain,
-    wang_id, wang_map, wang_tiles, write_tmx, write_tres, write_tsx)
+    BLOB_MASK_TO_INDEX, BLOB_MASKS, BLOB_SHAPES, DEFAULT_BLOB_SHAPE,
+    DEMO_MAP_SIZE, SHAPE_NAMES, autotile_map, blob_id, blob_tiles,
+    demo_cells, export_tileset, wang_center_terrain, wang_id,
+    wang_map, wang_tiles, write_tmx, write_tres, write_tsx)
 
 # The QApplication must exist before the first load_image
 # call takes the Qt path (see helpers.ensure_app_if_qt).
@@ -245,6 +247,183 @@ class BlobTests(unittest.TestCase):
     def test_empty_base_refuses(self):
         with self.assertRaises(PixelForgeError):
             blob_tiles(Image(0, 0))
+
+
+class RoundedBlobTests(unittest.TestCase):
+    """The rounded blob shape (task 82): the classic sub-blob
+    construction — a no-edge quadrant is an outer curve, so an
+    isolated cell renders as a rounded diamond, and the corner
+    cut is a curve instead of a straight diagonal."""
+
+    def setUp(self):
+        self.base = quadrant_base()
+        self.square = blob_tiles(self.base, shape="square")
+        self.rounded = blob_tiles(self.base, shape="rounded")
+
+    def _local_uv(self, x, y):
+        """A global pixel's local (u, v) within its quadrant,
+        measured from the quadrant's outer corner — the inverse
+        of the module's flip mapping (16x16 tile, 8x8
+        quadrants)."""
+        if x < 8 and y < 8:      # NW
+            return x, y
+        if x >= 8 and y < 8:     # NE
+            return 15 - x, y
+        if x < 8:                # SW
+            return x, 15 - y
+        return 15 - x, 15 - y    # SE
+
+    def test_forty_seven_tiles_both_shapes(self):
+        self.assertEqual(len(self.rounded), 47)
+        for tile in self.rounded:
+            self.assertEqual((tile.width(), tile.height()),
+                             (16, 16))
+        self.assertEqual(BLOB_SHAPES, ("square", "rounded"))
+        self.assertEqual(DEFAULT_BLOB_SHAPE, "square")
+        self.assertEqual(SHAPE_NAMES,
+                         {"square": "Square", "rounded": "Rounded"})
+
+    def test_default_is_square(self):
+        default = blob_tiles(self.base)
+        for index in range(47):
+            self.assertEqual(default[index], self.square[index],
+                             "tile %d" % index)
+
+    def test_unknown_shape_refuses(self):
+        with self.assertRaises(PixelForgeError) as caught:
+            blob_tiles(self.base, shape="wobbly")
+        self.assertIn("wobbly", str(caught.exception))
+        self.assertIn("square or rounded", str(caught.exception))
+
+    def test_isolated_cell_is_a_rounded_diamond(self):
+        tile = self.rounded[BLOB_MASK_TO_INDEX[0]]
+        # Opaque at the center and near the edge midpoints,
+        # transparent at the tile corners — the rounded diamond.
+        self.assertEqual(tile.pixel(7, 7), RED)
+        self.assertEqual(tile.pixel(8, 8), YELLOW)
+        self.assertEqual(tile.pixel(1, 7), RED)
+        self.assertEqual(tile.pixel(7, 1), RED)
+        self.assertEqual(tile.pixel(0, 0), TRANSPARENT)
+        self.assertEqual(tile.pixel(15, 15), TRANSPARENT)
+        self.assertEqual(tile.pixel(0, 7), TRANSPARENT)
+        self.assertEqual(tile.pixel(7, 0), TRANSPARENT)
+        # (2, 2) is what separates the curve from a straight
+        # diagonal: the diagonal would show it (2/8 + 2/8 = 1/2),
+        # the ellipse does not ((6/8)^2 + (6/8)^2 > 1).
+        self.assertEqual(tile.pixel(2, 2), TRANSPARENT)
+        self.assertEqual(tile.pixel(4, 4), RED)
+        # The whole tile against an independent float oracle:
+        # opaque exactly where ((8-u)/8)^2 + ((8-v)/8)^2 <= 1,
+        # in the base tile's quadrant color. No pixel sits
+        # exactly on the arc at this size, so float and integer
+        # arithmetic agree everywhere.
+        for y in range(16):
+            for x in range(16):
+                u, v = self._local_uv(x, y)
+                inside = (((8 - u) / 8) ** 2
+                          + ((8 - v) / 8) ** 2 <= 1)
+                got = tile.pixel(x, y)
+                if inside:
+                    self.assertEqual(got, self.base.pixel(x, y),
+                                     "pixel %d, %d" % (x, y))
+                else:
+                    self.assertEqual(got, TRANSPARENT,
+                                     "pixel %d, %d" % (x, y))
+
+    def test_convex_corners_are_rounded(self):
+        # Mask 85 (all four edges, no corners): every quadrant
+        # is cut. The rounded notch is a curve through the same
+        # two edge midpoints as the square diagonal — deeper in
+        # the middle, meeting it at the midpoints.
+        rounded = self.rounded[BLOB_MASK_TO_INDEX[85]]
+        square = self.square[BLOB_MASK_TO_INDEX[85]]
+        self.assertEqual(rounded.pixel(2, 2), TRANSPARENT)
+        self.assertEqual(square.pixel(2, 2), RED)
+        self.assertEqual(rounded.pixel(3, 3), RED)
+        self.assertEqual(square.pixel(3, 3), RED)
+        self.assertEqual(rounded.pixel(4, 0), RED)
+        self.assertEqual(square.pixel(4, 0), RED)
+        self.assertEqual(rounded.pixel(0, 0), TRANSPARENT)
+        self.assertEqual(square.pixel(0, 0), TRANSPARENT)
+        # The whole tile against an independent float oracle:
+        # opaque exactly where (2u/8)^2 + (2v/8)^2 >= 1.
+        for y in range(16):
+            for x in range(16):
+                u, v = self._local_uv(x, y)
+                inside = ((2 * u / 8) ** 2
+                          + (2 * v / 8) ** 2 >= 1)
+                got = rounded.pixel(x, y)
+                if inside:
+                    self.assertEqual(got, self.base.pixel(x, y),
+                                     "pixel %d, %d" % (x, y))
+                else:
+                    self.assertEqual(got, TRANSPARENT,
+                                     "pixel %d, %d" % (x, y))
+
+    def test_whole_and_one_edge_quadrants_match_square(self):
+        # The shapes only differ in no-edge quadrants and in
+        # both-edges-no-corner quadrants. Every quadrant that is
+        # whole or one-edge must be pixel-identical between the
+        # two shapes, for every mask. Bits: N=0, NE=1, E=2, SE=3,
+        # S=4, SW=5, W=6, NW=7; quadrants NW, NE, SW, SE with
+        # their (vertical edge, horizontal edge, corner) bits.
+        quads = (((0, 0), (0, 6, 7)), ((8, 0), (0, 2, 1)),
+                 ((0, 8), (4, 6, 5)), ((8, 8), (4, 2, 3)))
+        for mask in BLOB_MASKS:
+            index = BLOB_MASK_TO_INDEX[mask]
+            for (x0, y0), (v_bit, u_bit, c_bit) in quads:
+                v_on = bool(mask & (1 << v_bit))
+                u_on = bool(mask & (1 << u_bit))
+                c_on = bool(mask & (1 << c_bit))
+                whole = v_on and u_on and c_on
+                one_edge = v_on != u_on
+                if not (whole or one_edge):
+                    continue
+                for y in range(y0, y0 + 8):
+                    for x in range(x0, x0 + 8):
+                        self.assertEqual(
+                            self.rounded[index].pixel(x, y),
+                            self.square[index].pixel(x, y),
+                            "mask %d pixel %d, %d" % (mask, x, y))
+
+    def test_mask_255_identical_and_unchanged(self):
+        index = BLOB_MASK_TO_INDEX[255]
+        self.assertEqual(self.rounded[index], self.base)
+        self.assertEqual(self.rounded[index], self.square[index])
+
+    def test_odd_size_rounded_builds(self):
+        # The quadrant split puts the extra pixel in the
+        # east/south quadrants; the curves use each quadrant's
+        # own size, so every pixel still belongs to exactly one
+        # quadrant.
+        odd = Image(15, 15)
+        for y in range(15):
+            for x in range(15):
+                odd.setPixel(x, y, RED)
+        tiles = blob_tiles(odd, shape="rounded")
+        self.assertEqual(len(tiles), 47)
+        for tile in tiles:
+            self.assertEqual((tile.width(), tile.height()),
+                             (15, 15))
+        isolated = tiles[BLOB_MASK_TO_INDEX[0]]
+        opaque = sum(1 for y in range(15) for x in range(15)
+                     if isolated.pixel(x, y) != TRANSPARENT)
+        self.assertTrue(0 < opaque < 225)
+        self.assertEqual(isolated.pixel(7, 7), RED)
+        self.assertEqual(isolated.pixel(0, 0), TRANSPARENT)
+        self.assertEqual(tiles[BLOB_MASK_TO_INDEX[255]], odd)
+
+    def test_square_output_matches_v070(self):
+        # The square set is byte-identical to the v0.70 tree's
+        # output for the same base tile — the hash was recorded
+        # from the v0.70 tree before this build.
+        digest = hashlib.sha256()
+        for tile in self.square:
+            digest.update(bytes(tile.data))
+        self.assertEqual(
+            digest.hexdigest(),
+            "f959f42ebb1570b44d61ba7df78c2958e1208ed86636ecf509324"
+            "cc24df4ced1")
 
 
 class MapTests(unittest.TestCase):
