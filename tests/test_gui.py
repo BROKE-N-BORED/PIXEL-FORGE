@@ -5254,10 +5254,16 @@ class ShortcutsMenusTests(unittest.TestCase):
             ["Ctrl+Y", "Ctrl+Shift+Z"])
         help_items = [a.text()
                       for a in menus["Help"].actions()]
+        # Task 48 adds the update check after a separator (the
+        # separator reads as an empty-text action): a manual
+        # check, then the startup opt-in.
         self.assertEqual(help_items,
                          ["About Pixel Forge",
                           "What the Code tab detects",
-                          "Library location"])
+                          "Library location",
+                          "",
+                          "Check for updates",
+                          "Check for updates on startup"])
 
     def test_about_text_shows_real_version(self):
         # The About text reads __version__, so it can never drift
@@ -9812,6 +9818,333 @@ class ThemeToggleTests(unittest.TestCase):
         win.prompt_edit.setText("x" * (MAX_PROMPT_LEN + 1))
         self.assertTrue(
             win.prompt_counter_label.property("overLimit"))
+
+
+class UpdateCheckGuiTests(unittest.TestCase):
+    """Task 48: the opt-in update check — the Help menu
+    actions, the persisted opt-in, the manual check, and the
+    automatic startup check. No test touches the real network:
+    pixel_forge.gui.check_for_update is stubbed, so the worker
+    runs the stub. Every test uses its own temp-file QSettings,
+    so nothing touches the user's real settings."""
+
+    RELEASE_URL = ("https://github.com/BROKE-N-BORED/PIXEL-FORGE/"
+                   "releases/tag/v0.70")
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.settings_path = os.path.join(self.tmp, "settings.ini")
+        self.lib_dir = os.path.join(self.tmp, "lib")
+        self._windows = []
+
+    def tearDown(self):
+        for win in self._windows:
+            win.close()
+            win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _settings(self):
+        return QSettings(self.settings_path, QSettings.IniFormat)
+
+    def _window(self, settings="default", show=True):
+        from pixel_forge.gui import MainWindow
+        if settings == "default":
+            settings = self._settings()
+        win = MainWindow(library_dir=self.lib_dir, restore=False,
+                         settings=settings)
+        self._windows.append(win)
+        if show:
+            win.show()
+            self.app.processEvents()
+        return win
+
+    def _wait_for_check(self, win, timeout=10):
+        deadline = time.time() + timeout
+        while win.update_worker is not None \
+                and time.time() < deadline:
+            self.app.processEvents()
+            time.sleep(0.02)
+        self.app.processEvents()
+        self.assertIsNone(win.update_worker,
+                          "the update check did not finish in %ss"
+                          % timeout)
+
+    def _watch_dialog(self, button_text, seen):
+        # A timer watcher for a modal QMessageBox: when one
+        # appears, record its text and click the named button.
+        # Returns the watcher; the caller stops it.
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QMessageBox
+
+        def watch():
+            dialog = QApplication.activeModalWidget()
+            if dialog is None or not isinstance(dialog, QMessageBox):
+                return
+            seen.append(dialog.text())
+            for button in dialog.buttons():
+                if button.text() == button_text:
+                    button.click()
+                    return
+
+        watcher = QTimer()
+        watcher.timeout.connect(watch)
+        watcher.start(50)
+        return watcher
+
+    def _help_actions(self, win):
+        bar = win.menuBar()
+        for action in bar.actions():
+            if action.text() == "Help":
+                return action.menu().actions()
+        self.fail("no Help menu")
+
+    def test_help_menu_update_actions(self):
+        win = self._window()
+        actions = [a.text() for a in self._help_actions(win)]
+        self.assertIn("Check for updates", actions)
+        self.assertIn("Check for updates on startup", actions)
+        check = win._check_updates_action
+        auto = win._auto_update_action
+        self.assertTrue(check.toolTip().strip())
+        self.assertTrue(auto.toolTip().strip())
+        for text in (check.text(), check.toolTip(),
+                     auto.text(), auto.toolTip()):
+            self.assertNotIn("—", text)
+            self.assertNotIn("(s)", text)
+        self.assertFalse(auto.isChecked())
+        self.assertTrue(auto.isCheckable())
+        self.assertFalse(check.isCheckable())
+
+    def test_update_check_off_by_default(self):
+        # A fresh install makes no request: with no saved
+        # setting, showing the window starts no worker, and the
+        # stubbed check is never called.
+        import pixel_forge.gui as gui_mod
+        with mock.patch.object(
+                gui_mod, "check_for_update") as checked:
+            win = self._window()
+            self.app.processEvents()
+            time.sleep(0.3)
+            self.app.processEvents()
+            self.assertIsNone(win.update_worker)
+            checked.assert_not_called()
+            self.assertFalse(win._auto_update_action.isChecked())
+            self.assertFalse(win._load_update_check())
+
+    def test_update_check_off_without_settings(self):
+        win = self._window(settings=None)
+        self.assertFalse(win._load_update_check())
+        self.assertFalse(win._auto_update_action.isChecked())
+
+    def test_toggle_persists_across_windows(self):
+        # The check is stubbed for the whole test: the second
+        # window reads the setting ON and runs its startup
+        # check on show — without the stub that would be a real
+        # network request.
+        import pixel_forge.gui as gui_mod
+        from pixel_forge import __version__
+        with mock.patch.object(
+                gui_mod, "check_for_update",
+                return_value={"state": "current",
+                              "latest": __version__, "url": ""}):
+            win = self._window()
+            win._auto_update_action.trigger()
+            self.app.processEvents()
+            saved = self._settings().value(
+                "check_updates_on_startup", type=bool)
+            self.assertTrue(saved)
+            # A new window on the same settings file reads it
+            # back and shows the action checked.
+            second = self._window()
+            self.assertTrue(second._auto_update_action.isChecked())
+            self.assertTrue(second._load_update_check())
+            self._wait_for_check(second)
+            second._auto_update_action.trigger()
+            self.app.processEvents()
+            saved = self._settings().value(
+                "check_updates_on_startup", type=bool)
+            self.assertFalse(saved)
+
+    def test_manual_check_newer_shows_dialog(self):
+        import pixel_forge.gui as gui_mod
+        from pixel_forge import __version__
+        win = self._window()
+        seen = []
+        watcher = self._watch_dialog("Close", seen)
+        try:
+            with mock.patch.object(
+                    gui_mod, "check_for_update",
+                    return_value={"state": "newer",
+                                  "latest": "0.70",
+                                  "url": self.RELEASE_URL}):
+                win._check_updates_action.trigger()
+                self._wait_for_check(win)
+        finally:
+            watcher.stop()
+        self.assertEqual(len(seen), 1)
+        self.assertIn("Pixel Forge 0.70 is on GitHub", seen[0])
+        self.assertIn(__version__, seen[0])
+        self.assertNotIn("—", seen[0])
+
+    def test_manual_check_newer_opens_release_page(self):
+        import pixel_forge.gui as gui_mod
+        win = self._window()
+        seen = []
+        watcher = self._watch_dialog("Open the release page",
+                                     seen)
+        try:
+            with mock.patch.object(
+                    gui_mod, "check_for_update",
+                    return_value={"state": "newer",
+                                  "latest": "0.70",
+                                  "url": self.RELEASE_URL}), \
+                    mock.patch.object(
+                        gui_mod.QDesktopServices, "openUrl",
+                        return_value=True) as opened:
+                win._check_updates_action.trigger()
+                self._wait_for_check(win)
+        finally:
+            watcher.stop()
+        self.assertEqual(len(seen), 1)
+        opened.assert_called_once()
+        self.assertEqual(opened.call_args[0][0].toString(),
+                         self.RELEASE_URL)
+
+    def test_manual_check_current_shows_up_to_date(self):
+        import pixel_forge.gui as gui_mod
+        from pixel_forge import __version__
+        win = self._window()
+        with mock.patch.object(
+                gui_mod, "check_for_update",
+                return_value={"state": "current",
+                              "latest": __version__,
+                              "url": self.RELEASE_URL}), \
+                mock.patch.object(
+                    gui_mod.QMessageBox, "information") as shown:
+            win._check_updates_action.trigger()
+            self._wait_for_check(win)
+        shown.assert_called_once()
+        text = shown.call_args[0][2]
+        self.assertIn("newest version", text)
+        self.assertIn(__version__, text)
+        self.assertNotIn("—", text)
+
+    def test_manual_check_failure_warns_with_reason(self):
+        import pixel_forge.gui as gui_mod
+        win = self._window()
+        with mock.patch.object(
+                gui_mod, "check_for_update",
+                return_value={"state": "unknown", "latest": None,
+                              "url": None,
+                              "reason": "could not reach GitHub: "
+                                        "no route to host"}), \
+                mock.patch.object(
+                    gui_mod, "warn_dialog") as warned:
+            win._check_updates_action.trigger()
+            self._wait_for_check(win)
+        warned.assert_called_once()
+        self.assertEqual(warned.call_args[0][1],
+                         "Could not check for updates")
+        self.assertIn("could not reach GitHub",
+                      warned.call_args[0][2])
+
+    def test_automatic_check_runs_on_startup_when_opted_in(self):
+        # The setting on, the window shown: the check runs
+        # once, with no menu click, and a newer release shows
+        # the same dialog as a manual check.
+        import pixel_forge.gui as gui_mod
+        settings = self._settings()
+        settings.setValue("check_updates_on_startup", True)
+        settings.sync()
+        seen = []
+        watcher = self._watch_dialog("Close", seen)
+        try:
+            with mock.patch.object(
+                    gui_mod, "check_for_update",
+                    return_value={"state": "newer",
+                                  "latest": "0.70",
+                                  "url": self.RELEASE_URL}):
+                win = self._window()
+                self._wait_for_check(win)
+        finally:
+            watcher.stop()
+        self.assertEqual(len(seen), 1)
+        self.assertIn("Pixel Forge 0.70 is on GitHub", seen[0])
+
+    def test_automatic_check_current_stays_quiet(self):
+        # An automatic check that finds nothing says nothing —
+        # no dialog, no status line.
+        import pixel_forge.gui as gui_mod
+        from pixel_forge import __version__
+        settings = self._settings()
+        settings.setValue("check_updates_on_startup", True)
+        settings.sync()
+        with mock.patch.object(
+                gui_mod, "check_for_update",
+                return_value={"state": "current",
+                              "latest": __version__,
+                              "url": self.RELEASE_URL}), \
+                mock.patch.object(
+                    gui_mod.QMessageBox, "information") as shown:
+            win = self._window()
+            self._wait_for_check(win)
+        shown.assert_not_called()
+        # The status bar still holds the first-launch message —
+        # the quiet check wrote nothing.
+        self.assertEqual(win.statusBar().currentMessage(),
+                         "Ready — import an image to begin.")
+
+    def test_automatic_check_failure_is_status_bar_only(self):
+        # An automatic failure never opens a modal on startup —
+        # a status-bar line at most.
+        import pixel_forge.gui as gui_mod
+        settings = self._settings()
+        settings.setValue("check_updates_on_startup", True)
+        settings.sync()
+        with mock.patch.object(
+                gui_mod, "check_for_update",
+                return_value={"state": "unknown", "latest": None,
+                              "url": None,
+                              "reason": "the update check timed "
+                                        "out"}), \
+                mock.patch.object(
+                    gui_mod, "warn_dialog") as warned:
+            win = self._window()
+            self._wait_for_check(win)
+        warned.assert_not_called()
+        self.assertEqual(win.statusBar().currentMessage(),
+                         "Could not check for updates.")
+
+    def test_second_check_while_running_is_refused(self):
+        # A check already running: a second ask is refused
+        # plainly instead of starting a second request.
+        import pixel_forge.gui as gui_mod
+        from pixel_forge import __version__
+
+        def slow_check(version):
+            time.sleep(0.6)
+            return {"state": "current", "latest": __version__,
+                    "url": self.RELEASE_URL}
+
+        win = self._window()
+        with mock.patch.object(
+                gui_mod, "check_for_update",
+                side_effect=slow_check), \
+                mock.patch.object(
+                    gui_mod.QMessageBox, "information"):
+            win._check_updates_action.trigger()
+            self.app.processEvents()
+            win._check_updates_action.trigger()
+            self.app.processEvents()
+            self.assertEqual(win.statusBar().currentMessage(),
+                             "Already checking for updates.")
+            self._wait_for_check(win)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,18 @@
 # Pixel Forge changelog
 
+## 0.69 — 2026-11-14
+
+Update mechanism (task 48): the Help menu has Check for
+updates, which asks GitHub whether a newer Pixel Forge is out,
+and Check for updates on startup, which turns the same check
+on once per launch. Off by default: with the default settings
+the app makes no network request at all. When a newer release
+is out, the app says so plainly, with the version, and offers
+the release page to open in the browser. The check never
+downloads or installs anything: the user downloads the new
+release themselves. The request is a plain GET to the public
+releases endpoint; it sends no identifying information.
+
 ## 0.68 — 2026-11-14
 
 Text / label tools on sprites (task 47): the pixel preview's

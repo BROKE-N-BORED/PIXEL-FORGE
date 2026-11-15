@@ -349,7 +349,9 @@ it keeps them and prints the way to remove them by hand.
   (nothing happens on a tab with nothing to import or export);
   Ctrl+1..5 switch tabs in order. The File menu mirrors Import
   and Export, and the Help menu has About, What the Code tab
-  detects, and Library location (with an Open folder button).
+  detects, and Library location (with an Open folder button),
+  plus Check for updates and Check for updates on startup
+  (see Updates below).
   Every control has a one-line tooltip — hover to see what it
   does.
 - **Polish:** preview zoom fits the pane when something loads,
@@ -751,6 +753,26 @@ the text reads, and it is one undo step like every other edit.
   [--y N] [--color #rrggbb] [--scale 1-4] [--out OUT.png]` stamps
   in the pixel font only, defaulting to
   `<input-stem>-stamped.png` next to the input.
+
+## Updates
+
+Pixel Forge never phones home by default: with the default
+settings the app makes no network request at all. The Help
+menu has two update actions. Check for updates asks GitHub
+whether a newer Pixel Forge is out, right now: the user
+asking is not phoning home, so it works whether or not the
+automatic check is on. Check for updates on startup turns the
+same check on once per launch, and the choice is remembered.
+
+When a newer release is out, the app says so plainly, with the
+version, and offers the release page to open in the browser.
+The check never downloads or installs anything: the user
+downloads the new release themselves. The request is a plain
+GET to the public releases endpoint; it sends no identifying
+information. A failed check (no network, a timeout, an answer
+the app does not understand) never crashes anything: a manual
+check says why it could not run, and an automatic one leaves
+a line in the status bar.
 
 ## Procedural generators
 

@@ -116,6 +116,7 @@ from .tileset import (MODE_NAMES, TILESET_MODES, blob_tiles,
                       export_tileset, wang_tiles)
 from .undo import Command as UndoCommand
 from .undo import UndoStack
+from .updates import check_for_update
 from .video import (DEFAULT_FPS, FPS_PRESETS, FRAME_COUNT_CONFIRM,
                     VIDEO_EXTENSIONS, estimate_frame_count,
                     extract_frames, onion_blend, parse_time,
@@ -758,6 +759,43 @@ class NormalMapWorker(QThread):
             self.cancelled.emit()
             return
         self.done.emit({"image": result, "source": self.image})
+
+
+class UpdateCheckWorker(QThread):
+    """Asks GitHub for the latest Pixel Forge release, off the
+    GUI thread (task 48).
+
+    The check is one HTTP GET with an 8 second timeout — short,
+    but the window must never wait on the network. The result
+    is a plain dict (see updates.check_for_update): "newer",
+    "current", or "unknown" with a plain reason. check_for_update
+    never raises for a network or parsing problem, and the
+    blanket except is belt and braces — a worker must never die
+    silently. There is no cancel: the fetch is one blocking
+    call that cannot be interrupted mid-flight, so a cancel
+    event would only be read at the same moment the thread
+    ends anyway; closeEvent waits for the thread instead (at
+    most the timeout plus a little). Only the dict crosses the
+    thread boundary. manual says whether the user asked for the
+    check — the done slot tells a manual check from the
+    automatic startup one by it.
+    """
+    done = Signal(dict)  # state, latest, url, reason?, manual
+
+    def __init__(self, current_version, manual, parent=None):
+        super().__init__(parent)
+        self.current_version = current_version
+        self.manual = manual
+
+    def run(self):
+        try:
+            result = check_for_update(self.current_version)
+        except Exception as exc:  # noqa: BLE001 - window must stay up
+            result = {"state": "unknown", "latest": None,
+                      "url": None,
+                      "reason": "the update check failed: %s" % exc}
+        result["manual"] = self.manual
+        self.done.emit(result)
 
 
 class SpritesheetDialog(QDialog):
@@ -2933,6 +2971,12 @@ class MainWindow(QMainWindow):
         self.normalmap_worker = None
         self.normal_map_image = None
         self._showing_normal_map = False
+        # Update check (task 48): the worker running a check,
+        # or None. The startup check runs once, after the window
+        # is shown (see showEvent) — _update_check_started
+        # keeps it to one run per launch.
+        self.update_worker = None
+        self._update_check_started = False
         # Procedural generation (task 44): the kind and seed
         # that made the loaded sprite, or None when the sprite
         # came from a file or was changed by another tool. The
@@ -3186,6 +3230,27 @@ class MainWindow(QMainWindow):
         library_action = QAction("Library location", self)
         library_action.triggered.connect(self._show_library_location)
         help_menu.addAction(library_action)
+        # Update check (task 48): a manual check that works
+        # whether or not the automatic one is on — the user
+        # asking is not phoning home — and the opt-in itself, a
+        # checkable action that mirrors the saved setting. Off
+        # by default: nothing is checked, and no request is
+        # made, until the user turns it on.
+        help_menu.addSeparator()
+        check_action = QAction("Check for updates", self)
+        check_action.setToolTip("Ask GitHub whether a newer "
+                                "Pixel Forge is out")
+        check_action.triggered.connect(self._on_check_updates)
+        help_menu.addAction(check_action)
+        auto_action = QAction("Check for updates on startup", self)
+        auto_action.setCheckable(True)
+        auto_action.setChecked(self._load_update_check())
+        auto_action.setToolTip("Check for a newer version each "
+                               "time Pixel Forge starts")
+        auto_action.triggered.connect(self._on_toggle_update_check)
+        help_menu.addAction(auto_action)
+        self._check_updates_action = check_action
+        self._auto_update_action = auto_action
 
         # Ctrl+1..6 switch tabs in their current order (Image,
         # Video, Prompt, Code, Library, Tileset). Kept on self: a QShortcut
@@ -11533,6 +11598,13 @@ class MainWindow(QMainWindow):
         if not self._session_restored:
             self._session_restored = True
             self.restore_session()
+        # Update check (task 48): once per launch, after the
+        # window is shown, and only when the user opted in —
+        # off by default, so a fresh install makes no request.
+        if not self._update_check_started:
+            self._update_check_started = True
+            if self._load_update_check():
+                self._start_update_check(manual=False)
 
     def _restore_geometry(self):
         """Open where the window was last closed (task 66), or
@@ -11585,6 +11657,116 @@ class MainWindow(QMainWindow):
             self._settings.setValue("theme", self._theme)
             self._settings.sync()
 
+    def _load_update_check(self):
+        """The saved update-check choice (task 48): True only
+        when the settings say so — missing means off, the
+        first-launch look. Off is the default, so a fresh
+        install makes no network request at all."""
+        if self._settings is None:
+            return False
+        return bool(self._settings.value(
+            "check_updates_on_startup", type=bool))
+
+    def _on_toggle_update_check(self, checked):
+        """The Help menu's Check for updates on startup action
+        (task 48): remember the choice for the next launch. A
+        window without settings has nowhere to save it — the
+        checkable action still reflects the click, it just does
+        not persist. Turning it on does not check now; the
+        check runs on the next launch, or by hand."""
+        if self._settings is not None:
+            self._settings.setValue("check_updates_on_startup",
+                                    bool(checked))
+            self._settings.sync()
+
+    def _start_update_check(self, manual):
+        """Start one update check in a worker, unless one is
+        already running — two checks at once would only double
+        the request. Returns False when a check is already
+        running, True when one started."""
+        if self.update_worker is not None \
+                and self.update_worker.isRunning():
+            return False
+        worker = UpdateCheckWorker(__version__, manual, self)
+        worker.done.connect(self._on_update_check_done)
+        self.update_worker = worker
+        worker.start()
+        return True
+
+    def _on_check_updates(self):
+        """The Help menu's Check for updates action (task 48):
+        a manual check, which works whether or not the
+        automatic one is on — the user asking is not phoning
+        home."""
+        if not self._start_update_check(manual=True):
+            self.statusBar().showMessage(
+                "Already checking for updates.")
+            return
+        self.statusBar().showMessage("Checking for updates...")
+
+    def _on_update_check_done(self, result):
+        """One check finished (task 48). A stale result — from
+        a worker that is no longer the running one — is
+        ignored. A newer release is told plainly, with the
+        version and a way to open the release page, whether the
+        check was manual or automatic: the automatic check only
+        runs when the user opted in, so telling them is the
+        feature working. Up to date is told only when the user
+        asked — an automatic check that finds nothing stays
+        quiet. A failed check is told only when the user asked
+        (a warning with the reason); an automatic failure is a
+        status-bar line at most, never a modal on startup."""
+        if self.sender() is not self.update_worker:
+            return
+        self.update_worker = None
+        state = result.get("state")
+        manual = result.get("manual", False)
+        if state == "newer":
+            self._show_update_available(result)
+            return
+        if state == "current":
+            if manual:
+                QMessageBox.information(
+                    self, "No updates",
+                    "You have the newest version (%s)."
+                    % __version__)
+            return
+        if manual:
+            warn_dialog(self, "Could not check for updates",
+                        result.get("reason")
+                        or "the update check failed")
+        else:
+            self.statusBar().showMessage(
+                "Could not check for updates.")
+
+    def _show_update_available(self, result):
+        """A newer release is out (task 48): say so plainly,
+        with the version, and offer the release page. The check
+        never downloads or installs anything — the user
+        downloads the new release themselves."""
+        box = QMessageBox(self)
+        box.setWindowTitle("A new release is on GitHub")
+        box.setText("Pixel Forge %s is on GitHub. You have %s."
+                    % (result["latest"], __version__))
+        open_button = box.addButton(
+            "Open the release page",
+            QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is open_button:
+            QDesktopServices.openUrl(QUrl(result["url"]))
+
+    def _stop_update_worker(self):
+        """Wait for a running update check to finish (task 48).
+        The fetch is one HTTP call with an 8 second timeout, so
+        the wait is bounded — at most the timeout plus a little.
+        There is no cancel: the call cannot be interrupted
+        mid-flight."""
+        if self.update_worker is not None:
+            if self.update_worker.isRunning():
+                self.update_worker.wait(10000)
+            self.update_worker = None
+
     def _save_geometry(self):
         """Remember size + position for the next launch (task 66).
         Nothing is saved when the window has no settings. The
@@ -11605,6 +11787,7 @@ class MainWindow(QMainWindow):
         self._stop_bgremove_worker()
         self._stop_gridsnap_worker()
         self._stop_normalmap_worker()
+        self._stop_update_worker()
         self._stop_prompt_worker()
         self._stop_texture_worker()
         self._stop_video_worker()

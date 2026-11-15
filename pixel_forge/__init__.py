@@ -8,5 +8,5 @@ and code + game-asset input). The remaining item is the MIMIK
 merge — not built here.
 """
 
-__version__ = "0.68"
+__version__ = "0.69"
 __all__ = ["__version__"]
