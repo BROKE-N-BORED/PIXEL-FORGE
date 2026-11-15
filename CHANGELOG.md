@@ -1,5 +1,17 @@
 # Pixel Forge changelog
 
+## 0.66 — 2026-11-14
+
+Seeded procedural generators (task 44): the Image tab has a
+Generate section that makes a sprite from a number. Pick a kind,
+Mirrored mask, Tree, or Item, type a seed, press Generate, and
+the sprite loads into the tab like any imported image, ready to
+edit, export, or save to the library. The same seed and kind
+always make the same sprite, so a seed is worth writing down:
+the section shows the seed that made the current sprite, and
+Random picks a fresh one. Same step on the command line:
+pixel-forge generate --kind tree --seed 1234.
+
 ## 0.65 — 2026-11-14
 
 Normal-map generation for 2D lighting (task 43): the Image tab

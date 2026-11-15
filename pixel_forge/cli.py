@@ -9,6 +9,7 @@
     pixel-forge split-sheet SHEET.png --grid 32x32 [--out DIR]
     pixel-forge split-sheet SHEET.png --cols 4 --rows 3 [--out DIR]
     pixel-forge normal-map INPUT [--strength 1.0] [--out OUT.png]
+    pixel-forge generate --kind tree --seed 1234 [--size 32] [--out OUT.png]
     pixel-forge library list [--tag TAG]
     pixel-forge library add FILE --name NAME [--tags a,b]
     pixel-forge library remove NAME
@@ -64,6 +65,7 @@ from .imagegen import (DEFAULT_NEGATIVE, DEFAULT_SIZE, LCM_CFG,
                        prompt_to_sprites, slugify)
 from .library import Library, normalize_tags
 from .normalmap import generate_normal_map
+from .procedural import KINDS, generate as generate_procedural
 from .palette_io import (PaletteStore, extract_palette_from_image)
 from .palettes import NAMED_PALETTES, PALETTE_LABELS
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError,
@@ -459,6 +461,31 @@ def build_parser():
                             "<input-stem>-normal.png next to the "
                             "input)")
     _add_output_args(normal_map)
+
+    generate = sub.add_parser(
+        "generate", help="make a sprite from a seed (the same "
+        "kind and seed always make the same sprite)")
+    generate.add_argument("--kind", required=True, choices=KINDS,
+                          help="what kind of sprite to make: "
+                          "mask (mirrored mask), tree, or item")
+    generate.add_argument("--seed", required=True, type=int,
+                          help="the number the sprite is made "
+                          "from (any whole number, negative "
+                          "works too)")
+    generate.add_argument("--size", type=int, default=32,
+                          help="the sprite's size in pixels, "
+                          "width and height (8-512, default: 32)")
+    generate.add_argument("--palette", default=None,
+                          help="a named palette to take the "
+                          "colors from (pico8, gameboy, "
+                          "grayscale, resurrect64, endesga32, "
+                          "sweetie16); without it the colors "
+                          "are the curated ones")
+    generate.add_argument("--out", default=None,
+                          help="output PNG path (default: "
+                          "<kind>-<seed>.png in the current "
+                          "folder)")
+    _add_output_args(generate)
 
     library = sub.add_parser(
         "library", help="manage the saved sprite library "
@@ -1061,6 +1088,26 @@ def cmd_normal_map(args):
     return 0
 
 
+def cmd_generate(args):
+    result = generate_procedural(args.kind, args.seed,
+                                 size=args.size,
+                                 palette=args.palette)
+    out = args.out
+    if out is None:
+        out = "%s-%d.png" % (args.kind, args.seed)
+    if not result.save(str(out), "PNG"):
+        raise PixelForgeError("could not write: %s" % out)
+    _emit_json(args, {"output": str(out),
+                      "kind": args.kind,
+                      "seed": args.seed,
+                      "width": result.width(),
+                      "height": result.height()})
+    _info(args, "%s: %d x %d %s, seed %d"
+          % (out, result.width(), result.height(), args.kind,
+             args.seed))
+    return 0
+
+
 def _warn_skipped(lib):
     """One stderr line when the index had malformed entries —
     the same warning the window shows in its status bar."""
@@ -1594,6 +1641,8 @@ def main(argv=None):
             return cmd_split_sheet(args)
         if args.command == "normal-map":
             return cmd_normal_map(args)
+        if args.command == "generate":
+            return cmd_generate(args)
         if args.command == "library":
             if args.library_command == "list":
                 return cmd_library_list(args)

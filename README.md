@@ -137,7 +137,11 @@ it keeps them and prints the way to remove them by hand.
   sprite until the toggle switches back, and **Export normal map**
   saves it as a PNG. The map belongs to the result it was made
   from, so a control change, an edit, or a new load clears it and
-  the buttons go quiet until a new one is made. The pixel preview is
+  the buttons go quiet until a new one is made. The **Generate**
+  section makes a sprite from a number instead of a file (see
+  Procedural generators below): pick a kind, type a seed, press
+  Generate, and the sprite loads into the tab like an imported
+  image. The pixel preview is
   also a canvas: pick a tool above it (Pencil, Eraser, Fill,
   Eyedropper, Line, Rectangle) and a color from the strip of swatches
   — one per color the sprite actually uses — and click or drag on
@@ -714,6 +718,39 @@ at every pixel.
   the opaque pixels next to the transparent background sit on a
   real height step. A flat or single-color sprite comes out all
   flat (128, 128, 255).
+
+## Procedural generators
+
+A sprite from a number, no file needed. Three kinds:
+
+- **Mirrored mask:** a random bitmask mirrored across the
+  vertical axis, filled with 2-4 colors. The classic way to make
+  a spaceship or an alien: the mirror keeps it looking designed.
+- **Tree:** a trunk plus a canopy in one of three styles (round,
+  pine, blob), picked by the seed, with a soft shadow underneath.
+- **Item:** a potion, sword, gem, coin, or chest, picked by the
+  seed, with colors picked by the seed.
+
+The seed contract: the same kind and seed always make the same
+sprite, pixel for pixel, so a seed is worth writing down. Seed 0
+is a valid seed like any other, and negative seeds work too. The
+Image tab's Generate section shows the kind and seed that made
+the loaded sprite, and Random picks a fresh seed. A new load, a
+background removal, or a grid snap replaces the sprite, so the
+seed label goes blank then: the seed only describes the sprite
+it made.
+
+- **Image tab:** the Generate section's kind list starts with
+  nothing picked, and Generate stays quiet until a kind is
+  picked. The seed takes any whole number; Size sets the
+  sprite's size (8-512, default 32). The sprite loads into the
+  tab like an imported image: edit it, export it, or save it to
+  the library.
+- **Command line:** `pixel-forge generate --kind tree --seed
+  1234 [--size 32] [--palette pico8] [--out OUT.png]` makes one
+  sprite, defaulting to `<kind>-<seed>.png` in the current
+  folder. `--palette` takes the colors from a named palette
+  instead of the curated ones; the shapes stay the same.
 
 ## Engine-ready export
 

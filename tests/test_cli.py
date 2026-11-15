@@ -475,6 +475,104 @@ class NormalMapCliTests(unittest.TestCase):
         self.assertNotIn("Traceback", err)
 
 
+class GenerateCliTests(unittest.TestCase):
+    """The generate subcommand (task 44). The default output
+    lands in the current folder, so the default-name test runs
+    with a changed working directory."""
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = main(argv)
+        except SystemExit as exc:
+            code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_generate_help(self):
+        code, out, _err = self._run(["generate", "--help"])
+        self.assertEqual(code, 0)
+        self.assertIn("--kind", out)
+        self.assertIn("--seed", out)
+        self.assertIn("--size", out)
+        self.assertIn("--palette", out)
+        self.assertIn("--out", out)
+
+    def test_generate_happy_path_matches_module(self):
+        from pixel_forge.procedural import generate
+
+        out_path = os.path.join(self.tmp, "tree42.png")
+        code, out, err = self._run(
+            ["generate", "--kind", "tree", "--seed", "42",
+             "--out", out_path])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(out_path))
+        self.assertIn("32 x 32 tree, seed 42", out)
+        self.assertEqual(load_image(out_path),
+                         generate("tree", 42, 32))
+
+    def test_generate_default_output_name(self):
+        cwd = os.getcwd()
+        try:
+            os.chdir(self.tmp)
+            code, _out, err = self._run(
+                ["generate", "--kind", "mask", "--seed", "3"])
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(
+            os.path.isfile(os.path.join(self.tmp, "mask-3.png")))
+
+    def test_generate_size_and_palette(self):
+        from pixel_forge.procedural import generate
+
+        out_path = os.path.join(self.tmp, "big.png")
+        code, _out, err = self._run(
+            ["generate", "--kind", "item", "--seed", "7",
+             "--size", "64", "--palette", "pico8",
+             "--out", out_path])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(load_image(out_path),
+                         generate("item", 7, 64, palette="pico8"))
+
+    def test_generate_json(self):
+        out_path = os.path.join(self.tmp, "json-tree.png")
+        code, out, err = self._run(
+            ["generate", "--kind", "tree", "--seed", "1",
+             "--size", "16", "--out", out_path, "--json"])
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["output"], out_path)
+        self.assertEqual(data["kind"], "tree")
+        self.assertEqual(data["seed"], 1)
+        self.assertEqual((data["width"], data["height"]), (16, 16))
+
+    def test_generate_missing_kind_or_seed(self):
+        code, _out, err = self._run(["generate", "--seed", "1"])
+        self.assertEqual(code, 2)
+        self.assertIn("--kind", err)
+        code, _out, err = self._run(["generate", "--kind", "tree"])
+        self.assertEqual(code, 2)
+        self.assertIn("--seed", err)
+
+    def test_generate_unknown_kind(self):
+        code, _out, err = self._run(
+            ["generate", "--kind", "dragon", "--seed", "1"])
+        self.assertEqual(code, 2)
+        self.assertIn("dragon", err)
+
+    def test_generate_bad_size_fails_cleanly(self):
+        code, _out, err = self._run(
+            ["generate", "--kind", "tree", "--seed", "1",
+             "--size", "3"])
+        self.assertEqual(code, 1)
+        self.assertIn("8 to 512", err)
+        self.assertNotIn("Traceback", err)
+
+
 class SheetCliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

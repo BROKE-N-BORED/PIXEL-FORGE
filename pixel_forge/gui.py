@@ -37,6 +37,7 @@ stay green on a wrong label. Write "and" instead.
 
 import json
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -64,6 +65,7 @@ from . import __version__
 from . import bgremove
 from . import gridsnap
 from . import normalmap
+from . import procedural
 from .atlas import (DEFAULT_MAX_SIZE, DEFAULT_PADDING,
                     build_atlas_metadata, pack_atlas, write_atlas)
 from .codeinput import CODE_EXTENSIONS, parse_paths
@@ -2628,6 +2630,12 @@ class MainWindow(QMainWindow):
         self.normalmap_worker = None
         self.normal_map_image = None
         self._showing_normal_map = False
+        # Procedural generation (task 44): the kind and seed
+        # that made the loaded sprite, or None when the sprite
+        # came from a file or was changed by another tool. The
+        # seed label shows them so the sprite can be remade.
+        self._generated_kind = None
+        self._generated_seed = None
         self.result_image = None
         self._updating_size = False
         # Pixel editor (task 33): the result's edit state, the
@@ -3482,6 +3490,68 @@ class MainWindow(QMainWindow):
             self._on_export_normal_map)
         form.addWidget(self.normalmap_export_btn)
 
+        # Procedural generation (task 44): make a sprite from
+        # a number. The kind combo starts with nothing picked
+        # (the standing rule), and Generate stays quiet until
+        # a kind is picked. The seed spin takes any whole
+        # number, Random picks a fresh one, and the size spin
+        # sets the sprite's size. Generation takes
+        # milliseconds, so it runs right here, no worker.
+        form.addWidget(self._section("Generate"))
+        procedural_row = QHBoxLayout()
+        self.procedural_kind_combo = QComboBox()
+        self.procedural_kind_combo.setToolTip(
+            "What kind of sprite to make")
+        for kind in procedural.KINDS:
+            self.procedural_kind_combo.addItem(
+                procedural.KIND_LABELS[kind], kind)
+        self.procedural_kind_combo.setCurrentIndex(-1)
+        self.procedural_kind_combo.setPlaceholderText("Pick a kind")
+        self.procedural_kind_combo.currentIndexChanged.connect(
+            self._on_procedural_kind_changed)
+        procedural_row.addWidget(self.procedural_kind_combo)
+        self.procedural_generate_btn = QPushButton("Generate")
+        self.procedural_generate_btn.setToolTip(
+            "Make a sprite from the seed and load it into the "
+            "tab, ready to edit, export, or save to the library")
+        self.procedural_generate_btn.setEnabled(False)
+        self.procedural_generate_btn.clicked.connect(
+            self._on_generate_procedural)
+        procedural_row.addWidget(self.procedural_generate_btn)
+        procedural_row.addStretch(1)
+        form.addLayout(procedural_row)
+        procedural_seed_row = QHBoxLayout()
+        self.procedural_seed_spin = QSpinBox()
+        self.procedural_seed_spin.setRange(-1000000, 1000000)
+        self.procedural_seed_spin.setValue(1)
+        self.procedural_seed_spin.setPrefix("Seed ")
+        self.procedural_seed_spin.setToolTip(
+            "The number the sprite is made from. The same kind "
+            "and seed always make the same sprite")
+        procedural_seed_row.addWidget(self.procedural_seed_spin)
+        self.procedural_random_btn = QPushButton("Random")
+        self.procedural_random_btn.setToolTip(
+            "Pick a fresh seed at random")
+        self.procedural_random_btn.clicked.connect(
+            self._on_procedural_random)
+        procedural_seed_row.addWidget(self.procedural_random_btn)
+        self.procedural_size_spin = QSpinBox()
+        self.procedural_size_spin.setRange(
+            procedural.MIN_SIZE, procedural.MAX_SIZE)
+        self.procedural_size_spin.setValue(
+            procedural.DEFAULT_SIZE)
+        self.procedural_size_spin.setPrefix("Size ")
+        self.procedural_size_spin.setToolTip(
+            "The sprite's size in pixels, width and height")
+        procedural_seed_row.addWidget(self.procedural_size_spin)
+        procedural_seed_row.addStretch(1)
+        form.addLayout(procedural_seed_row)
+        self.procedural_seed_label = QLabel("")
+        self.procedural_seed_label.setWordWrap(True)
+        self.procedural_seed_label.setToolTip(
+            "The kind and seed that made the loaded sprite")
+        form.addWidget(self.procedural_seed_label)
+
         form.addWidget(self._section("Size"))
         self.size_combo = QComboBox()
         self.size_combo.setToolTip("Sprite size in pixels")
@@ -3762,6 +3832,7 @@ class MainWindow(QMainWindow):
             return False
         self.source_image = image
         self.source_path = str(path)
+        self._clear_generated_seed()
         self.update_preview()
         # The preview zoom fits the pane on load (task 22) — the
         # old fixed 8x left a 16x16 sprite tiny and a 128x128 one
@@ -3854,6 +3925,7 @@ class MainWindow(QMainWindow):
                 "longer loaded — the current image is unchanged")
             return
         self.source_image = result["image"]
+        self._clear_generated_seed()
         self.update_preview()
         self.statusBar().showMessage("Background removed")
 
@@ -3954,6 +4026,7 @@ class MainWindow(QMainWindow):
                 "unchanged")
             return
         self.source_image = result["image"]
+        self._clear_generated_seed()
         self.update_preview()
         self.statusBar().showMessage(
             "Snapped to a %g px grid (%d x %d sprite)"
@@ -4544,6 +4617,92 @@ class MainWindow(QMainWindow):
             self, "Export normal map", default, "PNG image (*.png)")
         if path and self.export_normal_map(path):
             self._remember_export_dir(Path(path).parent)
+
+    # --------------------------------------- procedural generation
+
+    def _on_procedural_kind_changed(self):
+        """Generate stays quiet until a kind is picked — the
+        combo starts with nothing selected (the standing
+        rule)."""
+        self.procedural_generate_btn.setEnabled(
+            self.procedural_kind_combo.currentData() is not None)
+
+    def _on_procedural_random(self):
+        """Pick a fresh seed at random (1 to 999999)."""
+        self.procedural_seed_spin.setValue(random.randint(1, 999999))
+
+    def _clear_generated_seed(self):
+        """The loaded sprite no longer comes from a seed — a
+        file was loaded, or another tool changed the source —
+        so the seed label goes blank."""
+        self._generated_kind = None
+        self._generated_seed = None
+        self.procedural_seed_label.setText("")
+
+    def _procedural_what(self, kind, seed):
+        """Plain words for what a generation made: the kind,
+        plus the style or shape the seed picked."""
+        if kind == "tree":
+            return "%s tree" % procedural.tree_style_for_seed(seed)
+        if kind == "item":
+            return "a %s" % procedural.item_shape_for_seed(seed)
+        return "a mirrored mask sprite"
+
+    def _on_generate_procedural(self):
+        """Make a sprite from the kind and seed and load it
+        into the tab like an imported image (task 44).
+
+        Generation takes milliseconds, so it runs right here,
+        no worker. The sprite becomes the source image and the
+        tab's size is set to match, so the result is the
+        sprite itself. A new generation replaces the result,
+        which throws the pixel edits away — the same discard
+        confirm as a new load guards it.
+        """
+        kind = self.procedural_kind_combo.currentData()
+        if kind is None:
+            return
+        if self._result_edited and not self._confirm_discard_edits(
+                "Generate a new sprite?",
+                "Generate a new sprite and lose your edits?"):
+            return
+        seed = self.procedural_seed_spin.value()
+        size = self.procedural_size_spin.value()
+        try:
+            sprite = procedural.generate(kind, seed, size=size)
+        except PixelForgeError as exc:
+            warn_dialog(self, "Could not generate the sprite",
+                        str(exc))
+            self.statusBar().showMessage("Generation failed")
+            return
+        self.source_image = sprite
+        self.source_path = None
+        # The tab's size follows the sprite, so the result is
+        # the sprite itself, not a resample of it. Signals
+        # blocked: one update_preview below does the refresh.
+        self.width_spin.blockSignals(True)
+        self.height_spin.blockSignals(True)
+        self.width_spin.setValue(size)
+        self.height_spin.setValue(size)
+        self.width_spin.blockSignals(False)
+        self.height_spin.blockSignals(False)
+        index = self.size_combo.findData(size)
+        if index < 0:
+            index = self.size_combo.findData(None)
+        self.size_combo.blockSignals(True)
+        self.size_combo.setCurrentIndex(index)
+        self.size_combo.blockSignals(False)
+        self._generated_kind = kind
+        self._generated_seed = seed
+        self.procedural_seed_label.setText(
+            "Seed %d, %s. Type the seed in to make this "
+            "sprite again." % (seed, procedural.KIND_LABELS[kind]))
+        self.update_preview()
+        self._on_fit_image_zoom()
+        self.statusBar().showMessage(
+            "Generated %s, seed %d (%d x %d)"
+            % (self._procedural_what(kind, seed), seed,
+               sprite.width(), sprite.height()))
 
     # ------------------------------------------------ pixel editor
     # Task 33: fix one wrong pixel without round-tripping to

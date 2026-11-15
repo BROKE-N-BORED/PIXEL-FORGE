@@ -852,6 +852,155 @@ class NormalMapGuiTests(unittest.TestCase):
                       self.win.statusBar().currentMessage())
 
 
+class ProceduralGuiTests(unittest.TestCase):
+    """The Image tab's Generate section (task 44).
+
+    Generation is synchronous (milliseconds), so the tests
+    click Generate and check the loaded sprite right away —
+    no worker to wait for.
+    """
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        cls.other = write_image(
+            make_solid_image(32, 32, 0, 0, 200),
+            os.path.join(cls.tmp, "blue.png"))
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = tempfile.mkdtemp()
+        self.win = MainWindow(library_dir=self.lib_dir)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.lib_dir, ignore_errors=True)
+
+    def _pick_kind(self, kind):
+        combo = self.win.procedural_kind_combo
+        index = combo.findData(kind)
+        self.assertGreaterEqual(index, 0)
+        combo.setCurrentIndex(index)
+        self.app.processEvents()
+
+    def _generate(self, kind="tree", seed=42, size=32):
+        self._pick_kind(kind)
+        self.win.procedural_seed_spin.setValue(seed)
+        self.win.procedural_size_spin.setValue(size)
+        self.win.procedural_generate_btn.click()
+        self.app.processEvents()
+
+    def test_nothing_picked_generate_quiet(self):
+        combo = self.win.procedural_kind_combo
+        self.assertEqual(combo.currentIndex(), -1)
+        self.assertIsNone(combo.currentData())
+        self.assertFalse(self.win.procedural_generate_btn.isEnabled())
+        self.assertTrue(self.win.procedural_random_btn.isEnabled())
+        self.assertEqual(self.win.procedural_seed_spin.value(), 1)
+        self.assertEqual(self.win.procedural_size_spin.value(), 32)
+        self.assertEqual(self.win.procedural_seed_label.text(), "")
+        self.assertIsNone(self.win._generated_seed)
+
+    def test_kind_pick_enables_generate(self):
+        self._pick_kind("mask")
+        self.assertTrue(
+            self.win.procedural_generate_btn.isEnabled())
+        self.win.procedural_kind_combo.setCurrentIndex(-1)
+        self.app.processEvents()
+        self.assertFalse(
+            self.win.procedural_generate_btn.isEnabled())
+
+    def test_generate_loads_the_sprite(self):
+        from pixel_forge.procedural import generate
+
+        self._generate()
+        self.assertEqual(self.win.source_image,
+                         generate("tree", 42, 32))
+        self.assertIsNone(self.win.source_path)
+        self.assertEqual((self.win.result_image.width(),
+                          self.win.result_image.height()),
+                         (32, 32))
+        self.assertTrue(self.win.export_btn.isEnabled())
+        self.assertTrue(self.win.save_library_btn.isEnabled())
+
+    def test_seed_label_and_status_name_the_seed(self):
+        self._generate(kind="item", seed=7)
+        label = self.win.procedural_seed_label.text()
+        self.assertIn("Seed 7", label)
+        self.assertIn("Item", label)
+        self.assertEqual(self.win._generated_seed, 7)
+        self.assertEqual(self.win._generated_kind, "item")
+        message = self.win.statusBar().currentMessage()
+        self.assertTrue(message.startswith("Generated "),
+                        message)
+        self.assertIn("seed 7", message)
+        self.assertIn("32 x 32", message)
+
+    def test_status_names_the_shape(self):
+        from pixel_forge.procedural import item_shape_for_seed
+
+        self._generate(kind="item", seed=8)
+        self.assertIn(item_shape_for_seed(8),
+                      self.win.statusBar().currentMessage())
+
+    def test_random_picks_a_new_seed(self):
+        self.win.procedural_seed_spin.setValue(1)
+        changed = False
+        for _ in range(5):
+            self.win.procedural_random_btn.click()
+            self.app.processEvents()
+            if self.win.procedural_seed_spin.value() != 1:
+                changed = True
+                break
+        self.assertTrue(changed)
+
+    def test_size_flows_through(self):
+        self._generate(kind="mask", seed=3, size=40)
+        self.assertEqual((self.win.source_image.width(),
+                          self.win.source_image.height()),
+                         (40, 40))
+        self.assertEqual(self.win.width_spin.value(), 40)
+        self.assertEqual(self.win.height_spin.value(), 40)
+        self.assertIsNone(self.win.size_combo.currentData())
+        self.assertEqual((self.win.result_image.width(),
+                          self.win.result_image.height()),
+                         (40, 40))
+
+    def test_new_load_clears_the_seed(self):
+        self._generate()
+        self.assertEqual(self.win._generated_seed, 42)
+        self.assertTrue(self.win.load_image(self.other))
+        self.assertIsNone(self.win._generated_seed)
+        self.assertIsNone(self.win._generated_kind)
+        self.assertEqual(self.win.procedural_seed_label.text(), "")
+
+    def test_discard_confirm_guards_generation(self):
+        from pixel_forge.gui import MainWindow
+
+        self._generate()
+        self.win._result_edited = True
+        with mock.patch.object(
+                MainWindow, "_confirm_discard_edits",
+                return_value=False) as asked:
+            self._pick_kind("mask")
+            self.win.procedural_seed_spin.setValue(9)
+            self.win.procedural_generate_btn.click()
+            self.app.processEvents()
+        self.assertEqual(asked.call_count, 1)
+        # Declining keeps the old sprite and its seed.
+        self.assertEqual(self.win._generated_seed, 42)
+        with mock.patch.object(
+                MainWindow, "_confirm_discard_edits",
+                return_value=True):
+            self.win.procedural_generate_btn.click()
+            self.app.processEvents()
+        self.assertEqual(self.win._generated_seed, 9)
+        self.assertEqual(self.win._generated_kind, "mask")
+
+
 class VideoGuiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
