@@ -150,8 +150,20 @@ def opaque_pixels(image):
 
 
 def count_opaque_colors(image):
-    """How many distinct colors the opaque pixels use."""
-    return len(set(opaque_pixels(image)))
+    """How many distinct colors the opaque pixels use.
+
+    One pass over the raw bytes (task 60): each opaque pixel
+    contributes its packed-int RGB to a set, so no tuple list
+    is built and no second scan through opaque_pixels runs — the
+    count a preview refresh shows, for a fraction of the cost.
+    """
+    data = image.data
+    colors = set()
+    add = colors.add
+    for i in range(0, len(data), 4):
+        if data[i + 3]:
+            add((data[i] << 16) | (data[i + 1] << 8) | data[i + 2])
+    return len(colors)
 
 
 def resolve_palette(image, palette_name, max_colors, palettes=None):
@@ -222,9 +234,20 @@ def quantize(image, palette, dither=True):
     out = Image(width, height)
     src = image.data
     dst = out.data
+    # The 16 dither shifts, computed once (task 60): a pixel's
+    # shift depends only on its position in the 4x4 Bayer tile,
+    # so the per-pixel float arithmetic is done up front, with
+    # the identical formula.
+    shifts = [int(round(((BAYER_4X4[yy][xx] + 0.5) / 16.0 - 0.5)
+                        * BAYER_SPREAD))
+              for yy in range(4) for xx in range(4)]
+    # Nearest-color cache keyed by the packed int rgb (task 60):
+    # a hit costs one dict lookup and builds no tuple; a miss
+    # goes through nearest_color exactly as before.
     cache = {}
     for y in range(height):
         row = y * width * 4
+        shift_row = (y % 4) * 4
         for x in range(width):
             offset = row + x * 4
             alpha = src[offset + 3]
@@ -234,15 +257,18 @@ def quantize(image, palette, dither=True):
             g = src[offset + 1]
             b = src[offset + 2]
             if dither:
-                threshold = (BAYER_4X4[y % 4][x % 4] + 0.5) / 16.0 - 0.5
-                shift = int(round(threshold * BAYER_SPREAD))
+                shift = shifts[shift_row + x % 4]
                 r = min(255, max(0, r + shift))
                 g = min(255, max(0, g + shift))
                 b = min(255, max(0, b + shift))
-            nr, ng, nb = nearest_color((r, g, b), palette, cache)
-            dst[offset] = nr
-            dst[offset + 1] = ng
-            dst[offset + 2] = nb
+            key = (r << 16) | (g << 8) | b
+            hit = cache.get(key)
+            if hit is None:
+                hit = nearest_color((r, g, b), palette)
+                cache[key] = hit
+            dst[offset] = hit[0]
+            dst[offset + 1] = hit[1]
+            dst[offset + 2] = hit[2]
             dst[offset + 3] = alpha
     return out
 

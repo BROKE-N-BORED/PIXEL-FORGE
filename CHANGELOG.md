@@ -1,5 +1,22 @@
 # Pixel Forge changelog
 
+## 0.73 — 2026-11-15
+
+Performance work (task 60): the same pixel art, faster.
+median_cut no longer rebuilds three per-channel lists per
+box per split — each box carries its cached channel ranges,
+so a 512 x 512 noise image builds its palette in a fraction
+of the time. quantize precomputes the 16 Bayer dither shifts
+and caches nearest-color lookups by packed color, and the
+nearest-color distance itself is now exact integer math
+(512x the documented redmean distance, so the winner is
+identical). count_opaque_colors walks the raw bytes once
+instead of building a tuple list. And the Original pane no
+longer redraws on every zoom drag — its pixmap is cached
+until the source image or its fit changes (Image tab and
+Prompt tab). Nothing visible changes except speed: palettes
+and pixels are byte-identical to v0.72, pinned by tests.
+
 ## 0.72 — 2026-11-14
 
 `sheet` on an existing file says what is wrong (task 81):

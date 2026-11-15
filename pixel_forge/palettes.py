@@ -123,6 +123,35 @@ def select_palette_colors(palette, colors, max_colors):
     return sorted(chosen, key=order.__getitem__)
 
 
+def _box_ranges(box):
+    """(rmin, rmax, gmin, gmax, bmin, bmax) for a box — one pass
+    over its colors. median_cut caches these per box instead of
+    rebuilding three per-channel lists per box per split (task
+    60). The box must not be empty."""
+    rmin = gmin = bmin = 255
+    rmax = gmax = bmax = 0
+    for r, g, b in box:
+        if r < rmin:
+            rmin = r
+        if r > rmax:
+            rmax = r
+        if g < gmin:
+            gmin = g
+        if g > gmax:
+            gmax = g
+        if b < bmin:
+            bmin = b
+        if b > bmax:
+            bmax = b
+    return (rmin, rmax, gmin, gmax, bmin, bmax)
+
+
+def _box_spread(ranges):
+    """The widest channel range of a box, from its cached ranges."""
+    return max(ranges[1] - ranges[0], ranges[3] - ranges[2],
+               ranges[5] - ranges[4])
+
+
 def median_cut(colors, max_colors):
     """Build a palette of at most max_colors entries from pixel colors.
 
@@ -134,6 +163,12 @@ def median_cut(colors, max_colors):
     return — it used to be checked after, so median_cut([], 0)
     silently returned [] instead of failing (review B14). An empty
     color list with a valid max_colors still returns [].
+
+    Each box carries its cached channel ranges (task 60): the
+    widest-box scan and the split-channel choice read the cache
+    instead of rebuilding three per-channel lists per box per
+    split. The ranges are exact, so every split decision — and
+    the final palette — is identical to before.
     """
     if max_colors < 1:
         # Imported here, not at module level: pixelize imports this
@@ -145,35 +180,32 @@ def median_cut(colors, max_colors):
     distinct = sorted(set(colors))
     if len(distinct) <= max_colors:
         return distinct
-    boxes = [distinct]
+    boxes = [(distinct, _box_ranges(distinct))]
     while len(boxes) < max_colors:
         widest_idx = -1
         widest_range = -1
-        for i, box in enumerate(boxes):
+        for i, (box, ranges) in enumerate(boxes):
             if len(box) < 2:
                 continue
-            rs = [c[0] for c in box]
-            gs = [c[1] for c in box]
-            bs = [c[2] for c in box]
-            spread = max(max(rs) - min(rs), max(gs) - min(gs),
-                         max(bs) - min(bs))
+            spread = _box_spread(ranges)
             if spread > widest_range:
                 widest_range = spread
                 widest_idx = i
         if widest_idx < 0:
             break
-        box = boxes.pop(widest_idx)
-        rs = [c[0] for c in box]
-        gs = [c[1] for c in box]
-        bs = [c[2] for c in box]
-        ranges = (max(rs) - min(rs), max(gs) - min(gs), max(bs) - min(bs))
-        channel = ranges.index(max(ranges))
+        box, ranges = boxes.pop(widest_idx)
+        channel_ranges = (ranges[1] - ranges[0],
+                          ranges[3] - ranges[2],
+                          ranges[5] - ranges[4])
+        channel = channel_ranges.index(max(channel_ranges))
         ordered = sorted(box, key=lambda c: c[channel])
         mid = len(ordered) // 2
-        boxes.append(ordered[:mid])
-        boxes.append(ordered[mid:])
+        low = ordered[:mid]
+        high = ordered[mid:]
+        boxes.append((low, _box_ranges(low)))
+        boxes.append((high, _box_ranges(high)))
     palette = []
-    for box in boxes:
+    for box, _ranges in boxes:
         n = len(box)
         palette.append((sum(c[0] for c in box) // n,
                         sum(c[1] for c in box) // n,
@@ -200,6 +232,19 @@ def nearest_color(rgb, palette, cache=None):
     bare IndexError from palette[0] (review B14). The guard runs
     before the cache lookup, so an empty palette always fails,
     even for a color the cache already knows.
+
+    The distance is evaluated in exact integers (task 60): 512x
+    the documented float distance, so the ordering — and the
+    winner — is identical. With s = r + pr, the red weight
+    (2 + rmean / 256) scales to 1024 + s, green's 4 to 2048,
+    and blue's (2 + (255 - rmean) / 256) to 1534 - s. Every
+    float in the original form is dyadic with a denominator
+    dividing 512, so the float sum is exact and the integer
+    form cannot disagree with it, on ties or near-ties. The
+    terms are accumulated green first, and an entry whose
+    partial sum already exceeds the best distance is skipped —
+    every term is non-negative, so a skipped entry cannot win,
+    and a tied entry (equal, not greater) is never skipped.
     """
     if not palette:
         # Imported here, not at module level: pixelize imports this
@@ -215,16 +260,22 @@ def nearest_color(rgb, palette, cache=None):
     r, g, b = rgb
     best = palette[0]
     best_d = None
-    for pr, pg, pb in palette:
-        dr = r - pr
+    for entry in palette:
+        pr, pg, pb = entry
         dg = g - pg
+        d = 2048 * dg * dg
+        if best_d is not None and d > best_d:
+            continue
+        dr = r - pr
+        s = r + pr
+        d += (1024 + s) * dr * dr
+        if best_d is not None and d > best_d:
+            continue
         db = b - pb
-        rmean = (r + pr) / 2
-        d = ((2 + rmean / 256) * dr * dr + 4 * dg * dg
-             + (2 + (255 - rmean) / 256) * db * db)
+        d += (1534 - s) * db * db
         if best_d is None or d < best_d:
             best_d = d
-            best = (pr, pg, pb)
+            best = entry
     if cache is not None:
         cache[rgb] = best
     return best

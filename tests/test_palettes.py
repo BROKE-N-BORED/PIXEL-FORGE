@@ -88,6 +88,25 @@ class MedianCutTests(unittest.TestCase):
     def test_single_color_in_single_color_out(self):
         self.assertEqual(median_cut([(9, 9, 9)] * 50, 16), [(9, 9, 9)])
 
+    def test_median_cut_pinned_large_input(self):
+        # Task 60: the cached-ranges rewrite must not change the
+        # palette. 5000 random colors (seed 6060); values recorded
+        # from v0.72.
+        import random
+        rng = random.Random(6060)
+        colors = [(rng.randrange(256), rng.randrange(256),
+                   rng.randrange(256)) for _ in range(5000)]
+        self.assertEqual(median_cut(colors, 16),
+                         [(59, 65, 32), (60, 67, 95), (61, 63, 193),
+                          (62, 188, 194), (62, 194, 96), (64, 194, 33),
+                          (154, 188, 63), (155, 60, 63), (155, 68, 156),
+                          (156, 192, 190), (158, 62, 223), (220, 65, 64),
+                          (220, 65, 155), (221, 63, 221), (221, 188, 63),
+                          (224, 192, 188)])
+        self.assertEqual(median_cut(colors, 4),
+                         [(60, 64, 128), (62, 191, 130),
+                          (188, 64, 126), (189, 190, 126)])
+
 
 class NearestColorTests(unittest.TestCase):
     def test_exact_match(self):
@@ -134,6 +153,32 @@ class NearestColorTests(unittest.TestCase):
         palette = [(0, 0, 0), (0, 254, 0)]
         self.assertEqual(nearest_color((0, 127, 0), palette),
                          (0, 0, 0))
+
+    def test_integer_distance_matches_float_redmean(self):
+        # Task 60: nearest_color evaluates 512x the documented
+        # float distance in integers. Cross-check against the
+        # float formula itself on random targets and palettes —
+        # the winner must agree every time, including near-ties.
+        import random
+        rng = random.Random(6060)
+        for _ in range(200):
+            target = (rng.randrange(256), rng.randrange(256),
+                      rng.randrange(256))
+            palette = [(rng.randrange(256), rng.randrange(256),
+                        rng.randrange(256)) for _ in range(12)]
+            got = nearest_color(target, palette)
+            r, g, b = target
+            best = palette[0]
+            best_d = None
+            for pr, pg, pb in palette:
+                dr, dg, db = r - pr, g - pg, b - pb
+                rmean = (r + pr) / 2
+                d = ((2 + rmean / 256) * dr * dr + 4 * dg * dg
+                     + (2 + (255 - rmean) / 256) * db * db)
+                if best_d is None or d < best_d:
+                    best_d = d
+                    best = (pr, pg, pb)
+            self.assertEqual(got, best)
 
 
 class PaletteValidationTests(unittest.TestCase):

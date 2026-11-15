@@ -3,7 +3,9 @@
 Qt-free (task 64): runs on bare python as well as under the Qt
 test env (see AGENTS.md).
 """
+import hashlib
 import os
+import random
 import sys
 import tempfile
 import unittest
@@ -375,6 +377,63 @@ class PixelizeTests(unittest.TestCase):
         result = quantize(image, PICO8, dither=False)
         self.assertEqual(count_opaque_colors(result), 1)
         self.assertEqual(result.pixel(0, 0), 0xFFFFF1E8)
+
+    def _pinned_quantize_image(self):
+        """48x48 random image, seed 6061 — the v0.72 pin input
+        for the task 60 quantize tests (10% transparent)."""
+        rng = random.Random(6061)
+        image = Image(48, 48)
+        data = image.data
+        for i in range(0, len(data), 4):
+            data[i] = rng.randrange(256)
+            data[i + 1] = rng.randrange(256)
+            data[i + 2] = rng.randrange(256)
+            data[i + 3] = 255 if rng.random() > 0.1 else 0
+        return image
+
+    def _pinned_quantize_palette(self, image):
+        from pixel_forge.palettes import median_cut
+        return median_cut(opaque_pixels(image), 16)
+
+    def test_quantize_pinned_output_dithered(self):
+        # Task 60: the tightened quantize loop + integer
+        # nearest-color must produce byte-identical pixels.
+        # Hash recorded from v0.72.
+        image = self._pinned_quantize_image()
+        result = quantize(image,
+                          self._pinned_quantize_palette(image),
+                          dither=True)
+        self.assertEqual(
+            hashlib.sha256(bytes(result.data)).hexdigest(),
+            "6b81ef29eee6d2280d5d1dc46838f94cdb5a1dfd7d0e47731ac1d201a03f13b7")
+
+    def test_quantize_pinned_output_no_dither(self):
+        # Task 60, no-dither half of the pin above.
+        image = self._pinned_quantize_image()
+        result = quantize(image,
+                          self._pinned_quantize_palette(image),
+                          dither=False)
+        self.assertEqual(
+            hashlib.sha256(bytes(result.data)).hexdigest(),
+            "8fcae47adaefa41845bcae382472249589ea88af0f64fc626a1d2d35aed110e1")
+
+    def test_count_opaque_colors_matches_tuple_count(self):
+        # Task 60: the byte-slice count must agree with the
+        # tuple-list count it replaced, on random images with
+        # transparent pixels mixed in — and on the edges.
+        rng = random.Random(6060)
+        image = Image(64, 64)
+        data = image.data
+        for i in range(0, len(data), 4):
+            data[i] = rng.randrange(4) * 85
+            data[i + 1] = rng.randrange(4) * 85
+            data[i + 2] = rng.randrange(4) * 85
+            data[i + 3] = 255 if rng.random() > 0.3 else 0
+        self.assertEqual(count_opaque_colors(image),
+                         len(set(opaque_pixels(image))))
+        self.assertEqual(count_opaque_colors(Image(8, 8)), 0)
+        self.assertEqual(
+            count_opaque_colors(make_solid_image(8, 8, 9, 9, 9)), 1)
 
     # ------------------------------------------------------------- file
 

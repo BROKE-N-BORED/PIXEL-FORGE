@@ -2959,6 +2959,14 @@ class MainWindow(QMainWindow):
         self._duplicate_fingerprint = None
         self.source_image = None
         self.source_path = None
+        # Original-pane pixmap cache (task 60): _refresh_pixmaps
+        # rebuilds the Original pane on every zoom drag even
+        # though the source image and its fit never change during
+        # one. (source, fit, pixmap) — the cached source is held
+        # so its identity stays meaningful; the source is
+        # replaced, never mutated in place, so identity + fit is
+        # a complete key.
+        self._before_pixmap_cache = None
         # Background removal (task 41) and pixel-grid snap
         # (task 42): the worker running each job, or None. Like
         # the prompt worker, both are stopped in closeEvent.
@@ -3073,6 +3081,9 @@ class MainWindow(QMainWindow):
         self.prompt_keeper = None
         self.prompt_keeper_image = None
         self.prompt_result_image = None
+        # Prompt Original-pane pixmap cache (task 60): same
+        # shape as _before_pixmap_cache, for the keeper image.
+        self._prompt_before_pixmap_cache = None
         self._updating_prompt_size = False
         self._prompt_history = None
         self._prompt_history_corrupt = False
@@ -4869,7 +4880,18 @@ class MainWindow(QMainWindow):
         # original down to one corner of sky.
         source = self.source_image
         fit = ORIGINAL_FIT / max(source.width(), source.height())
-        before = checkerboard_pixmap(source, fit, smooth=True)
+        # Task 60: the Original pane does not change on a zoom
+        # drag (neither the source nor its fit moves), so a
+        # cached pixmap is reused until the source or the fit
+        # changes. The result pane below still rebuilds — its
+        # scale is the zoom.
+        cached = self._before_pixmap_cache
+        if (cached is not None and cached[0] is source
+                and cached[1] == fit):
+            before = cached[2]
+        else:
+            before = checkerboard_pixmap(source, fit, smooth=True)
+            self._before_pixmap_cache = (source, fit, before)
         self.before_label.setPixmap(before)
         if self._showing_normal_map and \
                 self.normal_map_image is not None:
@@ -8778,7 +8800,15 @@ class MainWindow(QMainWindow):
     def _refresh_prompt_pixmaps(self):
         source = self.prompt_keeper_image
         fit = ORIGINAL_FIT / max(source.width(), source.height())
-        before = checkerboard_pixmap(source, fit, smooth=True)
+        # Task 60: same cache as _refresh_pixmaps — the keeper
+        # pane does not change on a prompt zoom drag.
+        cached = self._prompt_before_pixmap_cache
+        if (cached is not None and cached[0] is source
+                and cached[1] == fit):
+            before = cached[2]
+        else:
+            before = checkerboard_pixmap(source, fit, smooth=True)
+            self._prompt_before_pixmap_cache = (source, fit, before)
         self.prompt_before_label.setPixmap(before)
         if self.prompt_result_image is not None:
             after = checkerboard_pixmap(self.prompt_result_image,

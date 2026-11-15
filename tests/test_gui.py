@@ -10227,5 +10227,84 @@ class UpdateCheckGuiTests(unittest.TestCase):
             self._wait_for_check(win)
 
 
+class OriginalPaneCacheTests(unittest.TestCase):
+    """Task 60: the Original pane pixmap is cached across zoom
+    drags — _refresh_pixmaps rebuilds only the result pane when
+    the source and its fit have not changed, and the Prompt tab
+    does the same for the keeper pane."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls.tmp = tempfile.mkdtemp()
+        cls.src = write_image(make_gradient_image(),
+                              os.path.join(cls.tmp, "photo.png"))
+
+    def setUp(self):
+        from pixel_forge import gui as gui_mod
+        from pixel_forge.gui import MainWindow
+        self.gui_mod = gui_mod
+        self.win = MainWindow()
+        self.win.load_image(self.src)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def _count_before_builds(self, fn):
+        """How many checkerboard_pixmap calls with smooth=True
+        (the Original pane — the result pane uses smooth=False)
+        fn triggers."""
+        original = self.gui_mod.checkerboard_pixmap
+        calls = []
+
+        def counting(image, scale, smooth):
+            calls.append(smooth)
+            return original(image, scale, smooth)
+
+        with mock.patch.object(self.gui_mod, "checkerboard_pixmap",
+                               counting):
+            fn()
+        return sum(1 for smooth in calls if smooth)
+
+    def test_second_refresh_reuses_the_original_pixmap(self):
+        self.win._before_pixmap_cache = None
+        self.assertEqual(self._count_before_builds(
+            self.win._refresh_pixmaps), 1)
+        self.assertEqual(self._count_before_builds(
+            self.win._refresh_pixmaps), 0)
+        self.assertIsNotNone(self.win.before_label.pixmap())
+
+    def test_new_source_rebuilds_the_original_pixmap(self):
+        from pixel_forge.image import Image
+        self.win._refresh_pixmaps()
+        self.win.source_image = Image(32, 32)
+        self.assertEqual(self._count_before_builds(
+            self.win._refresh_pixmaps), 1)
+        self.assertEqual(self._count_before_builds(
+            self.win._refresh_pixmaps), 0)
+
+    def test_prompt_original_pixmap_cached(self):
+        self.win.prompt_keeper_image = make_gradient_image()
+        self.win._prompt_before_pixmap_cache = None
+        self.assertEqual(self._count_before_builds(
+            self.win._refresh_prompt_pixmaps), 1)
+        self.assertEqual(self._count_before_builds(
+            self.win._refresh_prompt_pixmaps), 0)
+        self.assertIsNotNone(self.win.prompt_before_label.pixmap())
+
+    def test_prompt_new_keeper_rebuilds_the_original_pixmap(self):
+        from pixel_forge.image import Image
+        self.win.prompt_keeper_image = make_gradient_image()
+        self.win._refresh_prompt_pixmaps()
+        self.win.prompt_keeper_image = Image(32, 32)
+        self.assertEqual(self._count_before_builds(
+            self.win._refresh_prompt_pixmaps), 1)
+        self.assertEqual(self._count_before_builds(
+            self.win._refresh_prompt_pixmaps), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
