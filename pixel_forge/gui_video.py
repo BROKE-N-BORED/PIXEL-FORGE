@@ -8,7 +8,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget)
 from .atlas import DEFAULT_PADDING, write_atlas
 from .engine_export import FORMAT_INFO
-from .gui_shared import (EngineExportDialog, MAX_CUSTOM_SIZE, SIZE_PRESETS, STRIP_THUMB, SheetSplitDialog, SpritesheetDialog, TagDialog, VIDEO_DEBOUNCE_MS, VideoWorker, _KeepDropCommand, dimmed_pixmap, gui_module, thumb_pixmap, video_filter)
+from .gui_shared import (CollapsibleSection, EngineExportDialog, MAX_CUSTOM_SIZE, SIZE_PRESETS, STRIP_THUMB, SheetSplitDialog, SpritesheetDialog, TagDialog, VIDEO_DEBOUNCE_MS, VideoWorker, _KeepDropCommand, dimmed_pixmap, gui_module, thumb_pixmap, video_filter)
 from pathlib import Path
 from .pixelize import (MAX_COLORS, MIN_COLORS, PixelForgeError, plural)
 from .presets import SHEET_COLS_VALUES
@@ -42,11 +42,26 @@ class VideoTabMixin:
         form = QVBoxLayout(controls)
         form.setContentsMargins(0, 0, 0, 0)
 
+        # Task 87: the column is five collapsible
+        # sections in a scroll area, with Export pinned
+        # below it — the Export controls stay visible
+        # without scrolling at 1020x640, whatever the
+        # sections above do. Frames starts open (it is
+        # the starting point); the settings sections
+        # start closed (U21: ask for the minimum up
+        # front). Each section reopens the way it was
+        # left (QSettings).
+        self.video_sections = {}
+        frames = self._video_section("frames", "Frames",
+                                     expanded=True)
+        form.addWidget(frames)
+        body = frames.body_layout()
+
         self.video_import_btn = QPushButton("Import video")
         self.video_import_btn.setToolTip(
             "Import a video to turn its frames into sprites")
         self.video_import_btn.clicked.connect(self._on_video_import)
-        form.addWidget(self.video_import_btn)
+        body.addWidget(self.video_import_btn)
 
         self.video_split_btn = QPushButton("Split spritesheet")
         self.video_split_btn.setToolTip(
@@ -54,9 +69,8 @@ class VideoTabMixin:
             "its metadata, or as a grid")
         self.video_split_btn.clicked.connect(
             self._on_split_spritesheet)
-        form.addWidget(self.video_split_btn)
+        body.addWidget(self.video_split_btn)
 
-        form.addWidget(self._section("Frames"))
         fps_row = QHBoxLayout()
         fps_row.addWidget(QLabel("Extract fps"))
         self.video_fps_combo = QComboBox()
@@ -72,7 +86,7 @@ class VideoTabMixin:
             lambda _i: self._mark_video_preset_custom(
                 "extract_fps"))
         fps_row.addWidget(self.video_fps_combo)
-        form.addLayout(fps_row)
+        body.addLayout(fps_row)
 
         every_row = QHBoxLayout()
         every_row.addWidget(QLabel("Keep every Nth frame"))
@@ -83,7 +97,7 @@ class VideoTabMixin:
         self.video_every_spin.valueChanged.connect(
             self._on_video_extract_changed)
         every_row.addWidget(self.video_every_spin)
-        form.addLayout(every_row)
+        body.addLayout(every_row)
 
         start_row = QHBoxLayout()
         start_row.addWidget(QLabel("Start time"))
@@ -94,7 +108,7 @@ class VideoTabMixin:
         self.video_start_edit.editingFinished.connect(
             self._on_video_extract_changed)
         start_row.addWidget(self.video_start_edit)
-        form.addLayout(start_row)
+        body.addLayout(start_row)
 
         end_row = QHBoxLayout()
         end_row.addWidget(QLabel("End time"))
@@ -105,7 +119,7 @@ class VideoTabMixin:
         self.video_end_edit.editingFinished.connect(
             self._on_video_extract_changed)
         end_row.addWidget(self.video_end_edit)
-        form.addLayout(end_row)
+        body.addLayout(end_row)
 
         # Frame-count estimate (task 25): "about 240 frames" at
         # the current settings, blank until a video is loaded or
@@ -113,9 +127,11 @@ class VideoTabMixin:
         self.video_estimate_label = QLabel("")
         self.video_estimate_label.setToolTip(
             "Estimated frames to extract at the current settings")
-        form.addWidget(self.video_estimate_label)
+        body.addWidget(self.video_estimate_label)
 
-        form.addWidget(self._section("Size"))
+        size = self._video_section("size", "Size")
+        form.addWidget(size)
+        body = size.body_layout()
         self.video_size_combo = QComboBox()
         self.video_size_combo.setToolTip("Frame size in pixels")
         for preset in SIZE_PRESETS:
@@ -125,7 +141,7 @@ class VideoTabMixin:
         self.video_size_combo.setCurrentIndex(1)  # 32 x 32
         self.video_size_combo.currentIndexChanged.connect(
             self._on_video_preset)
-        form.addWidget(self.video_size_combo)
+        body.addWidget(self.video_size_combo)
 
         video_size_row = QHBoxLayout()
         self.video_width_spin = QSpinBox()
@@ -144,23 +160,26 @@ class VideoTabMixin:
             self._on_video_custom_size)
         video_size_row.addWidget(self.video_width_spin)
         video_size_row.addWidget(self.video_height_spin)
-        form.addLayout(video_size_row)
+        body.addLayout(video_size_row)
 
         self.video_aspect_check = QCheckBox("Keep aspect ratio")
         self.video_aspect_check.setToolTip(
             "Keep the original proportions when resizing")
         self.video_aspect_check.toggled.connect(
             self._on_video_control_changed)
-        form.addWidget(self.video_aspect_check)
+        body.addWidget(self.video_aspect_check)
 
-        form.addWidget(self._section("Palette"))
+        palette = self._video_section("palette",
+                                      "Palette")
+        form.addWidget(palette)
+        body = palette.body_layout()
         self.video_palette_combo = QComboBox()
         self.video_palette_combo.setToolTip(
             "Colors the frames may use")
         self._fill_palette_combo(self.video_palette_combo)
         self.video_palette_combo.currentIndexChanged.connect(
             self._on_video_control_changed)
-        form.addWidget(self.video_palette_combo)
+        body.addWidget(self.video_palette_combo)
 
         video_colors_row = QHBoxLayout()
         video_colors_row.addWidget(QLabel("Max colors"))
@@ -172,7 +191,7 @@ class VideoTabMixin:
         self.video_colors_spin.valueChanged.connect(
             self._on_video_control_changed)
         video_colors_row.addWidget(self.video_colors_spin)
-        form.addLayout(video_colors_row)
+        body.addLayout(video_colors_row)
 
         self.video_dither_check = QCheckBox("Dithering")
         self.video_dither_check.setToolTip(
@@ -180,11 +199,28 @@ class VideoTabMixin:
         self.video_dither_check.setChecked(True)
         self.video_dither_check.toggled.connect(
             self._on_video_control_changed)
-        form.addWidget(self.video_dither_check)
+        body.addWidget(self.video_dither_check)
 
-        self._build_preset_section(form, "video")
+        preset = self._video_section("preset", "Preset")
+        form.addWidget(preset)
+        body = preset.body_layout()
+        # No Preset heading inside: the section header
+        # already says Preset.
+        self._build_preset_section(body, "video",
+                                   with_heading=False)
 
-        form.addWidget(self._section("Zoom"))
+        # Animation holds the preview zoom, the sheet
+        # settings, and the tags: the sheet settings
+        # shape the animation (sheet fps sets its
+        # speed, packing shapes its sheet), and keeping
+        # them here leaves Export a short pinned list
+        # of buttons. The old sub-headings stay, so
+        # nothing is renamed.
+        animation = self._video_section("animation",
+                                        "Animation")
+        form.addWidget(animation)
+        body = animation.body_layout()
+        body.addWidget(self._section("Zoom"))
         video_zoom_row = QHBoxLayout()
         self.video_zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.video_zoom_slider.setRange(1, 16)
@@ -202,9 +238,9 @@ class VideoTabMixin:
         self.video_zoom_fit_btn.clicked.connect(
             self._on_fit_video_zoom)
         video_zoom_row.addWidget(self.video_zoom_fit_btn)
-        form.addLayout(video_zoom_row)
+        body.addLayout(video_zoom_row)
 
-        form.addWidget(self._section("Spritesheet"))
+        body.addWidget(self._section("Spritesheet"))
         sheet_cols_row = QHBoxLayout()
         sheet_cols_row.addWidget(QLabel("Columns"))
         self.sheet_cols_combo = QComboBox()
@@ -216,7 +252,7 @@ class VideoTabMixin:
         self.sheet_cols_combo.currentIndexChanged.connect(
             lambda _i: self._mark_video_preset_custom("sheet_cols"))
         sheet_cols_row.addWidget(self.sheet_cols_combo)
-        form.addLayout(sheet_cols_row)
+        body.addLayout(sheet_cols_row)
 
         sheet_padding_row = QHBoxLayout()
         sheet_padding_row.addWidget(QLabel("Padding"))
@@ -230,7 +266,7 @@ class VideoTabMixin:
             lambda _v: self._mark_video_preset_custom(
                 "sheet_padding"))
         sheet_padding_row.addWidget(self.sheet_padding_spin)
-        form.addLayout(sheet_padding_row)
+        body.addLayout(sheet_padding_row)
 
         sheet_fps_row = QHBoxLayout()
         sheet_fps_row.addWidget(QLabel("Sheet fps"))
@@ -244,7 +280,7 @@ class VideoTabMixin:
         self.sheet_fps_spin.valueChanged.connect(
             lambda _v: self._mark_video_preset_custom("sheet_fps"))
         sheet_fps_row.addWidget(self.sheet_fps_spin)
-        form.addLayout(sheet_fps_row)
+        body.addLayout(sheet_fps_row)
 
         # Atlas packing (task 38): MaxRects packs mixed-size
         # sprites tight instead of a grid. Grid is the current
@@ -264,14 +300,14 @@ class VideoTabMixin:
         self.sheet_pack_combo.currentIndexChanged.connect(
             self._on_sheet_pack_changed)
         sheet_pack_row.addWidget(self.sheet_pack_combo)
-        form.addLayout(sheet_pack_row)
+        body.addLayout(sheet_pack_row)
 
         self.sheet_trim_check = QCheckBox("Trim transparent borders")
         self.sheet_trim_check.setToolTip(
             "Cut transparent borders off each frame before "
             "packing — the cut is recorded in the metadata")
         self.sheet_trim_check.setEnabled(False)
-        form.addWidget(self.sheet_trim_check)
+        body.addWidget(self.sheet_trim_check)
 
         sheet_atlas_padding_row = QHBoxLayout()
         sheet_atlas_padding_row.addWidget(QLabel("Atlas padding"))
@@ -285,7 +321,7 @@ class VideoTabMixin:
         self.sheet_atlas_padding_spin.setEnabled(False)
         sheet_atlas_padding_row.addWidget(
             self.sheet_atlas_padding_spin)
-        form.addLayout(sheet_atlas_padding_row)
+        body.addLayout(sheet_atlas_padding_row)
 
         sheet_extrude_row = QHBoxLayout()
         sheet_extrude_row.addWidget(QLabel("Extrude"))
@@ -298,7 +334,7 @@ class VideoTabMixin:
             "padding — stops bleeding when the atlas is scaled")
         self.sheet_extrude_spin.setEnabled(False)
         sheet_extrude_row.addWidget(self.sheet_extrude_spin)
-        form.addLayout(sheet_extrude_row)
+        body.addLayout(sheet_extrude_row)
 
         self.sheet_preview_btn = QPushButton("Preview spritesheet")
         self.sheet_preview_btn.setToolTip(
@@ -306,12 +342,12 @@ class VideoTabMixin:
         self.sheet_preview_btn.setEnabled(False)
         self.sheet_preview_btn.clicked.connect(
             self._on_preview_spritesheet)
-        form.addWidget(self.sheet_preview_btn)
+        body.addWidget(self.sheet_preview_btn)
 
         # Animation tags (task 34): named ranges over the kept
         # frames — walk/idle/attack sets in one sheet. Nothing is
         # selected by default; Play tag and Delete need a pick.
-        form.addWidget(self._section("Animation tags"))
+        body.addWidget(self._section("Animation tags"))
         self.video_tag_list = QListWidget()
         self.video_tag_list.setToolTip(
             "Named frame ranges — pick one to play it or export "
@@ -319,7 +355,7 @@ class VideoTabMixin:
         self.video_tag_list.setMaximumHeight(96)
         self.video_tag_list.itemSelectionChanged.connect(
             self._on_video_tag_selected)
-        form.addWidget(self.video_tag_list)
+        body.addWidget(self.video_tag_list)
         tag_btn_row = QHBoxLayout()
         self.video_tag_add_btn = QPushButton("Add tag")
         self.video_tag_add_btn.setToolTip(
@@ -340,12 +376,25 @@ class VideoTabMixin:
         self.video_tag_delete_btn.clicked.connect(
             self._on_video_tag_delete)
         tag_btn_row.addWidget(self.video_tag_delete_btn)
-        form.addLayout(tag_btn_row)
+        body.addLayout(tag_btn_row)
 
         form.addStretch(1)
+        self.video_controls_scroll = self._scrollable_column(controls)
+
+        # Export pinned below the scroll area: the
+        # info line and the five export buttons never
+        # scroll away, at any collapse state.
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(self.video_controls_scroll, 1)
+        export = self._video_section("export", "Export",
+                                     expanded=True)
+        left_layout.addWidget(export)
+        export_body = export.body_layout()
         self.video_info_label = QLabel("No video loaded")
         self.video_info_label.setWordWrap(True)
-        form.addWidget(self.video_info_label)
+        export_body.addWidget(self.video_info_label)
 
         self.video_export_btn = QPushButton("Export frames")
         self.video_export_btn.setObjectName("export")
@@ -353,7 +402,7 @@ class VideoTabMixin:
             "Export the kept frames as numbered PNGs")
         self.video_export_btn.setEnabled(False)
         self.video_export_btn.clicked.connect(self._on_export_frames)
-        form.addWidget(self.video_export_btn)
+        export_body.addWidget(self.video_export_btn)
 
         self.sheet_export_btn = QPushButton("Export spritesheet")
         self.sheet_export_btn.setObjectName("export")
@@ -363,7 +412,7 @@ class VideoTabMixin:
         self.sheet_export_btn.setEnabled(False)
         self.sheet_export_btn.clicked.connect(
             self._on_export_spritesheet)
-        form.addWidget(self.sheet_export_btn)
+        export_body.addWidget(self.sheet_export_btn)
 
         self.video_gif_btn = QPushButton("Export GIF")
         self.video_gif_btn.setObjectName("export")
@@ -372,7 +421,7 @@ class VideoTabMixin:
             "all kept frames when no tag is picked")
         self.video_gif_btn.setEnabled(False)
         self.video_gif_btn.clicked.connect(self._on_export_gif)
-        form.addWidget(self.video_gif_btn)
+        export_body.addWidget(self.video_gif_btn)
 
         self.engine_export_btn = QPushButton("Export for engine")
         self.engine_export_btn.setObjectName("export")
@@ -382,7 +431,7 @@ class VideoTabMixin:
             "Phaser, or Pixi")
         self.engine_export_btn.setEnabled(False)
         self.engine_export_btn.clicked.connect(self._on_export_engine)
-        form.addWidget(self.engine_export_btn)
+        export_body.addWidget(self.engine_export_btn)
 
         self.sheet_library_btn = QPushButton("Save sheet to library")
         self.sheet_library_btn.setToolTip(
@@ -390,10 +439,10 @@ class VideoTabMixin:
         self.sheet_library_btn.setEnabled(False)
         self.sheet_library_btn.clicked.connect(
             self._on_save_sheet_to_library)
-        form.addWidget(self.sheet_library_btn)
+        export_body.addWidget(self.sheet_library_btn)
 
-        main_layout.addWidget(
-            self._scrollable_column(controls))
+
+        main_layout.addWidget(left)
 
         # ------------------------------------------- preview and strip
         right = QSplitter(Qt.Orientation.Vertical)
@@ -547,6 +596,36 @@ class VideoTabMixin:
         right.setSizes([380, 220])
         main_layout.addWidget(right, 1)
         return root
+
+    def _video_section(self, key, title, expanded=False):
+        """One Video tab collapsible section (task 87).
+
+        The expanded state restores from QSettings
+        (video_sections/<key>) when the window has settings,
+        and falls back to the expanded default the caller
+        passes — Frames and Export start open, the settings
+        sections start closed. A window without settings
+        (tests) always takes the default. The section is
+        recorded in self.video_sections under its key, and
+        every toggle is saved at once.
+        """
+        section = CollapsibleSection(title)
+        if self._settings is not None:
+            expanded = self._settings.value(
+                "video_sections/%s" % key, expanded, type=bool)
+        section.setExpanded(expanded, emit=False)
+        section.toggled.connect(
+            lambda on, k=key: self._save_video_section(k, on))
+        self.video_sections[key] = section
+        return section
+
+    def _save_video_section(self, key, expanded):
+        """Remember one section's open/closed state."""
+        if self._settings is None:
+            return
+        self._settings.setValue("video_sections/%s" % key,
+                                expanded)
+        self._settings.sync()
 
 
     # ---------------------------------------------------------- input

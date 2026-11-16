@@ -1069,17 +1069,21 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         return scroll
 
 
-    def _build_preset_section(self, form, tab):
+    def _build_preset_section(self, form, tab, with_heading=True):
         """The preset picker + Save/Delete buttons for one tab.
 
         tab is "image", "video", or "prompt" — the widgets live
         under that tab's attribute prefix ("" / "video_" /
         "prompt_"). The three pickers share one preset set; each
-        one applies to its own tab's controls.
+        one applies to its own tab's controls. with_heading is
+        False on the Video tab (task 87): the picker lives
+        inside the Preset collapsible section, whose header
+        already says Preset.
         """
         prefix = {"image": "", "video": "video_",
                   "prompt": "prompt_"}[tab]
-        form.addWidget(self._section("Preset"))
+        if with_heading:
+            form.addWidget(self._section("Preset"))
         combo = QComboBox()
         combo.setToolTip(
             "Apply a saved set of size, palette, colors, and "

@@ -1,5 +1,19 @@
 # Pixel Forge changelog
 
+## 0.78 — 2026-11-16
+
+Progressive disclosure on the Video tab (task 87). The
+control column was one long scroll of 61 widgets with the
+Export buttons below the fold; it is now six collapsible
+sections — Frames, Size, Palette, Preset, Animation,
+Export — and more than one can stay open at once. Frames
+starts open, the settings sections start closed, and each
+section reopens the way you left it. Export sits pinned
+below the scroll area, so the export buttons are always
+visible without scrolling at the default window size.
+Nothing was removed: every control is still there, in its
+section, working as before.
+
 ## 0.77 — 2026-11-15
 
 Full menu bar and a built-in How to Use index (task 86).

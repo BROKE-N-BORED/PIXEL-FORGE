@@ -154,6 +154,7 @@ DARK_STYLESHEET = """
 QMainWindow, QWidget { background-color: #232329; color: #e8e6e3; }
 QLabel { background-color: transparent; }
 QLabel#heading { font-weight: bold; font-size: 13px; color: #ffb066; }
+QPushButton#sectionHeader { font-weight: bold; font-size: 13px; color: #ffb066; background: transparent; border: none; text-align: left; padding: 4px 0; }
 QLabel#warning { color: #ffb066; }
 QLabel[overLimit="true"] { color: #ffb066; }
 QPushButton { background-color: #3a3a42; border: 1px solid #55555e;
@@ -194,6 +195,7 @@ LIGHT_STYLESHEET = """
 QMainWindow, QWidget { background-color: #f2f2f0; color: #232329; }
 QLabel { background-color: transparent; }
 QLabel#heading { font-weight: bold; font-size: 13px; color: #8a4513; }
+QPushButton#sectionHeader { font-weight: bold; font-size: 13px; color: #8a4513; background: transparent; border: none; text-align: left; padding: 4px 0; }
 QLabel#warning { color: #8a4513; }
 QLabel[overLimit="true"] { color: #8a4513; }
 QPushButton { background-color: #e2e2de; border: 1px solid #b8b8b2;
@@ -1698,6 +1700,85 @@ class StampTextDialog(QDialog):
             self._refresh()
             return
         self.accept()
+
+
+class CollapsibleSection(QWidget):
+    """One collapsible section: a header button above a body.
+
+    Task 87: the Video tab's control column is six of these
+    (Frames, Size, Palette, Preset, Animation, Export). The
+    header is a flat button in the heading color with an arrow
+    (down when open, right when closed); clicking it shows or
+    hides the body.
+    Several sections can stay open at once — a user mid-task
+    needs Frames and Animation together, which a tool box
+    (one open at a time) would not allow. Add the section's
+    widgets to body_layout(). The toggled signal carries the
+    new state, so the caller can persist it.
+    """
+
+    toggled = Signal(bool)
+
+    def __init__(self, title, parent=None):
+        super().__init__(parent)
+        self._title = title
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self._header = QPushButton()
+        self._header.setObjectName("sectionHeader")
+        self._header.setToolTip(
+            "Show or hide the %s section" % title)
+        self._header.clicked.connect(self._on_header_clicked)
+        layout.addWidget(self._header)
+        self._body = QWidget()
+        self._body_layout = QVBoxLayout(self._body)
+        self._body_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._body)
+        self._expanded = True
+        self._refresh_header()
+
+    def body_layout(self):
+        """The body's layout: add the section's widgets here."""
+        return self._body_layout
+
+    def header_button(self):
+        """The header button (tests click it)."""
+        return self._header
+
+    def title(self):
+        """The section title, without the arrow."""
+        return self._title
+
+    def isExpanded(self):
+        """True when the body is showing."""
+        return self._expanded
+
+    def setExpanded(self, expanded, emit=True):
+        """Show or hide the body. Emits toggled only when the
+        state actually changes, and never while the caller is
+        restoring a saved state (emit=False)."""
+        expanded = bool(expanded)
+        if expanded == self._expanded:
+            return
+        self._expanded = expanded
+        self._body.setVisible(expanded)
+        self._refresh_header()
+        # The section's size hint just changed (body in or out):
+        # tell the parent layout, or the freed space sits empty
+        # until something else resizes the window. Hiding the
+        # body alone does not reliably re-activate the parent
+        # layout (proven under offscreen: the heights froze).
+        self.updateGeometry()
+        if emit:
+            self.toggled.emit(expanded)
+
+    def _refresh_header(self):
+        arrow = "\u25be" if self._expanded else "\u25b8"
+        self._header.setText("%s %s" % (arrow, self._title))
+
+    def _on_header_clicked(self):
+        self.setExpanded(not self._expanded)
 
 
 HOWTO_SECTIONS = (

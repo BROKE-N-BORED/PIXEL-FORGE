@@ -5912,6 +5912,236 @@ class HowToUseTests(unittest.TestCase):
             self.assertNotIn("(s)", body, title)
 
 
+class VideoDisclosureTests(unittest.TestCase):
+    """Task 87 (progressive disclosure on the Video tab, U21):
+    the 61-widget scroll column is six collapsible sections,
+    with Export pinned below the scroll area so the export
+    buttons stay visible without scrolling at 1020x640."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = tempfile.mkdtemp()
+        self.win = MainWindow(library_dir=self.lib_dir)
+        self.win.tabs.setCurrentIndex(1)  # Video tab
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.lib_dir, ignore_errors=True)
+
+    def _section_of(self, widget):
+        """The CollapsibleSection a widget lives in, or None."""
+        from pixel_forge.gui_shared import CollapsibleSection
+        ancestor = widget.parent()
+        while ancestor is not None:
+            if isinstance(ancestor, CollapsibleSection):
+                return ancestor
+            ancestor = ancestor.parent()
+        return None
+
+    def _show_at_default_size(self):
+        self.win.resize(1020, 640)
+        self.win.show()
+        self.app.processEvents()
+
+    def _export_rect_in_window(self):
+        export = self.win.video_sections["export"]
+        rect = export.rect()
+        top = export.mapTo(self.win, rect.topLeft()).y()
+        bottom = export.mapTo(self.win, rect.bottomRight()).y()
+        return top, bottom
+
+    def test_six_sections_exist_with_titles(self):
+        sections = self.win.video_sections
+        self.assertEqual(
+            [sections[key].title() for key in
+             ("frames", "size", "palette", "preset", "animation",
+              "export")],
+            ["Frames", "Size", "Palette", "Preset", "Animation",
+             "Export"])
+
+    def test_default_states(self):
+        sections = self.win.video_sections
+        self.assertTrue(sections["frames"].isExpanded())
+        self.assertTrue(sections["export"].isExpanded())
+        for key in ("size", "palette", "preset", "animation"):
+            self.assertFalse(sections[key].isExpanded(), key)
+
+    def test_each_section_collapses_and_expands(self):
+        # The window is shown first: with a hidden window every
+        # isVisible() reads False, so both halves of this test
+        # would pass without proving anything.
+        self._show_at_default_size()
+        for key, section in self.win.video_sections.items():
+            section.setExpanded(False)
+            self.app.processEvents()
+            self.assertFalse(section.isExpanded(), key)
+            self.assertFalse(section._body.isVisible(), key)
+            self.assertTrue(
+                section.header_button().text().startswith(
+                    "\u25b8"), key)
+            # Back open through the header button, the way a
+            # user does it — not the setter.
+            section.header_button().click()
+            self.app.processEvents()
+            self.assertTrue(section.isExpanded(), key)
+            self.assertTrue(section._body.isVisible(), key)
+            self.assertTrue(
+                section.header_button().text().startswith(
+                    "\u25be"), key)
+
+    def test_more_than_one_section_stays_open(self):
+        # A tool box shows one section at a time; these stay
+        # open together — a user mid-task needs Frames and
+        # Animation at once.
+        sections = self.win.video_sections
+        sections["frames"].setExpanded(True)
+        sections["animation"].setExpanded(True)
+        sections["size"].setExpanded(True)
+        self.assertTrue(sections["frames"].isExpanded())
+        self.assertTrue(sections["animation"].isExpanded())
+        self.assertTrue(sections["size"].isExpanded())
+
+    def test_every_control_still_present(self):
+        # Named, not counted: every control the old column
+        # held must still exist on the window.
+        for attr in (
+                "video_import_btn", "video_split_btn",
+                "video_fps_combo", "video_every_spin",
+                "video_start_edit", "video_end_edit",
+                "video_estimate_label",
+                "video_size_combo", "video_width_spin",
+                "video_height_spin", "video_aspect_check",
+                "video_palette_combo", "video_colors_spin",
+                "video_dither_check",
+                "video_preset_combo", "video_preset_save_btn",
+                "video_preset_delete_btn",
+                "video_zoom_slider", "video_zoom_fit_btn",
+                "sheet_cols_combo", "sheet_padding_spin",
+                "sheet_fps_spin", "sheet_pack_combo",
+                "sheet_trim_check", "sheet_atlas_padding_spin",
+                "sheet_extrude_spin", "sheet_preview_btn",
+                "video_tag_list", "video_tag_add_btn",
+                "video_tag_play_btn", "video_tag_delete_btn",
+                "video_info_label", "video_export_btn",
+                "sheet_export_btn", "video_gif_btn",
+                "engine_export_btn", "sheet_library_btn"):
+            self.assertTrue(hasattr(self.win, attr), attr)
+
+    def test_controls_live_in_their_sections(self):
+        win = self.win
+        expected = {
+            "video_import_btn": "Frames",
+            "video_fps_combo": "Frames",
+            "video_every_spin": "Frames",
+            "video_size_combo": "Size",
+            "video_aspect_check": "Size",
+            "video_palette_combo": "Palette",
+            "video_dither_check": "Palette",
+            "video_preset_combo": "Preset",
+            "video_zoom_slider": "Animation",
+            "sheet_cols_combo": "Animation",
+            "video_tag_list": "Animation",
+            "video_export_btn": "Export",
+            "sheet_export_btn": "Export",
+            "video_gif_btn": "Export",
+            "engine_export_btn": "Export",
+            "sheet_library_btn": "Export",
+        }
+        for attr, title in expected.items():
+            section = self._section_of(getattr(win, attr))
+            self.assertIsNotNone(section, attr)
+            self.assertEqual(section.title(), title, attr)
+
+    def test_export_sits_outside_the_scroll_area(self):
+        scroll = self.win.video_controls_scroll
+        export = self.win.video_sections["export"]
+        ancestor = export.parent()
+        while ancestor is not None:
+            self.assertIsNot(ancestor, scroll,
+                             "Export is inside the scroll area")
+            ancestor = ancestor.parent()
+        # The five scrolling sections ARE inside it.
+        for key in ("frames", "size", "palette", "preset",
+                    "animation"):
+            section = self.win.video_sections[key]
+            ancestor = section.parent()
+            inside = False
+            while ancestor is not None:
+                if ancestor is scroll:
+                    inside = True
+                    break
+                ancestor = ancestor.parent()
+            self.assertTrue(inside, key)
+
+    def test_export_visible_at_defaults(self):
+        self._show_at_default_size()
+        top, bottom = self._export_rect_in_window()
+        self.assertGreaterEqual(top, 0)
+        self.assertLessEqual(bottom, self.win.height())
+
+    def test_export_visible_with_all_sections_expanded(self):
+        self._show_at_default_size()
+        for section in self.win.video_sections.values():
+            section.setExpanded(True)
+        self.app.processEvents()
+        top, bottom = self._export_rect_in_window()
+        self.assertGreaterEqual(top, 0)
+        self.assertLessEqual(bottom, self.win.height())
+
+    def test_state_round_trips_through_settings(self):
+        from pixel_forge.gui import MainWindow
+        ini = os.path.join(self.lib_dir, "settings.ini")
+        settings = QSettings(ini, QSettings.Format.IniFormat)
+        first = MainWindow(library_dir=self.lib_dir,
+                           settings=settings)
+        first.video_sections["frames"].setExpanded(False)
+        first.video_sections["size"].setExpanded(True)
+        self.assertFalse(
+            settings.value("video_sections/frames", type=bool))
+        self.assertTrue(
+            settings.value("video_sections/size", type=bool))
+        first.close()
+        first.deleteLater()
+        self.app.processEvents()
+        second = MainWindow(library_dir=self.lib_dir,
+                            settings=settings)
+        try:
+            self.assertFalse(
+                second.video_sections["frames"].isExpanded())
+            self.assertTrue(
+                second.video_sections["size"].isExpanded())
+            # Untouched sections keep their defaults.
+            self.assertTrue(
+                second.video_sections["export"].isExpanded())
+            self.assertFalse(
+                second.video_sections["palette"].isExpanded())
+        finally:
+            second.close()
+            second.deleteLater()
+            self.app.processEvents()
+
+    def test_headers_have_tooltips(self):
+        for key, section in self.win.video_sections.items():
+            self.assertTrue(
+                section.header_button().toolTip().strip(), key)
+
+    def test_no_em_dash_or_parens_s_in_section_text(self):
+        for section in self.win.video_sections.values():
+            title = section.title()
+            self.assertNotIn("\u2014", title, title)
+            self.assertNotIn("(s)", title, title)
+            tip = section.header_button().toolTip()
+            self.assertNotIn("\u2014", tip, title)
+            self.assertNotIn("(s)", tip, title)
+
+
 class PolishTests(unittest.TestCase):
     """Task 22 polish pass. Contrast and the "(s)" ban are in
     test_polish.py (bare python); everything here needs the real
@@ -6195,10 +6425,17 @@ class PolishTests(unittest.TestCase):
                                  prefix + "preset_delete_btn")
                 row = (save.minimumSizeHint().width()
                        + delete.minimumSizeHint().width() + 6)
-                # Button -> inner widget -> viewport -> scroll
-                # area: the viewport is the width that matters.
-                scroll = (save.parentWidget().parentWidget()
-                          .parentWidget())
+                # Button -> ... -> viewport -> scroll area: walk
+                # up to the scroll area instead of assuming a
+                # fixed depth — the Video tab's preset picker
+                # lives inside a collapsible section now (task
+                # 87), so its chain is two widgets longer than
+                # the Image and Prompt tabs'. The viewport is
+                # the width that matters.
+                scroll = save.parentWidget()
+                while (scroll is not None and not isinstance(
+                        scroll, QScrollArea)):
+                    scroll = scroll.parentWidget()
                 self.assertIsInstance(scroll, QScrollArea)
                 viewport = scroll.viewport().width()
                 self.assertLessEqual(
