@@ -5226,19 +5226,49 @@ class ShortcutsMenusTests(unittest.TestCase):
                 for action in bar.actions()}
 
     def test_menu_bar_has_file_edit_view_and_help_menus(self):
-        # Task 67 adds the View menu (the Light theme switch).
+        # Task 67 adds the View menu (the Light theme switch);
+        # task 86 adds the Tools menu and grows File, View,
+        # and Help into the full bar.
         menus = self._menus()
         self.assertEqual(sorted(menus),
-                         ["Edit", "File", "Help", "View"])
+                         ["Edit", "File", "Help", "Tools",
+                          "View"])
         file_items = [(a.text(), a.shortcut().toString())
                       for a in menus["File"].actions()]
-        # Task 29 adds the Recent files submenu after Export; it
-        # has no shortcut, and it is disabled while the session
-        # is empty (this window's library folder is fresh).
+        # Task 29 adds the Recent files submenu; it has no
+        # shortcut, and it is disabled while the session is
+        # empty (this window's library folder is fresh). Task
+        # 86 adds Open image / Open video after Export and
+        # Quit at the end; separators read as empty-text
+        # actions.
         self.assertEqual(file_items, [("Import", "Ctrl+O"),
                                       ("Export", "Ctrl+S"),
-                                      ("Recent files", "")])
-        self.assertFalse(menus["File"].actions()[2].isEnabled())
+                                      ("", ""),
+                                      ("Open image...", ""),
+                                      ("Open video...", ""),
+                                      ("", ""),
+                                      ("Recent files", ""),
+                                      ("", ""),
+                                      ("Quit", "Ctrl+Q")])
+        self.assertFalse(menus["File"].actions()[6].isEnabled())
+        # Task 86 adds Fit preview to the View menu, after a
+        # separator.
+        view_items = [a.text()
+                      for a in menus["View"].actions()]
+        self.assertEqual(view_items, ["Light theme", "",
+                                      "Fit preview to window"])
+        # Task 86 adds the Tools menu.
+        tools_items = [a.text()
+                       for a in menus["Tools"].actions()]
+        self.assertEqual(tools_items,
+                         ["Remove background",
+                          "Snap to pixel grid",
+                          "Generate normal map",
+                          "",
+                          "Generate a sprite",
+                          "Text tool",
+                          "",
+                          "Run self-test..."])
         # Task 30 adds the Edit menu: Undo (Ctrl+Z) and Redo
         # (Ctrl+Y, also Ctrl+Shift+Z), both disabled on a fresh
         # window — there is nothing to undo or redo yet.
@@ -5252,18 +5282,20 @@ class ShortcutsMenusTests(unittest.TestCase):
             [s.toString()
              for s in menus["Edit"].actions()[1].shortcuts()],
             ["Ctrl+Y", "Ctrl+Shift+Z"])
-        help_items = [a.text()
+        help_items = [(a.text(), a.shortcut().toString())
                       for a in menus["Help"].actions()]
         # Task 48 adds the update check after a separator (the
         # separator reads as an empty-text action): a manual
-        # check, then the startup opt-in.
+        # check, then the startup opt-in. Task 86 adds How to
+        # Use (F1) at the top.
         self.assertEqual(help_items,
-                         ["About Pixel Forge",
-                          "What the Code tab detects",
-                          "Library location",
-                          "",
-                          "Check for updates",
-                          "Check for updates on startup"])
+                         [("How to Use", "F1"),
+                          ("About Pixel Forge", ""),
+                          ("What the Code tab detects", ""),
+                          ("Library location", ""),
+                          ("", ""),
+                          ("Check for updates", ""),
+                          ("Check for updates on startup", "")])
 
     def test_about_text_shows_real_version(self):
         # The About text reads __version__, so it can never drift
@@ -5290,7 +5322,7 @@ class ShortcutsMenusTests(unittest.TestCase):
         watcher.timeout.connect(watch)
         watcher.start(50)
         try:
-            self._menus()["Help"].actions()[0].trigger()
+            self._menus()["Help"].actions()[1].trigger()
         finally:
             watcher.stop()
         from pixel_forge import __version__
@@ -5326,7 +5358,7 @@ class ShortcutsMenusTests(unittest.TestCase):
         watcher.timeout.connect(watch)
         watcher.start(50)
         try:
-            self._menus()["Help"].actions()[1].trigger()
+            self._menus()["Help"].actions()[2].trigger()
         finally:
             watcher.stop()
         self.assertEqual(len(seen), 1)
@@ -5351,7 +5383,7 @@ class ShortcutsMenusTests(unittest.TestCase):
         watcher.timeout.connect(watch)
         watcher.start(50)
         try:
-            self._menus()["Help"].actions()[2].trigger()
+            self._menus()["Help"].actions()[3].trigger()
         finally:
             watcher.stop()
         self.assertEqual(len(seen), 1)
@@ -5551,6 +5583,333 @@ class ShortcutsMenusTests(unittest.TestCase):
                          "controls without a tooltip: %r" % missing)
         self.assertGreaterEqual(total, 80,
                                 "only %d controls audited" % total)
+
+
+class MenuBarTests(unittest.TestCase):
+    """Task 86 (full menu bar): every Tools menu action calls
+    a real action, File opens an image or a video directly,
+    View fits the preview, and Quit closes the window."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = tempfile.mkdtemp()
+        self.win = MainWindow(library_dir=self.lib_dir)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.lib_dir, ignore_errors=True)
+
+    def _menu_action(self, menu_name, text):
+        bar = self.win.menuBar()
+        for action in bar.actions():
+            if action.text() == menu_name:
+                for item in action.menu().actions():
+                    if item.text() == text:
+                        return item
+        self.fail("no %r in the %s menu" % (text, menu_name))
+
+    def test_every_tools_action_is_enabled_and_has_a_tooltip(self):
+        # Nothing in the Tools menu is a placeholder: every
+        # entry is enabled and explains itself.
+        bar = self.win.menuBar()
+        for action in bar.actions():
+            if action.text() == "Tools":
+                tools = action.menu()
+                break
+        else:
+            self.fail("no Tools menu")
+        seen = []
+        for item in tools.actions():
+            if item.isSeparator():
+                continue
+            seen.append(item.text())
+            self.assertTrue(item.isEnabled(), item.text())
+            self.assertTrue(item.toolTip().strip(), item.text())
+        self.assertEqual(len(seen), 6)
+
+    def test_open_image_goes_to_image_tab_and_imports(self):
+        self.win.tabs.setCurrentIndex(1)
+        with mock.patch.object(self.win, "_on_import") as imp:
+            self._menu_action("File", "Open image...").trigger()
+        self.assertEqual(self.win.tabs.currentIndex(), 0)
+        imp.assert_called_once_with()
+
+    def test_open_video_goes_to_video_tab_and_imports(self):
+        with mock.patch.object(self.win, "_on_video_import") as imp:
+            self._menu_action("File", "Open video...").trigger()
+        self.assertEqual(self.win.tabs.currentIndex(), 1)
+        imp.assert_called_once_with()
+
+    def test_quit_closes_the_window(self):
+        self.win.show()
+        self.app.processEvents()
+        self.assertTrue(self.win.isVisible())
+        self._menu_action("File", "Quit").trigger()
+        self.app.processEvents()
+        self.assertFalse(self.win.isVisible())
+
+    def test_fit_preview_calls_the_current_tabs_fit(self):
+        # Image tab fits the image preview; the Library tab
+        # has no preview zoom, so it does nothing and does
+        # not crash.
+        with mock.patch.object(self.win,
+                               "_on_fit_image_zoom") as fit:
+            self._menu_action("View",
+                              "Fit preview to window").trigger()
+        fit.assert_called_once_with()
+        self.win.tabs.setCurrentIndex(4)
+        with mock.patch.object(self.win,
+                               "_on_fit_image_zoom") as fit:
+            self._menu_action("View",
+                              "Fit preview to window").trigger()
+        fit.assert_not_called()
+
+    def test_tool_actions_run_their_button_when_it_can(self):
+        # With the button enabled, the menu entry presses it:
+        # a spy on the button's clicked signal proves the
+        # wiring without running the worker (every handler
+        # returns early with no image loaded).
+        for text, button in (
+                ("Remove background", self.win.bgremove_btn),
+                ("Snap to pixel grid", self.win.gridsnap_btn),
+                ("Generate normal map", self.win.normalmap_btn)):
+            clicked = []
+            button.clicked.connect(lambda _c: clicked.append(True))
+            button.setEnabled(True)
+            self.win.tabs.setCurrentIndex(4)
+            self._menu_action("Tools", text).trigger()
+            self.assertEqual(self.win.tabs.currentIndex(), 0)
+            self.assertEqual(clicked, [True], text)
+
+    def test_tool_actions_explain_when_their_button_cannot(self):
+        # With no image loaded the buttons are disabled, so
+        # the menu entry goes to the tab and the status bar
+        # says what is needed first — never silence.
+        for text, phrase in (
+                ("Remove background", "Load an image first"),
+                ("Snap to pixel grid", "Load an image first"),
+                ("Generate normal map", "Pixelize an image "
+                 "first")):
+            self._menu_action("Tools", text).trigger()
+            self.assertEqual(self.win.tabs.currentIndex(), 0)
+            self.assertIn(phrase,
+                          self.win.statusBar().currentMessage(),
+                          text)
+
+    def test_generate_sprite_goes_to_image_tab_and_the_picker(self):
+        self.win.show()
+        self.app.processEvents()
+        self.win.tabs.setCurrentIndex(4)
+        self._menu_action("Tools", "Generate a sprite").trigger()
+        self.app.processEvents()
+        self.assertEqual(self.win.tabs.currentIndex(), 0)
+        self.assertTrue(self.win.procedural_kind_combo.hasFocus())
+        self.assertIn("Pick a kind",
+                      self.win.statusBar().currentMessage())
+
+    def test_text_tool_picks_up_the_text_tool(self):
+        # With no result the tool button is disabled, so the
+        # menu entry explains what is needed first.
+        self._menu_action("Tools", "Text tool").trigger()
+        self.assertEqual(self.win.tabs.currentIndex(), 0)
+        self.assertIsNone(self.win._editor_tool)
+        self.assertIn("Pixelize an image first",
+                      self.win.statusBar().currentMessage())
+        # With the button able to run, the menu entry picks
+        # the tool up, like clicking the toolbar button.
+        self.win.editor_tool_buttons["text"].setEnabled(True)
+        self.win.tabs.setCurrentIndex(4)
+        self._menu_action("Tools", "Text tool").trigger()
+        self.assertEqual(self.win.tabs.currentIndex(), 0)
+        self.assertEqual(self.win._editor_tool, "text")
+        self.assertTrue(
+            self.win.editor_tool_buttons["text"].isChecked())
+
+    def test_selftest_menu_explains_the_command(self):
+        # The self-test is a command line check, so the menu
+        # entry explains it — a QTimer watcher reads the
+        # dialog and closes it.
+        from PySide6.QtCore import QTimer
+        seen = []
+
+        def watch():
+            dialog = QApplication.activeModalWidget()
+            if dialog is not None and isinstance(dialog, QMessageBox):
+                seen.append(dialog.text())
+                dialog.accept()
+
+        watcher = QTimer()
+        watcher.timeout.connect(watch)
+        watcher.start(50)
+        try:
+            self._menu_action("Tools", "Run self-test...").trigger()
+        finally:
+            watcher.stop()
+        self.assertEqual(len(seen), 1)
+        self.assertIn("pixel-forge --self-test", seen[0])
+        self.assertIn("7 minutes", seen[0])
+        self.assertIn("self-test", seen[0])
+
+    def test_no_em_dash_or_parens_s_in_new_menu_strings(self):
+        texts = []
+        bar = self.win.menuBar()
+        for action in bar.actions():
+            menu = action.menu()
+            if menu is None:
+                continue
+            for item in menu.actions():
+                texts.append(item.text())
+                texts.append(item.toolTip())
+        texts.append(self.win._selftest_text())
+        for text in texts:
+            self.assertNotIn("\u2014", text, text)
+            self.assertNotIn("(s)", text, text)
+
+
+class HowToUseTests(unittest.TestCase):
+    """Task 86 (How to Use index, U22): one window, a section
+    per tab plus first steps, in plain words, reopening after
+    close, every entry naming where the thing lives."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = tempfile.mkdtemp()
+        self.win = MainWindow(library_dir=self.lib_dir)
+
+    def tearDown(self):
+        if self.win._howto_dialog is not None:
+            self.win._howto_dialog.close()
+            self.win._howto_dialog.deleteLater()
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.lib_dir, ignore_errors=True)
+
+    def _open_index(self):
+        bar = self.win.menuBar()
+        for action in bar.actions():
+            if action.text() == "Help":
+                for item in action.menu().actions():
+                    if item.text() == "How to Use":
+                        item.trigger()
+                        return self.win._howto_dialog
+        self.fail("no How to Use in the Help menu")
+
+    def test_help_menu_opens_the_index(self):
+        dialog = self._open_index()
+        self.assertIsNotNone(dialog)
+        self.assertTrue(dialog.isVisible())
+        self.assertEqual(dialog.windowTitle(),
+                         "How to Use Pixel Forge")
+
+    def test_index_lists_every_section(self):
+        dialog = self._open_index()
+        sections = [dialog.section_list.item(i).text()
+                    for i in range(dialog.section_list.count())]
+        self.assertEqual(sections,
+                         ["First steps", "Image", "Video",
+                          "Prompt", "Code", "Library", "Tileset"])
+        text = dialog.text.toPlainText()
+        for section in sections:
+            self.assertIn(section, text)
+
+    def test_every_section_names_where_things_live(self):
+        # Every section's entries name the tab or menu the
+        # thing lives on — the index never says "somewhere".
+        from pixel_forge.gui_shared import HOWTO_SECTIONS
+        for title, body in HOWTO_SECTIONS:
+            if title == "First steps":
+                self.assertIn("Image tab", body)
+                continue
+            self.assertIn("%s tab" % title, body,
+                          "%s section never names its tab" % title)
+            self.assertIn("menu", body.lower(),
+                          "%s section never names a menu" % title)
+
+    def test_nothing_selected_by_default(self):
+        # The window is shown first: with a hidden window the
+        # list never takes focus, so the check would pass
+        # without proving anything. A list that takes focus
+        # with no current item picks its first row — the text
+        # takes the opening focus instead, so no section is
+        # selected.
+        self.win.show()
+        self.app.processEvents()
+        dialog = self._open_index()
+        self.app.processEvents()
+        self.assertEqual(dialog.section_list.currentRow(), -1)
+        # The full text is still visible from the top — the
+        # index never opens on an empty pane.
+        self.assertTrue(dialog.text.toPlainText().startswith(
+            "First steps"))
+
+    def test_picking_a_section_jumps_to_it(self):
+        dialog = self._open_index()
+        dialog.section_list.setCurrentRow(3)
+        self.assertEqual(dialog.text.textCursor().block().text(),
+                         "Prompt")
+        dialog.section_list.setCurrentRow(6)
+        self.assertEqual(dialog.text.textCursor().block().text(),
+                         "Tileset")
+
+    def test_index_closes_and_reopens(self):
+        dialog = self._open_index()
+        dialog.close()
+        self.app.processEvents()
+        self.assertFalse(dialog.isVisible())
+        again = self._open_index()
+        self.assertIs(again, dialog)
+        self.assertTrue(dialog.isVisible())
+
+    def test_index_remembers_geometry_with_settings(self):
+        from pixel_forge.gui_shared import HowToUseDialog
+        ini = os.path.join(self.lib_dir, "settings.ini")
+        settings = QSettings(ini, QSettings.Format.IniFormat)
+        first = HowToUseDialog(self.win, settings)
+        first.show()
+        first.setGeometry(QRect(50, 60, 500, 400))
+        self.app.processEvents()
+        first.close()
+        self.app.processEvents()
+        self.assertEqual(settings.value("howto/x", type=int), 50)
+        self.assertEqual(settings.value("howto/width", type=int),
+                         500)
+        second = HowToUseDialog(self.win, settings)
+        second.show()
+        self.app.processEvents()
+        self.assertEqual(second.geometry(), QRect(50, 60, 500, 400))
+        second.close()
+        first.deleteLater()
+        second.deleteLater()
+        self.app.processEvents()
+
+    def test_index_controls_have_tooltips(self):
+        dialog = self._open_index()
+        self.assertTrue(dialog.section_list.toolTip().strip())
+        self.assertTrue(dialog.text.toolTip().strip())
+        for button in dialog.findChildren(QPushButton):
+            self.assertTrue(button.toolTip().strip(),
+                            button.text())
+
+    def test_no_em_dash_or_parens_s_in_index_text(self):
+        from pixel_forge.gui_shared import HOWTO_SECTIONS
+        for title, body in HOWTO_SECTIONS:
+            self.assertNotIn("\u2014", title, title)
+            self.assertNotIn("\u2014", body, title)
+            self.assertNotIn("(s)", title, title)
+            self.assertNotIn("(s)", body, title)
 
 
 class PolishTests(unittest.TestCase):

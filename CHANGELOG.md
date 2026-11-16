@@ -1,5 +1,19 @@
 # Pixel Forge changelog
 
+## 0.77 — 2026-11-15
+
+Full menu bar and a built-in How to Use index (task 86).
+The menu bar is now a real Windows-style menu: File, Edit,
+View, Tools, Help. File opens an image or a video directly
+and quits the app; View fits the preview to its pane; the
+new Tools menu runs the tools where they live (remove the
+background, snap to the pixel grid, make a normal map, make
+a sprite, pick up the text tool) and explains the command
+line self-test. Help opens the How to Use index: one window
+with a section per tab plus first steps, in plain words,
+every entry naming where the thing lives. It stays open
+while you work and reopens after close.
+
 ## 0.76 — 2026-11-15
 
 Code restructure (task 58): no behavior change, no visible

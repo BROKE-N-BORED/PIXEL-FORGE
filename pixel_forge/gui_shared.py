@@ -1700,6 +1700,272 @@ class StampTextDialog(QDialog):
         self.accept()
 
 
+HOWTO_SECTIONS = (
+    ("First steps",
+     "Pixel Forge turns pictures, videos, words, and code into "
+     "pixel art, all on your own machine. Nothing leaves the "
+     "computer and there is no account.\n"
+     "\n"
+     "Start on the Image tab: open a picture, pick a size, and "
+     "the pixel art appears next to it. Export saves it as a "
+     "PNG with a transparent background.\n"
+     "\n"
+     "The tabs along the top are the six ways in: Image, Video, "
+     "Prompt, Code, Library, Tileset. Press Ctrl+1 to Ctrl+6 "
+     "to switch between them.\n"
+     "\n"
+     "If the app ever closes unexpectedly, the next launch "
+     "offers to bring your work back. That is autosave, and it "
+     "is always on. There is nothing to turn on."),
+    ("Image",
+     "Open a picture: File menu, Open image, or the Import "
+     "button on the Image tab. PNG, JPG, and other common "
+     "pictures all work.\n"
+     "\n"
+     "Pick a size: the size controls on the Image tab, under "
+     "Pixelize. Smaller sizes read more like pixel art. A "
+     "preset sets size, palette, colors, and dithering "
+     "together.\n"
+     "\n"
+     "Pick a palette: the palette controls on the Image tab, "
+     "under Pixelize. From image takes the colors from your "
+     "picture. Custom palettes live in the palette picker.\n"
+     "\n"
+     "Fix the pixels by hand: the editor tools above the Pixel "
+     "art preview on the Image tab. Pencil paints one pixel, "
+     "Fill fills an area, Text stamps a word. Pick a color "
+     "from the strip first.\n"
+     "\n"
+     "Layers: the layer list on the Image tab stacks edits "
+     "over the pixel art. The bottom layer is the pixel art "
+     "itself, and new layers go on top.\n"
+     "\n"
+     "Remove the background: Tools menu, Remove background, "
+     "or the Background section on the Image tab. The subject "
+     "stays and the rest goes transparent. It needs the "
+     "background removal model, which the installer offers.\n"
+     "\n"
+     "Snap to the pixel grid: Tools menu, Snap to pixel grid, "
+     "or the Pixel grid section on the Image tab. It cleans up "
+     "an AI image that is meant to be pixel art.\n"
+     "\n"
+     "Normal map: Tools menu, Generate normal map, or the "
+     "Normal map section on the Image tab. It makes a lighting "
+     "map from the sprite for 2D lights.\n"
+     "\n"
+     "Make a sprite from nothing: Tools menu, Generate a "
+     "sprite, or the Generate section on the Image tab. Pick a "
+     "kind and a seed, and the same seed always makes the "
+     "same sprite.\n"
+     "\n"
+     "Undo and redo: Edit menu, or Ctrl+Z and Ctrl+Y. They "
+     "undo control changes, edits, and library moves."),
+    ("Video",
+     "Open a clip: File menu, Open video, or the Import button "
+     "on the Video tab. MP4 and other common videos work, and "
+     "animated GIFs keep their own frame times.\n"
+     "\n"
+     "Extract frames: the Extract section on the Video tab. "
+     "Choose how many frames per second, or every Nth frame, "
+     "then Extract.\n"
+     "\n"
+     "Keep or drop frames: the frame strip on the Video tab. "
+     "Click a frame to keep or drop it. Only kept frames "
+     "export.\n"
+     "\n"
+     "Watch it play: the preview on the Video tab plays the "
+     "kept frames as an animation. Change the speed with the "
+     "playback controls.\n"
+     "\n"
+     "Export: the Export section on the Video tab saves the "
+     "kept frames as numbered PNGs, or packs them into a "
+     "spritesheet with a data file a game can play. GIF export "
+     "keeps each frame's own delay."),
+    ("Prompt",
+     "Describe a sprite: the Prompt tab. Type what you want, "
+     "pick a size, and Generate makes three pictures to choose "
+     "from. Click one to keep it.\n"
+     "\n"
+     "The image engine: generation needs the image engine, "
+     "which the installer offers as an extra step. Without "
+     "it, Generate says so plainly and nothing is faked.\n"
+     "\n"
+     "Negative prompt: the Negative prompt box on the Prompt "
+     "tab lists what to avoid, like blurry or low quality.\n"
+     "\n"
+     "Keepers: the kept picture pixelizes with the same "
+     "controls as the Image tab. File menu, Export, saves it "
+     "as a PNG.\n"
+     "\n"
+     "Batches: every generation is saved as a batch in the "
+     "library, so you can go back to earlier pictures."),
+    ("Code",
+     "Import code: the Import button on the Code tab. Python, "
+     "JavaScript, TypeScript, JSON, C#, GDScript, and Lua "
+     "files work. The code is read, never run.\n"
+     "\n"
+     "What it finds: pixel maps, palettes, single colors, "
+     "JSON sprites, and image references. The Help menu, What "
+     "the Code tab detects, lists them all.\n"
+     "\n"
+     "Game assets: a 64x64 or 64x32 picture is read as a game "
+     "skin and split into its parts. Anything else pixelizes "
+     "as a texture at its own size.\n"
+     "\n"
+     "3D preview: the preview button on the Code tab shows a "
+     "skin on a 3D figure. Drag to turn it.\n"
+     "\n"
+     "Export: the export buttons on the Code tab save the "
+     "parts, the whole skin, or the texture as PNGs."),
+    ("Library",
+     "Save to the library: the Save to library button on the "
+     "Image, Prompt, Code, and Tileset tabs. Give it a name "
+     "and tags.\n"
+     "\n"
+     "Find a sprite: the search box and tag list on the "
+     "Library tab. Click a sprite to see it big.\n"
+     "\n"
+     "Load it back: the Load button on the Library tab opens "
+     "a saved sprite on the Image tab.\n"
+     "\n"
+     "Organize: the Library tab renames, retags, and deletes "
+     "sprites. Deleted sprites go to the trash folder inside "
+     "the library.\n"
+     "\n"
+     "Where it lives: Help menu, Library location, shows the "
+     "folder on disk and opens it."),
+    ("Tileset",
+     "Build a tileset: the Tileset tab. Pick one base tile "
+     "for a blob set, or two for a Wang set, and Generate "
+     "builds the whole set.\n"
+     "\n"
+     "Blob shape: the Blob shape section on the Tileset tab "
+     "picks square or rounded corners for a blob set.\n"
+     "\n"
+     "Export: File menu, Export, or the export buttons on the "
+     "Tileset tab save the set as a PNG, or with the files a "
+     "game editor needs."),
+)
+
+
+class HowToUseDialog(QDialog):
+    """The built-in How to Use index (task 86, U22): one window,
+    a section per tab plus first steps, in plain words. Every
+    entry names where the thing lives, so no manual is needed.
+
+    Modeless: it stays open while the user works, and the
+    window keeps one instance and re-shows it after close.
+    The section list starts with nothing selected — the full
+    text is visible from the top, and picking a section jumps
+    to it. Geometry is remembered like the main window (U5)
+    when settings are passed; with no settings it opens at
+    its default size and remembers nothing.
+    """
+
+    def __init__(self, parent, settings=None):
+        super().__init__(parent)
+        self._settings = settings
+        self.setWindowTitle("How to Use Pixel Forge")
+        layout = QVBoxLayout(self)
+
+        split = QSplitter(self)
+        self.section_list = QListWidget()
+        self.section_list.setToolTip(
+            "Pick a section to jump to it")
+        self.section_list.currentRowChanged.connect(
+            self._on_section_picked)
+        split.addWidget(self.section_list)
+        self.text = QTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setToolTip(
+            "How to use Pixel Forge, section by section")
+        split.addWidget(self.text)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 3)
+        layout.addWidget(split)
+
+        close_btn = QPushButton("Close")
+        close_btn.setToolTip("Close this window")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+
+        # One document, all sections in order. The block number
+        # of each heading is recorded while building it, so a
+        # section pick jumps by block number — a text search
+        # would land on the first mention of a word like
+        # "Image" in an earlier section instead of its heading,
+        # and visual line numbers shift with word wrap.
+        lines = []
+        self._section_blocks = []
+        for title, body in HOWTO_SECTIONS:
+            self._section_blocks.append(len(lines))
+            lines.append(title)
+            lines.append("-" * len(title))
+            lines.append("")
+            lines.extend(body.split("\n"))
+            lines.append("")
+            lines.append("")
+            self.section_list.addItem(title)
+        self.text.setPlainText("\n".join(lines))
+        # The text takes the opening focus, not the list: a list
+        # that takes focus with no current item picks its first
+        # row, which would select a section by default.
+        self.text.setFocus()
+        self._restore_geometry()
+
+    def _on_section_picked(self, row):
+        """Jump the text to the picked section's heading, at
+        the top of the pane — ensureCursorVisible alone would
+        leave the heading at the bottom edge, showing the tail
+        of the previous section instead."""
+        if row < 0 or row >= len(self._section_blocks):
+            return
+        block = self.text.document().findBlockByNumber(
+            self._section_blocks[row])
+        if not block.isValid():
+            return
+        cursor = self.text.textCursor()
+        cursor.setPosition(block.position())
+        self.text.setTextCursor(cursor)
+        rect = self.text.document().documentLayout().blockBoundingRect(
+            block)
+        self.text.verticalScrollBar().setValue(int(rect.top()))
+
+    def _restore_geometry(self):
+        if self._settings is None:
+            self.resize(640, 480)
+            return
+        values = [self._settings.value("howto/%s" % key,
+                                       type=int)
+                  for key in ("x", "y", "width", "height")]
+        if any(value is None for value in values):
+            self.resize(640, 480)
+            return
+        x, y, width, height = values
+        if width < 1 or height < 1:
+            self.resize(640, 480)
+            return
+        screen = self.screen() or QApplication.primaryScreen()
+        rect = QRect(x, y, width, height)
+        if screen is not None:
+            rect = clamp_geometry(rect, screen.availableGeometry())
+        self.setGeometry(rect)
+
+    def _save_geometry(self):
+        if self._settings is None:
+            return
+        rect = self.geometry()
+        self._settings.setValue("howto/x", rect.x())
+        self._settings.setValue("howto/y", rect.y())
+        self._settings.setValue("howto/width", rect.width())
+        self._settings.setValue("howto/height", rect.height())
+        self._settings.sync()
+
+    def closeEvent(self, event):
+        self._save_geometry()
+        super().closeEvent(event)
+
+
 class SaveToLibraryDialog(QDialog):
     """Ask for a name and tags when saving a sprite to the
     library. Save stays disabled until a name is typed."""

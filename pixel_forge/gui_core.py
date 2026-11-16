@@ -14,7 +14,7 @@ from .gui_code import CodeTabMixin
 from .gui_image import ImageTabMixin
 from .gui_library import LibraryTabMixin
 from .gui_prompt import PromptTabMixin
-from .gui_shared import (AUTOSAVE_DEBOUNCE_MS, PaletteEditorDialog, SIZE_PRESETS, TEXTURE_DEBOUNCE_MS, THEMES, UpdateCheckWorker, VIDEO_DEBOUNCE_MS, _ControlChangeCommand, _PresetDeleteCommand, clamp_geometry, gui_module)
+from .gui_shared import (AUTOSAVE_DEBOUNCE_MS, HowToUseDialog, PaletteEditorDialog, SIZE_PRESETS, TEXTURE_DEBOUNCE_MS, THEMES, UpdateCheckWorker, VIDEO_DEBOUNCE_MS, _ControlChangeCommand, _PresetDeleteCommand, clamp_geometry, gui_module)
 from .gui_tileset import TilesetTabMixin
 from .gui_video import VideoTabMixin
 from .imagegen import load_batch
@@ -146,6 +146,10 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         # keeps it to one run per launch.
         self.update_worker = None
         self._update_check_started = False
+        # How to Use index (task 86): the one dialog instance,
+        # or None until first opened. It is kept and re-shown
+        # after close, never recreated while it exists.
+        self._howto_dialog = None
         # Procedural generation (task 44): the kind and seed
         # that made the loaded sprite, or None when the sprite
         # came from a file or was changed by another tool. The
@@ -363,8 +367,9 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
     # ================================================ menus, shortcuts, help
 
     def _build_menu_bar(self):
-        """File + Edit + View + Help menus and the keyboard
-        shortcuts (task 21; Edit is task 30; View is task 67).
+        """File + Edit + View + Tools + Help menus and the
+        keyboard shortcuts (task 21; Edit is task 30; View is
+        task 67; Tools and the full bar are task 86).
 
         Import/Export are QActions with their shortcuts, so the
         menu shows the keys and the actions work from anywhere in
@@ -373,6 +378,8 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         context, so they do not fire while a modal dialog is open:
         the dialog is the active window then, not this one (pinned
         by a test — do not \"fix\" it by switching contexts).
+        Every menu item calls a real action — there are no dead
+        entries and no placeholders.
         """
         file_menu = self.menuBar().addMenu("File")
         import_action = QAction("Import", self)
@@ -385,17 +392,40 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         file_menu.addAction(export_action)
         self._import_action = import_action
         self._export_action = export_action
+        # Open image / Open video (task 86): the tab-aware
+        # Import changes meaning by tab, so the two common
+        # opens get their own plain entries — each goes to its
+        # tab and opens that tab's file dialog.
+        file_menu.addSeparator()
+        open_image_action = QAction("Open image...", self)
+        open_image_action.setToolTip(
+            "Open a picture on the Image tab")
+        open_image_action.triggered.connect(self._on_open_image)
+        file_menu.addAction(open_image_action)
+        open_video_action = QAction("Open video...", self)
+        open_video_action.setToolTip(
+            "Open a video on the Video tab")
+        open_video_action.triggered.connect(self._on_open_video)
+        file_menu.addAction(open_video_action)
         # Recent files (task 29): the submenu lists what was
         # loaded before, most recent first. It rebuilds when it
         # opens (aboutToShow) and whenever the session changes,
         # so it is never stale — a disabled menu never emits
         # aboutToShow, so the enabled state cannot be fixed only
         # at open time.
+        file_menu.addSeparator()
         recent_menu = file_menu.addMenu("Recent files")
         recent_menu.aboutToShow.connect(self._refresh_recent_menu)
         recent_menu.menuAction().setToolTip(
             "Open a file you loaded before")
         self._recent_menu = recent_menu
+        file_menu.addSeparator()
+        quit_action = QAction("Quit", self)
+        quit_action.setShortcut(QKeySequence("Ctrl+Q"))
+        quit_action.setToolTip("Close Pixel Forge")
+        quit_action.triggered.connect(self.close)
+        file_menu.addAction(quit_action)
+        self._quit_action = quit_action
 
         # Undo/Redo (task 30): the action text names what the
         # step will do ("Undo Delete knight.png") and is rebuilt
@@ -428,8 +458,67 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         light_action.triggered.connect(self._on_toggle_theme)
         view_menu.addAction(light_action)
         self._light_theme_action = light_action
+        # Fit preview (task 86): the Fit button each preview
+        # pane already has, as one tab-aware menu entry — it
+        # fits the current tab's preview, and does nothing on
+        # the tabs that have no preview zoom.
+        view_menu.addSeparator()
+        fit_action = QAction("Fit preview to window", self)
+        fit_action.setToolTip(
+            "Zoom the current preview so it fits its pane")
+        fit_action.triggered.connect(self._on_fit_preview)
+        view_menu.addAction(fit_action)
+        self._fit_preview_action = fit_action
+
+        # Tools (task 86): the tools where they live. Each one
+        # goes to its tab and runs the real button when the
+        # button can run — otherwise it goes to the tab and
+        # the status bar says plainly what is needed first.
+        # Nothing here is a placeholder.
+        tools_menu = self.menuBar().addMenu("Tools")
+        bgremove_action = QAction("Remove background", self)
+        bgremove_action.setToolTip(
+            "Remove the background from the loaded image")
+        bgremove_action.triggered.connect(self._on_tool_bgremove)
+        tools_menu.addAction(bgremove_action)
+        gridsnap_action = QAction("Snap to pixel grid", self)
+        gridsnap_action.setToolTip(
+            "Clean up an AI image that is meant to be pixel art")
+        gridsnap_action.triggered.connect(self._on_tool_gridsnap)
+        tools_menu.addAction(gridsnap_action)
+        normalmap_action = QAction("Generate normal map", self)
+        normalmap_action.setToolTip(
+            "Make a normal map from the sprite for 2D lighting")
+        normalmap_action.triggered.connect(self._on_tool_normalmap)
+        tools_menu.addAction(normalmap_action)
+        tools_menu.addSeparator()
+        procedural_action = QAction("Generate a sprite", self)
+        procedural_action.setToolTip(
+            "Make a sprite from a kind and a seed")
+        procedural_action.triggered.connect(
+            self._on_tool_procedural)
+        tools_menu.addAction(procedural_action)
+        text_action = QAction("Text tool", self)
+        text_action.setToolTip(
+            "Stamp a word or number on the pixel art")
+        text_action.triggered.connect(self._on_tool_text)
+        tools_menu.addAction(text_action)
+        tools_menu.addSeparator()
+        selftest_action = QAction("Run self-test...", self)
+        selftest_action.setToolTip(
+            "How to run the live generation self-test")
+        selftest_action.triggered.connect(self._on_tool_selftest)
+        tools_menu.addAction(selftest_action)
+        self._tools_menu = tools_menu
 
         help_menu = self.menuBar().addMenu("Help")
+        howto_action = QAction("How to Use", self)
+        howto_action.setShortcut(QKeySequence("F1"))
+        howto_action.setToolTip(
+            "Open the built-in How to Use index")
+        howto_action.triggered.connect(self._show_how_to_use)
+        help_menu.addAction(howto_action)
+        self._howto_action = howto_action
         about_action = QAction("About Pixel Forge", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
@@ -695,6 +784,126 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
             self._on_library_export()
         elif index == 5:
             self._on_tileset_export_png()
+
+
+    def _on_open_image(self):
+        """File menu, Open image: go to the Image tab and open
+        its file dialog."""
+        self.tabs.setCurrentIndex(0)
+        self._on_import()
+
+    def _on_open_video(self):
+        """File menu, Open video: go to the Video tab and open
+        its file dialog."""
+        self.tabs.setCurrentIndex(1)
+        self._on_video_import()
+
+    def _on_fit_preview(self):
+        """View menu, Fit preview to window: the current tab's
+        Fit, the same one its Fit button runs. Library and
+        Tileset have no preview zoom, so they do nothing."""
+        index = self.tabs.currentIndex()
+        if index == 0:
+            self._on_fit_image_zoom()
+        elif index == 1:
+            self._on_fit_video_zoom()
+        elif index == 2:
+            self._on_fit_prompt_zoom()
+        elif index == 3:
+            self._on_fit_code_zoom()
+
+        # Index 4 (Library) and 5 (Tileset): no zoom — do nothing.
+
+    def _on_tool_bgremove(self):
+        """Tools menu, Remove background: go to the Image tab
+        and run the real button when it can run — otherwise the
+        status bar says what is needed first."""
+        self.tabs.setCurrentIndex(0)
+        if self.bgremove_btn.isEnabled():
+            self.bgremove_btn.click()
+        else:
+            self.statusBar().showMessage(
+                "Load an image first, then remove its background")
+
+    def _on_tool_gridsnap(self):
+        """Tools menu, Snap to pixel grid: same pattern as
+        Remove background."""
+        self.tabs.setCurrentIndex(0)
+        if self.gridsnap_btn.isEnabled():
+            self.gridsnap_btn.click()
+        else:
+            self.statusBar().showMessage(
+                "Load an image first, then snap it to its pixel "
+                "grid")
+
+    def _on_tool_normalmap(self):
+        """Tools menu, Generate normal map: the map is made
+        from the pixelized result, so a result is what is
+        needed first."""
+        self.tabs.setCurrentIndex(0)
+        if self.normalmap_btn.isEnabled():
+            self.normalmap_btn.click()
+        else:
+            self.statusBar().showMessage(
+                "Pixelize an image first, then make a normal map "
+                "from it")
+
+    def _on_tool_procedural(self):
+        """Tools menu, Generate a sprite: go to the Image tab
+        and put the cursor in the kind picker — a kind has to
+        be picked before Generate can run."""
+        self.tabs.setCurrentIndex(0)
+        self.procedural_kind_combo.setFocus()
+        self.statusBar().showMessage(
+            "Pick a kind, then press Generate")
+
+    def _on_tool_text(self):
+        """Tools menu, Text tool: go to the Image tab and pick
+        up the text tool — the same button the editor toolbar
+        has, so the hint says to click where the text goes.
+        The tools work only on a loaded result, so with none
+        the status bar says what is needed first."""
+        self.tabs.setCurrentIndex(0)
+        button = self.editor_tool_buttons["text"]
+        if button.isEnabled():
+            button.click()
+        else:
+            self.statusBar().showMessage(
+                "Pixelize an image first, then stamp text on it")
+
+    def _selftest_text(self):
+        """What the self-test is and how to run it — it is a
+        command line check (about 7 minutes, it needs the
+        image engine), so the menu entry explains it instead
+        of pretending a button can run it."""
+        return (
+            "The self-test checks that image generation works "
+            "on this machine: it generates one picture of a "
+            "wooden stool, pixelizes it, and reports the timing "
+            "and the result. It takes about 7 minutes and needs "
+            "the image engine installed.\n"
+            "\n"
+            "Run it from a terminal:\n"
+            "\n"
+            "pixel-forge --self-test\n"
+            "\n"
+            "The run is saved under "
+            "~/.local/share/pixel-forge/self-test/.")
+
+    def _on_tool_selftest(self):
+        QMessageBox.information(self, "Run self-test",
+                                self._selftest_text())
+
+    def _show_how_to_use(self):
+        """Help menu, How to Use: show the one index window —
+        created on first use, re-shown after close, raised so
+        it never hides behind the main window."""
+        if self._howto_dialog is None:
+            self._howto_dialog = HowToUseDialog(
+                self, self._settings)
+        self._howto_dialog.show()
+        self._howto_dialog.raise_()
+        self._howto_dialog.activateWindow()
 
 
     def _about_text(self):
