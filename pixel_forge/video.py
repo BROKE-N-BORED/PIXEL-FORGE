@@ -529,7 +529,7 @@ def write_gif(images, durations, out_path, loop=0):
             tail = lines[-3:]
             detail = ("\n" + "\n".join(tail)) if tail else ""
             raise PixelForgeError(
-                "ffmpeg could not write %s" % (out.name, detail))
+                "ffmpeg could not write %s%s" % (out.name, detail))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return str(out)

@@ -1,5 +1,23 @@
 # Pixel Forge changelog
 
+## 0.76 — 2026-11-15
+
+Code restructure (task 58): no behavior change, no visible
+change. The window code was one file of over 13,000 lines;
+it is now split by tab, one module per tab plus a shared
+module for the dialogs and workers and a core module for the
+window itself. The old module still exists as a thin shim,
+so everything that imported from it keeps working. The
+per-tab handlers that were written out three times (size
+preset, custom size, control changed, zoom) are now one
+shared implementation each, with the tab handlers passing
+their tab along. The export handlers stay per-tab: their
+work genuinely differs. Fixed during verification: when
+ffmpeg failed while writing a GIF, the error message itself
+crashed (one placeholder for two values), hiding the real
+error behind a TypeError. It now shows the last three lines
+of ffmpeg's error, like the frame-extraction error does.
+
 ## 0.75 — 2026-11-15
 
 Autosave (task 55): crash recovery for in-progress work. The

@@ -1,8 +1,9 @@
 """Polish pass tests (task 22) — no Qt needed.
 
 The contrast ratio is computed from the stylesheet colors parsed
-out of gui.py's source, and the "(s)" ban is checked by tokenizing
-every module in the package. Both run on bare python.
+out of gui_shared.py's source (the stylesheets moved there when
+gui.py was split by tab in task 58), and the "(s)" ban is checked
+by tokenizing every module in the package. Both run on bare python.
 """
 import io
 import os
@@ -14,7 +15,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
-GUI_PATH = os.path.join(ROOT, "pixel_forge", "gui.py")
+GUI_SHARED_PATH = os.path.join(ROOT, "pixel_forge", "gui_shared.py")
 PACKAGE = os.path.join(ROOT, "pixel_forge")
 
 
@@ -36,12 +37,12 @@ def contrast_ratio(fg, bg):
 
 
 def _stylesheet(name="DARK_STYLESHEET"):
-    """A stylesheet, parsed out of gui.py's source."""
-    with open(GUI_PATH, encoding="utf-8") as handle:
+    """A stylesheet, parsed out of gui_shared.py's source."""
+    with open(GUI_SHARED_PATH, encoding="utf-8") as handle:
         source = handle.read()
     match = re.search(r'%s = """(.*?)"""' % name,
                       source, re.DOTALL)
-    assert match is not None, "%s not found in gui.py" % name
+    assert match is not None, "%s not found in gui_shared.py" % name
     return match.group(1)
 
 

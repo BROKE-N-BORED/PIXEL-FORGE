@@ -630,6 +630,26 @@ class GifExportTests(unittest.TestCase):
         total = times[-1][0] + times[-1][1]
         self.assertAlmostEqual(total, 0.875, delta=0.03)
 
+    def test_gif_write_failure_shows_last_three_lines(self):
+        # The write_gif error path once formatted one %s with two
+        # values, so a failing ffmpeg raised TypeError instead of
+        # the readable error (found by Arlo's v0.76 verification
+        # when ffmpeg failed under load).
+        frames = self._frames([0xFFFF0000, 0xFF00FF00])
+        gif = os.path.join(self.tmp, "fail.gif")
+        proc = mock.Mock(
+            returncode=1, stdout="",
+            stderr="line one\nline two\nline three\nline four\n"
+                   "line five\n")
+        with mock.patch.object(video_mod.subprocess, "run",
+                               return_value=proc):
+            with self.assertRaises(PixelForgeError) as ctx:
+                video_mod.write_gif(frames, [125, 125], gif)
+        self.assertEqual(
+            str(ctx.exception),
+            "ffmpeg could not write fail.gif\n"
+            "line three\nline four\nline five")
+
     def test_gif_loops_forever(self):
         frames = self._frames([0xFFFF0000, 0xFF00FF00])
         gif = os.path.join(self.tmp, "loop.gif")
