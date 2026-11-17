@@ -11501,5 +11501,191 @@ class FieldExplanationTests(unittest.TestCase):
                     key)
 
 
+class GridTests(unittest.TestCase):
+    """Task 88 (v0.81) — the pixel-grid motif: a stylesheet
+    background-image on the lists, the scroll viewports, and
+    the tab columns. The grid is a rule, so it survives
+    resize, hide/show, and theme switches with zero
+    re-application — these tests prove that on the real
+    window, by counting grid-colored pixels in window grabs.
+    """
+
+    DARK_GRID = (0x2E, 0x2E, 0x36)
+    LIGHT_GRID = (0xD8, 0xD8, 0xD2)
+
+    @classmethod
+    def setUpClass(cls):
+        # The tiles are PNGs, so they ship in the release zip
+        # and not in the git push — a fresh clone has no tiles,
+        # and the whole class skips there instead of failing
+        # (same pattern as test_installer's icon skip).
+        from pixel_forge.gui_shared import (_GRID_TILE_DARK,
+                                            _GRID_TILE_LIGHT)
+        if not _GRID_TILE_DARK or not _GRID_TILE_LIGHT:
+            raise unittest.SkipTest(
+                "grid tiles not present (tiles ship in the "
+                "release zip, not the git push)")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        from pixel_forge.gui import DARK_STYLESHEET, MainWindow
+        self.app.setStyleSheet(DARK_STYLESHEET)
+        self.lib_dir = tempfile.mkdtemp()
+        self.win = MainWindow(library_dir=self.lib_dir)
+        self.win.show()
+        self._settle()
+
+    def tearDown(self):
+        from pixel_forge.gui import DARK_STYLESHEET
+        self.win.close()
+        self.win.deleteLater()
+        self.app.setStyleSheet(DARK_STYLESHEET)
+        self.app.processEvents()
+        shutil.rmtree(self.lib_dir, ignore_errors=True)
+
+    def _settle(self):
+        from PySide6.QtTest import QTest
+        QTest.qWait(200)
+        self.app.processEvents()
+
+    def _grid_pixels(self, widget, color):
+        """Grid-colored pixels in a widget's region of the
+        window grab (sampled every 2 px). The widget must be
+        visible — grab the window, never the viewport
+        directly: a viewport grab under offscreen can come
+        back blank (proven in the v0.81 probes)."""
+        from PySide6.QtCore import QPoint
+        top_left = widget.mapTo(self.win, QPoint(0, 0))
+        img = self.win.grab().toImage()
+        # A scroll column is taller than the window — clamp
+        # the sample region to the grab, or pixelColor warns
+        # for every out-of-range coordinate.
+        x0, y0 = top_left.x() + 3, top_left.y() + 3
+        x1 = min(top_left.x() + widget.width() - 3, img.width())
+        y1 = min(top_left.y() + widget.height() - 3, img.height())
+        found = 0
+        for y in range(y0, y1, 2):
+            for x in range(x0, x1, 2):
+                pixel = img.pixelColor(x, y)
+                if (pixel.red(), pixel.green(),
+                        pixel.blue()) == color:
+                    found += 1
+        return found
+
+    def _visible_column(self):
+        """The current tab's column widget — the only one
+        visible. Every tab column is named "column" by the
+        shared _scrollable_column helper."""
+        visible = [child for child in
+                   self.win.findChildren(QWidget, "column")
+                   if child.isVisibleTo(self.win)]
+        self.assertEqual(len(visible), 1,
+                         "%d columns visible, expected 1"
+                         % len(visible))
+        return visible[0]
+
+    def _seed_library(self):
+        """One sprite in the library, so the Library stack
+        shows the list instead of the "No sprites yet" label
+        — an empty library hides the list entirely, and the
+        grid with it."""
+        self.win.library.add_image(
+            make_solid_image(32, 32, 255, 0, 0), "red")
+        self.win._refresh_library()
+        self._settle()
+
+    def test_grid_renders_on_library_list(self):
+        self.win.tabs.setCurrentIndex(4)
+        self._seed_library()
+        found = self._grid_pixels(
+            self.win.library_list.viewport(), self.DARK_GRID)
+        self.assertGreaterEqual(
+            found, 200, "library list shows %d grid pixels" % found)
+
+    def test_grid_renders_on_image_column(self):
+        self.win.tabs.setCurrentIndex(0)
+        self._settle()
+        found = self._grid_pixels(
+            self._visible_column(), self.DARK_GRID)
+        self.assertGreaterEqual(
+            found, 50, "image column shows %d grid pixels" % found)
+
+    def test_grid_shows_through_video_sections(self):
+        # The Video tab's sections are transparent, so the
+        # column grid shows through as one continuous grid —
+        # it must be visible INSIDE an expanded section body,
+        # not just in the gaps between sections.
+        self.win.tabs.setCurrentIndex(1)
+        self._settle()
+        frames = self.win.video_sections["frames"]
+        self.assertTrue(frames.isExpanded())
+        found = self._grid_pixels(frames._body, self.DARK_GRID)
+        self.assertGreaterEqual(
+            found, 30,
+            "frames section body shows %d grid pixels" % found)
+
+    def test_grid_survives_resize_hide_show_and_theme_switch(self):
+        # The grid is a stylesheet rule, not applied state:
+        # resize, hide/show, and a theme switch must not lose
+        # it, and the light theme must show the LIGHT tile.
+        self.win.tabs.setCurrentIndex(4)
+        self._seed_library()
+        viewport = self.win.library_list.viewport()
+        found = self._grid_pixels(viewport, self.DARK_GRID)
+        self.assertGreaterEqual(
+            found, 200, "no dark grid at start: %d" % found)
+        self.win.resize(900, 560)
+        self._settle()
+        found = self._grid_pixels(viewport, self.DARK_GRID)
+        self.assertGreaterEqual(
+            found, 200, "grid lost on resize: %d" % found)
+        self.win.hide()
+        self._settle()
+        self.win.show()
+        self._settle()
+        found = self._grid_pixels(viewport, self.DARK_GRID)
+        self.assertGreaterEqual(
+            found, 200, "grid lost on hide/show: %d" % found)
+        self.win._light_theme_action.trigger()
+        self._settle()
+        found = self._grid_pixels(viewport, self.LIGHT_GRID)
+        self.assertGreaterEqual(
+            found, 200, "no light grid after theme switch: %d"
+            % found)
+        self.win._light_theme_action.trigger()
+        self._settle()
+        found = self._grid_pixels(viewport, self.DARK_GRID)
+        self.assertGreaterEqual(
+            found, 200, "no dark grid after switching back: %d"
+            % found)
+
+    def test_grid_tile_urls_are_absolute_and_exist(self):
+        # The v0.79 failure: a relative tile path never
+        # resolves (Qt resolves url() against the working
+        # directory). The evaluated stylesheets must carry
+        # absolute paths to files that exist — no placeholder
+        # left behind.
+        import re
+        from pixel_forge.gui import (DARK_STYLESHEET,
+                                     LIGHT_STYLESHEET)
+        for name, sheet in (("dark", DARK_STYLESHEET),
+                            ("light", LIGHT_STYLESHEET)):
+            self.assertNotIn("__GRID_TILE_", sheet,
+                             "%s stylesheet still has the tile "
+                             "placeholder" % name)
+            urls = re.findall(r'url\("([^"]+)"\)', sheet)
+            self.assertEqual(len(urls), 3,
+                             "%s stylesheet has %d tile urls, "
+                             "expected 3" % (name, len(urls)))
+            for url in urls:
+                self.assertTrue(os.path.isabs(url),
+                                "%s tile url is relative: %s"
+                                % (name, url))
+                self.assertTrue(os.path.isfile(url),
+                                "%s tile url is missing: %s"
+                                % (name, url))
+
+
 if __name__ == "__main__":
     unittest.main()

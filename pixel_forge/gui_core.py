@@ -1092,6 +1092,12 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         when no scrollbar is showing. Horizontal scrolling is
         off: the column never scrolls sideways.
         """
+        # Task 88 (v0.81): the column carries the pixel grid
+        # (QWidget#column in the theme stylesheets). The grid
+        # lives on the content widget, not the scroll area —
+        # the content widget covers the viewport entirely, so
+        # a grid on the viewport would be hidden behind it.
+        controls.setObjectName("column")
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(

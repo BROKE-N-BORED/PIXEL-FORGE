@@ -160,16 +160,42 @@ AUTOSAVE_DEBOUNCE_MS = 2000  # ms of no changes before the
 # painting (entry 007 Liquid Glass stays rejected for frame
 # cost). Both themes style the same selector set (pinned in
 # tests/test_polish.py), and every text color still clears
-# the task-22 bar. A pixel-grid motif behind the list and
-# scroll surfaces was tried and dropped: a stylesheet
-# background-image never paints on a scroll area's viewport
-# (the viewport covers the widget background, and Qt
-# propagates only background-color there), and a texture
-# brush in the viewport palette is wiped by Qt's re-polish
-# on show and resize — unpredictably, some surfaces keeping
-# it and others losing it, so the grid would come and go as
-# the window is used. Both failures were proven by
-# experiment; do not retry them without a new mechanism.
+# the task-22 bar. The pixel-grid motif (v0.81, the rest of
+# task 88) is a stylesheet background-image on the lists,
+# the scroll-area viewports, and the tab columns — the
+# documented Qt mechanism, proven by experiment (see
+# pf-verify/v81/grid-research.md). The v0.79 attempt failed
+# for two lesser reasons, not a Qt limitation: its tile path
+# was relative, so the stylesheet engine could not load the
+# pixmap ("Could not create pixmap" — Qt resolves url()
+# against the working directory), and its scroll-area rule
+# painted a viewport the tab columns' content widgets cover.
+# The tile path below is therefore ABSOLUTE, and the columns
+# carry the grid on the content widget itself (#column).
+# The other two v0.79 dead ends stay dead for real reasons:
+# a texture brush in the viewport palette is overwritten by
+# QStyleSheetStyle::polish on every re-polish (first show,
+# theme switch), and a stylesheet set directly on a viewport
+# is refused (viewports are unstylable — their rules come
+# from the container). Do not retry either.
+#
+# The tiles live in icons/ next to the app icons and ship in
+# the release zip (like the icons, they are not in the git
+# push — PNGs are excluded from the manifest). When a tile
+# is missing (a fresh clone has no icons/), the url() is left
+# empty and the grid simply does not render — no warning, no
+# crash, everything else works.
+_ICONS_DIR = Path(__file__).resolve().parent.parent / "icons"
+
+
+def _grid_tile(name):
+    """The absolute tile path for the stylesheet, or ""."""
+    path = _ICONS_DIR / name
+    return str(path) if path.is_file() else ""
+
+
+_GRID_TILE_DARK = _grid_tile("grid-tile-dark.png")
+_GRID_TILE_LIGHT = _grid_tile("grid-tile-light.png")
 DARK_STYLESHEET = """
 QMainWindow, QWidget { background-color: #232329; color: #e8e6e3; }
 QLabel { background-color: transparent; }
@@ -198,9 +224,12 @@ QSlider::groove:horizontal { height: 6px; background: #3a3a42;
     border-radius: 0px; }
 QSlider::handle:horizontal { width: 14px; height: 14px; margin: -4px 0;
     background: #e07020; border-radius: 0px; }
-QScrollArea { background-color: #1a1a1f; border: 1px solid #3a3a42; }
-QListWidget { background-color: #1a1a1f; border: 1px solid #3a3a42; }
+QScrollArea { background-color: #1a1a1f; background-image: url("__GRID_TILE_DARK__"); border: 1px solid #3a3a42; }
+QListWidget { background-color: #1a1a1f; background-image: url("__GRID_TILE_DARK__"); border: 1px solid #3a3a42; }
 QListWidget::item:selected { background-color: #3a3a42; }
+QWidget#column { background-color: #232329; background-image: url("__GRID_TILE_DARK__"); }
+QWidget#section { background-color: transparent; }
+QWidget#sectionBody { background-color: transparent; }
 QSplitter::handle { background-color: #3a3a42; }
 QStatusBar { background-color: #1a1a1f; color: #b8b5b0; }
 QTabWidget::pane { border: 1px solid #3a3a42; }
@@ -224,7 +253,7 @@ QProgressBar { background-color: #2e2e35; border: 1px solid #55555e;
     color: #e8e6e3; }
 QProgressBar::chunk { background-color: #8a4513; }
 QTextEdit { background-color: #2e2e35; border: 1px solid #55555e; }
-"""
+""".replace("__GRID_TILE_DARK__", _GRID_TILE_DARK)
 
 
 # Light theme (task 67): the same rules as the dark sheet, with
@@ -237,6 +266,10 @@ QTextEdit { background-color: #2e2e35; border: 1px solid #55555e; }
 # input text 15.63:1, menu text 15.63:1, tab text 12.03:1,
 # tooltip text 15.63:1, progress text on its chunk 5.04:1,
 # list text 15.63:1, explanation text 6.58:1 (dark 7.65:1).
+# Text on the grid lines themselves (v0.81): light list text
+# 10.92:1, heading 4.99:1, explanation 5.15:1; dark list text
+# 10.81:1, heading 7.47:1, explanation 6.59:1 — the grid can
+# never push a pair under the bar.
 # All pinned in tests/test_polish.py. The
 # light accent is #8a4513 throughout (headings, slider, checked
 # borders, selected tab bar, ticked checkboxes); the progress
@@ -270,9 +303,12 @@ QSlider::groove:horizontal { height: 6px; background: #d4d4cf;
     border-radius: 0px; }
 QSlider::handle:horizontal { width: 14px; height: 14px; margin: -4px 0;
     background: #8a4513; border-radius: 0px; }
-QScrollArea { background-color: #e9e9e6; border: 1px solid #d4d4cf; }
-QListWidget { background-color: #ffffff; border: 1px solid #d4d4cf; }
+QScrollArea { background-color: #e9e9e6; background-image: url("__GRID_TILE_LIGHT__"); border: 1px solid #d4d4cf; }
+QListWidget { background-color: #ffffff; background-image: url("__GRID_TILE_LIGHT__"); border: 1px solid #d4d4cf; }
 QListWidget::item:selected { background-color: #d4d4cf; }
+QWidget#column { background-color: #f2f2f0; background-image: url("__GRID_TILE_LIGHT__"); }
+QWidget#section { background-color: transparent; }
+QWidget#sectionBody { background-color: transparent; }
 QSplitter::handle { background-color: #d4d4cf; }
 QStatusBar { background-color: #e9e9e6; color: #55555e; }
 QTabWidget::pane { border: 1px solid #d4d4cf; }
@@ -296,7 +332,7 @@ QProgressBar { background-color: #ffffff; border: 1px solid #b8b8b2;
     color: #232329; }
 QProgressBar::chunk { background-color: #d97a2e; }
 QTextEdit { background-color: #ffffff; border: 1px solid #b8b8b2; }
-"""
+""".replace("__GRID_TILE_LIGHT__", _GRID_TILE_LIGHT)
 
 
 THEMES = {"dark": DARK_STYLESHEET, "light": LIGHT_STYLESHEET}
@@ -1797,6 +1833,12 @@ class CollapsibleSection(QWidget):
     def __init__(self, title, parent=None):
         super().__init__(parent)
         self._title = title
+        # Task 88 (v0.81): the section and its body are
+        # transparent (QWidget#section / #sectionBody in the
+        # theme stylesheets), so the tab column's pixel grid
+        # shows through as one continuous grid instead of
+        # stopping at every section edge.
+        self.setObjectName("section")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -1807,6 +1849,7 @@ class CollapsibleSection(QWidget):
         self._header.clicked.connect(self._on_header_clicked)
         layout.addWidget(self._header)
         self._body = QWidget()
+        self._body.setObjectName("sectionBody")
         self._body_layout = QVBoxLayout(self._body)
         self._body_layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._body)

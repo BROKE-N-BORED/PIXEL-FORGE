@@ -421,5 +421,154 @@ class SourceLabelTests(unittest.TestCase):
                           "no display label for palette %r" % key)
 
 
+class GridTileTests(unittest.TestCase):
+    """Task 88 (v0.81) — the pixel-grid tiles: real files in
+    icons/, decoded with the project's own stdlib PNG reader,
+    so the test needs no Qt and no image library."""
+
+    TILES = {"DARK_STYLESHEET": "grid-tile-dark.png",
+             "LIGHT_STYLESHEET": "grid-tile-light.png"}
+
+    def _tile_path(self, name):
+        # ROOT is tests/.. — normalize, so the path compares
+        # equal to the normalized paths build_zip collects.
+        return os.path.normpath(os.path.join(
+            ROOT, "icons", self.TILES[name]))
+
+    def _tile(self, name):
+        from pixel_forge.pngio import decode_png
+        with open(self._tile_path(name), "rb") as handle:
+            return decode_png(handle.read())
+
+    def _require_tiles(self):
+        # The tiles are PNGs, so they ship in the release zip
+        # and not in the git push — a fresh clone has no tiles,
+        # and the tile-dependent tests skip there instead of
+        # failing (same pattern as test_installer's icon skip).
+        for name in self.TILES:
+            path = self._tile_path(name)
+            if not os.path.isfile(path):
+                self.skipTest(
+                    "%s not present (tiles ship in the release "
+                    "zip, not the git push)" % self.TILES[name])
+
+    @staticmethod
+    def _rgb(pixel):
+        """A decoded pixel (packed AARRGGBB int) as #rrggbb."""
+        return "#%02x%02x%02x" % ((pixel >> 16) & 0xFF,
+                                  (pixel >> 8) & 0xFF,
+                                  pixel & 0xFF)
+
+    def test_tiles_exist_and_are_16x16_transparent_grids(self):
+        # One tile per theme: 16x16, transparent except the
+        # 1 px grid lines along the right column and bottom
+        # row, so tiling forms a continuous grid.
+        self._require_tiles()
+        for name in self.TILES:
+            tile = self._tile(name)
+            self.assertEqual(tile.width(), 16,
+                             "%s is not 16 px wide" % name)
+            self.assertEqual(tile.height(), 16,
+                             "%s is not 16 px tall" % name)
+            self.assertEqual(tile.pixel(0, 0) >> 24, 0,
+                             "%s has an opaque corner" % name)
+            self.assertEqual(tile.pixel(15, 0) >> 24, 0xFF,
+                             "%s has no vertical grid line"
+                             % name)
+            self.assertEqual(tile.pixel(0, 15) >> 24, 0xFF,
+                             "%s has no horizontal grid line"
+                             % name)
+
+    def test_text_on_grid_lines_meets_wcag_aa(self):
+        # The grid lines pass behind text, so every text color
+        # that can sit on a grid surface must clear the task-22
+        # bar against the LINE color itself, not just the flat
+        # background. The line color is read out of the tile.
+        self._require_tiles()
+        for name in self.TILES:
+            sheet = _stylesheet(name)
+            line = self._rgb(self._tile(name).pixel(15, 0))
+            main = re.search(
+                r'QMainWindow, QWidget \{ background-color: '
+                r'(#[0-9a-f]{6}); color: (#[0-9a-f]{6});',
+                sheet)
+            pairs = [("text", main.group(2))]
+            heading = re.search(
+                r'QLabel#heading \{[^}]*color: (#[0-9a-f]{6});',
+                sheet).group(1)
+            pairs.append(("heading", heading))
+            explanation = re.search(
+                r'QLabel#explanation \{[^}]*color: '
+                r'(#[0-9a-f]{6});', sheet).group(1)
+            pairs.append(("explanation", explanation))
+            for label, color in pairs:
+                self.assertGreaterEqual(
+                    contrast_ratio(color, line), 4.5,
+                    "%s %s %s on grid line %s is %.2f:1, under "
+                    "WCAG AA 4.5:1" % (name, label, color, line,
+                                       contrast_ratio(color, line)))
+
+    def test_grid_rules_present_in_both_themes(self):
+        # The grid lives in three rules per theme (lists,
+        # scroll viewports, tab columns) plus the transparent
+        # section rules that let the column grid show through
+        # the Video tab's sections. The selector-set test pins
+        # the two sheets equal, but a rule in neither sheet
+        # would pass it — pin that the rules exist at all.
+        for name in self.TILES:
+            sheet = _stylesheet(name)
+            selectors = _selectors(sheet)
+            for selector in ("QWidget#column", "QWidget#section",
+                             "QWidget#sectionBody"):
+                self.assertIn(selector, selectors,
+                              "%s has no %s rule" % (name, selector))
+            for selector in ("QScrollArea", "QListWidget"):
+                rule = re.search(
+                    r'%s \{[^}]*\}' % re.escape(selector), sheet)
+                self.assertIsNotNone(
+                    rule, "%s has no %s rule" % (name, selector))
+                self.assertIn("background-image:",
+                              rule.group(0),
+                              "%s %s carries no grid"
+                              % (name, selector))
+
+    def test_grid_tile_urls_are_placeholders_in_source(self):
+        # Qt resolves stylesheet url() paths against the
+        # working directory, so a relative tile path fails
+        # with "Could not create pixmap" whenever the app
+        # starts from another folder — the v0.79 failure. The
+        # source therefore carries a placeholder that the
+        # module replaces with the ABSOLUTE tile path at
+        # import time (pinned evaluated in test_gui).
+        for name, placeholder in (
+                ("DARK_STYLESHEET", "__GRID_TILE_DARK__"),
+                ("LIGHT_STYLESHEET", "__GRID_TILE_LIGHT__")):
+            sheet = _stylesheet(name)
+            self.assertIn(placeholder, sheet,
+                          "%s has no tile placeholder" % name)
+            self.assertNotIn("grid-tile-", sheet.replace(
+                placeholder, ""),
+                "%s names a tile file directly — the path "
+                "must come from the import-time placeholder"
+                % name)
+
+    def test_grid_tiles_ship_in_the_zip(self):
+        # The tiles are PNGs, so they are not in the git push
+        # (the manifest excludes *.png) — but they MUST be in
+        # the release zip, or the installed app has no grid.
+        self._require_tiles()
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "build_zip",
+            os.path.join(ROOT, "tools", "build_zip.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        collected = module.collect()
+        for name in self.TILES:
+            self.assertIn(self._tile_path(name), collected,
+                          "%s is not collected by build_zip.py"
+                          % self.TILES[name])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,19 @@
 # Pixel Forge changelog
 
+## 0.81 — 2026-11-17
+
+The pixel-grid motif, fixed properly (task 88). The lists, the
+tab columns, and the preview panes now sit on a subtle pixel
+grid — one grid per theme, in both dark and light. The v0.79
+attempt failed because the tile path was relative, so Qt could
+not load it at all; the path is absolute now, and the grid is a
+stylesheet rule, so it survives resizing, hiding, and switching
+themes without ever being re-applied. Text stays readable: every
+text color still clears the contrast bar, even where a grid line
+passes behind it. The grid's checks skip when the tile pictures
+are not there, so a plain copy of the code still passes.
+Nothing behaves differently.
+
 ## 0.80 — 2026-11-16
 
 Plain-words field explanations (task 89). Every field on
