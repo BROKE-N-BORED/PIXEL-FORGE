@@ -1,5 +1,19 @@
 # Pixel Forge changelog
 
+## 0.79 — 2026-11-16
+
+Pixel-native visual identity (task 88). The app now looks
+like pixel art instead of the same flat dark grey: square
+corners on buttons, inputs, sliders, and tabs; chunky
+square tabs with an accent bar on the one you are on;
+square checkboxes that fill with the accent when ticked;
+and the menu bar, menus, tooltips, and progress bars in
+the same look. One accent color carries it in each theme,
+and every text color still clears the contrast bar. No
+blur, no translucency, nothing animated — the look costs
+nothing on a slow machine. No layout moved and nothing
+behaves differently.
+
 ## 0.78 — 2026-11-16
 
 Progressive disclosure on the Video tab (task 87). The

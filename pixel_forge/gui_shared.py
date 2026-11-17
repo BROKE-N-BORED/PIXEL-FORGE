@@ -150,6 +150,26 @@ AUTOSAVE_DEBOUNCE_MS = 2000  # ms of no changes before the
 # require contrast for inactive controls.) This comment lives
 # OUTSIDE the stylesheet string: Qt stylesheets have no # comments,
 # and a # line inside the string would be parsed as a selector.
+#
+# Pixel-native identity (task 88, U15): square corners on
+# everything (buttons, inputs, sliders, tabs, checkboxes —
+# square reads as pixel-native), one accent per theme (dark:
+# #e07020 for shapes and borders, #ffb066 for text), crisp
+# 1 px borders, and square tabs with an accent bar on the
+# selected one. No blur, no translucency, no per-frame
+# painting (entry 007 Liquid Glass stays rejected for frame
+# cost). Both themes style the same selector set (pinned in
+# tests/test_polish.py), and every text color still clears
+# the task-22 bar. A pixel-grid motif behind the list and
+# scroll surfaces was tried and dropped: a stylesheet
+# background-image never paints on a scroll area's viewport
+# (the viewport covers the widget background, and Qt
+# propagates only background-color there), and a texture
+# brush in the viewport palette is wiped by Qt's re-polish
+# on show and resize — unpredictably, some surfaces keeping
+# it and others losing it, so the grid would come and go as
+# the window is used. Both failures were proven by
+# experiment; do not retry them without a new mechanism.
 DARK_STYLESHEET = """
 QMainWindow, QWidget { background-color: #232329; color: #e8e6e3; }
 QLabel { background-color: transparent; }
@@ -158,7 +178,7 @@ QPushButton#sectionHeader { font-weight: bold; font-size: 13px; color: #ffb066; 
 QLabel#warning { color: #ffb066; }
 QLabel[overLimit="true"] { color: #ffb066; }
 QPushButton { background-color: #3a3a42; border: 1px solid #55555e;
-    border-radius: 4px; padding: 7px 14px; }
+    border-radius: 0px; padding: 7px 14px; }
 QPushButton:hover { background-color: #4a4a54; }
 QPushButton:pressed { background-color: #2e2e35; }
 QPushButton:checked { background-color: #4a4a54;
@@ -169,17 +189,40 @@ QPushButton#export { background-color: #8a4513; border-color: #d97a2e;
 QPushButton#export:hover { background-color: #9a4c15; }
 QPushButton#export:disabled { background-color: #4a3226; color: #77777f; }
 QComboBox, QSpinBox, QLineEdit { background-color: #2e2e35;
-    border: 1px solid #55555e; border-radius: 4px; padding: 4px; }
+    border: 1px solid #55555e; border-radius: 0px; padding: 4px; }
+QDoubleSpinBox { background-color: #2e2e35; border: 1px solid #55555e;
+    border-radius: 0px; padding: 4px; }
 QComboBox::drop-down { border: none; }
 QSlider::groove:horizontal { height: 6px; background: #3a3a42;
-    border-radius: 3px; }
-QSlider::handle:horizontal { width: 16px; margin: -5px 0;
-    background: #e07020; border-radius: 8px; }
-QScrollArea { border: 1px solid #3a3a42; background-color: #1a1a1f; }
+    border-radius: 0px; }
+QSlider::handle:horizontal { width: 14px; height: 14px; margin: -4px 0;
+    background: #e07020; border-radius: 0px; }
+QScrollArea { background-color: #1a1a1f; border: 1px solid #3a3a42; }
 QListWidget { background-color: #1a1a1f; border: 1px solid #3a3a42; }
 QListWidget::item:selected { background-color: #3a3a42; }
 QSplitter::handle { background-color: #3a3a42; }
 QStatusBar { background-color: #1a1a1f; color: #b8b5b0; }
+QTabWidget::pane { border: 1px solid #3a3a42; }
+QTabBar::tab { background-color: #2e2e35; border: 1px solid #3a3a42;
+    border-bottom: none; padding: 8px 16px; margin-right: 2px; }
+QTabBar::tab:hover { background-color: #3a3a42; }
+QTabBar::tab:selected { background-color: #232329;
+    border-top: 3px solid #e07020; }
+QMenuBar { background-color: #1a1a1f; color: #e8e6e3; }
+QMenuBar::item:selected { background-color: #3a3a42; }
+QMenu { background-color: #2e2e35; border: 1px solid #55555e;
+    color: #e8e6e3; }
+QMenu::item:selected { background-color: #3a3a42; }
+QToolTip { background-color: #1a1a1f; color: #e8e6e3;
+    border: 1px solid #55555e; }
+QCheckBox::indicator { width: 14px; height: 14px;
+    border: 1px solid #55555e; background-color: #2e2e35; }
+QCheckBox::indicator:checked { background-color: #e07020;
+    border-color: #e07020; }
+QProgressBar { background-color: #2e2e35; border: 1px solid #55555e;
+    color: #e8e6e3; }
+QProgressBar::chunk { background-color: #8a4513; }
+QTextEdit { background-color: #2e2e35; border: 1px solid #55555e; }
 """
 
 
@@ -190,7 +233,13 @@ QStatusBar { background-color: #1a1a1f; color: #b8b5b0; }
 # against the task-22 bar (WCAG AA 4.5:1 for normal text): main
 # text 13.94:1, button text 12.03:1, export text 6.37:1, export
 # hover 5.48:1, heading and warning 6.37:1, status text 6.06:1,
-# input and list text 15.63:1. All pinned in tests/test_polish.py.
+# input text 15.63:1, menu text 15.63:1, tab text 12.03:1,
+# tooltip text 15.63:1, progress text on its chunk 5.04:1,
+# list text 15.63:1. All pinned in tests/test_polish.py. The
+# light accent is #8a4513 throughout (headings, slider, checked
+# borders, selected tab bar, ticked checkboxes); the progress
+# chunk is the lighter #d97a2e so the dark text stays readable
+# on it.
 LIGHT_STYLESHEET = """
 QMainWindow, QWidget { background-color: #f2f2f0; color: #232329; }
 QLabel { background-color: transparent; }
@@ -199,7 +248,7 @@ QPushButton#sectionHeader { font-weight: bold; font-size: 13px; color: #8a4513; 
 QLabel#warning { color: #8a4513; }
 QLabel[overLimit="true"] { color: #8a4513; }
 QPushButton { background-color: #e2e2de; border: 1px solid #b8b8b2;
-    border-radius: 4px; padding: 7px 14px; }
+    border-radius: 0px; padding: 7px 14px; }
 QPushButton:hover { background-color: #d4d4cf; }
 QPushButton:pressed { background-color: #c8c8c2; }
 QPushButton:checked { background-color: #d4d4cf;
@@ -210,17 +259,40 @@ QPushButton#export { background-color: #8a4513; border-color: #d97a2e;
 QPushButton#export:hover { background-color: #9a4c15; }
 QPushButton#export:disabled { background-color: #d8c8bb; color: #9a9a94; }
 QComboBox, QSpinBox, QLineEdit { background-color: #ffffff;
-    border: 1px solid #b8b8b2; border-radius: 4px; padding: 4px; }
+    border: 1px solid #b8b8b2; border-radius: 0px; padding: 4px; }
+QDoubleSpinBox { background-color: #ffffff; border: 1px solid #b8b8b2;
+    border-radius: 0px; padding: 4px; }
 QComboBox::drop-down { border: none; }
 QSlider::groove:horizontal { height: 6px; background: #d4d4cf;
-    border-radius: 3px; }
-QSlider::handle:horizontal { width: 16px; margin: -5px 0;
-    background: #8a4513; border-radius: 8px; }
-QScrollArea { border: 1px solid #d4d4cf; background-color: #e9e9e6; }
+    border-radius: 0px; }
+QSlider::handle:horizontal { width: 14px; height: 14px; margin: -4px 0;
+    background: #8a4513; border-radius: 0px; }
+QScrollArea { background-color: #e9e9e6; border: 1px solid #d4d4cf; }
 QListWidget { background-color: #ffffff; border: 1px solid #d4d4cf; }
 QListWidget::item:selected { background-color: #d4d4cf; }
 QSplitter::handle { background-color: #d4d4cf; }
 QStatusBar { background-color: #e9e9e6; color: #55555e; }
+QTabWidget::pane { border: 1px solid #d4d4cf; }
+QTabBar::tab { background-color: #e2e2de; border: 1px solid #d4d4cf;
+    border-bottom: none; padding: 8px 16px; margin-right: 2px; }
+QTabBar::tab:hover { background-color: #d4d4cf; }
+QTabBar::tab:selected { background-color: #f2f2f0;
+    border-top: 3px solid #8a4513; }
+QMenuBar { background-color: #e9e9e6; color: #232329; }
+QMenuBar::item:selected { background-color: #d4d4cf; }
+QMenu { background-color: #ffffff; border: 1px solid #b8b8b2;
+    color: #232329; }
+QMenu::item:selected { background-color: #d4d4cf; }
+QToolTip { background-color: #ffffff; color: #232329;
+    border: 1px solid #b8b8b2; }
+QCheckBox::indicator { width: 14px; height: 14px;
+    border: 1px solid #b8b8b2; background-color: #ffffff; }
+QCheckBox::indicator:checked { background-color: #8a4513;
+    border-color: #8a4513; }
+QProgressBar { background-color: #ffffff; border: 1px solid #b8b8b2;
+    color: #232329; }
+QProgressBar::chunk { background-color: #d97a2e; }
+QTextEdit { background-color: #ffffff; border: 1px solid #b8b8b2; }
 """
 
 

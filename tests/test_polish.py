@@ -214,6 +214,122 @@ class LightThemeContrastTests(unittest.TestCase):
                             sorted(light - dark)))
 
 
+class IdentityTests(unittest.TestCase):
+    """Task 88 — the pixel-native identity, pinned in the strings."""
+
+    def test_square_corners_everywhere(self):
+        # Pixel-native means square: every border-radius in both
+        # themes is 0. A radius that creeps back in is a
+        # regression, not a preference.
+        for name in ("DARK_STYLESHEET", "LIGHT_STYLESHEET"):
+            sheet = _stylesheet(name)
+            radii = re.findall(r'border-radius: ([^;]+);', sheet)
+            self.assertTrue(radii,
+                            "%s styles no radius at all" % name)
+            for radius in radii:
+                self.assertIn(radius.strip(), ("0", "0px"),
+                              "%s has a rounded corner: %s"
+                              % (name, radius))
+
+    def test_accent_present_in_both_themes(self):
+        # One accent per theme: dark #e07020 for shapes and
+        # borders, light #8a4513 throughout. It must show up in
+        # the slider handle, the checked border, the selected
+        # tab bar, and the ticked checkbox — the same accent in
+        # every place, not a different orange each time.
+        accents = {"DARK_STYLESHEET": "#e07020",
+                   "LIGHT_STYLESHEET": "#8a4513"}
+        rules = ("QSlider::handle:horizontal",
+                 "QPushButton:checked",
+                 "QTabBar::tab:selected",
+                 "QCheckBox::indicator:checked")
+        for name, accent in accents.items():
+            sheet = _stylesheet(name)
+            for selector in rules:
+                rule = re.search(
+                    r'%s \{[^}]*\}' % re.escape(selector), sheet)
+                self.assertIsNotNone(
+                    rule, "%s has no %s rule" % (name, selector))
+                self.assertIn(
+                    accent, rule.group(0),
+                    "%s %s does not carry the accent %s"
+                    % (name, selector, accent))
+
+    def test_identity_selectors_present_in_both_themes(self):
+        # The identity styles the tabs, menus, tooltips,
+        # checkboxes, progress bars, and text edits — in both
+        # themes, not just the dark one.
+        wanted = ("QTabBar::tab", "QTabBar::tab:hover",
+                  "QTabBar::tab:selected", "QTabWidget::pane",
+                  "QMenuBar", "QMenuBar::item:selected", "QMenu",
+                  "QMenu::item:selected", "QToolTip",
+                  "QCheckBox::indicator",
+                  "QCheckBox::indicator:checked", "QProgressBar",
+                  "QProgressBar::chunk", "QDoubleSpinBox",
+                  "QTextEdit")
+        for name in ("DARK_STYLESHEET", "LIGHT_STYLESHEET"):
+            selectors = _selectors(_stylesheet(name))
+            for selector in wanted:
+                self.assertIn(selector, selectors,
+                              "%s does not style %s"
+                              % (name, selector))
+
+    def test_new_text_pairs_meet_wcag_aa(self):
+        # The new rules carry text too — menus, tabs, tooltips,
+        # progress text on its chunk. Same 4.5:1 bar as task 22.
+        for name in ("DARK_STYLESHEET", "LIGHT_STYLESHEET"):
+            sheet = _stylesheet(name)
+            main = re.search(
+                r'QMainWindow, QWidget \{ background-color: '
+                r'(#[0-9a-f]{6}); color: (#[0-9a-f]{6});',
+                sheet)
+            text = main.group(2)
+            pairs = []
+
+            def rule_color(selector, prop="background-color"):
+                rule = re.search(
+                    r'%s \{[^}]*%s: (#[0-9a-f]{6});'
+                    % (re.escape(selector), prop), sheet)
+                self.assertIsNotNone(
+                    rule, "%s has no %s %s"
+                    % (name, selector, prop))
+                return rule.group(1)
+
+            menu_bg = rule_color("QMenu")
+            menu_text = rule_color("QMenu", "color")
+            pairs.append(("menu text", menu_text,
+                          "menu", menu_bg))
+            pairs.append(("menu text", menu_text, "menu selected",
+                          rule_color("QMenu::item:selected")))
+            pairs.append(("tab text", text, "tab",
+                          rule_color("QTabBar::tab")))
+            pairs.append(("tab text", text, "tab hover",
+                          rule_color("QTabBar::tab:hover")))
+            pairs.append(("tab text", text, "tab selected",
+                          rule_color("QTabBar::tab:selected")))
+            tip_bg = rule_color("QToolTip")
+            tip_text = rule_color("QToolTip", "color")
+            pairs.append(("tooltip text", tip_text,
+                          "tooltip", tip_bg))
+            bar_bg = rule_color("QMenuBar")
+            bar_text = rule_color("QMenuBar", "color")
+            pairs.append(("menu bar text", bar_text,
+                          "menu bar", bar_bg))
+            progress_text = rule_color("QProgressBar", "color")
+            pairs.append(("progress text", progress_text,
+                          "progress bar",
+                          rule_color("QProgressBar")))
+            pairs.append(("progress text", progress_text,
+                          "progress chunk",
+                          rule_color("QProgressBar::chunk")))
+            for fg_name, fg, bg_name, bg in pairs:
+                self.assertGreaterEqual(
+                    contrast_ratio(fg, bg), 4.5,
+                    "%s %s %s on %s %s is %.2f:1, under WCAG AA "
+                    "4.5:1" % (name, fg_name, fg, bg_name, bg,
+                               contrast_ratio(fg, bg)))
+
+
 class NoProgrammerPhrasingTests(unittest.TestCase):
     def test_no_parenthesized_s_in_package_strings(self):
         # "7 asset(s)" reads as programmer phrasing. Every string
