@@ -330,6 +330,40 @@ class IdentityTests(unittest.TestCase):
                                contrast_ratio(fg, bg)))
 
 
+class ExplanationContrastTests(unittest.TestCase):
+    """Task 89 — the under-field explanation lines are small
+    and subdued, but they are still text a user reads, so the
+    explanation color must clear the task-22 bar (WCAG AA
+    4.5:1) against the main background in both themes."""
+
+    def test_explanation_color_meets_wcag_aa(self):
+        for name in ("DARK_STYLESHEET", "LIGHT_STYLESHEET"):
+            sheet = _stylesheet(name)
+            bg = re.search(
+                r'QMainWindow, QWidget \{ background-color: '
+                r'(#[0-9a-f]{6});', sheet).group(1)
+            rule = re.search(
+                r'QLabel#explanation \{[^}]*color: (#[0-9a-f]{6});',
+                sheet)
+            self.assertIsNotNone(
+                rule, "%s styles no explanation color" % name)
+            color = rule.group(1)
+            self.assertGreaterEqual(
+                contrast_ratio(color, bg), 4.5,
+                "%s explanation %s on %s is %.2f:1, under WCAG "
+                "AA 4.5:1" % (name, color, bg,
+                              contrast_ratio(color, bg)))
+
+    def test_explanation_rule_present_in_both_themes(self):
+        # The selector-set test pins the two sheets equal, but
+        # a rule in neither sheet would pass it — pin that the
+        # explanation rule exists at all.
+        for name in ("DARK_STYLESHEET", "LIGHT_STYLESHEET"):
+            self.assertIn("QLabel#explanation",
+                          _selectors(_stylesheet(name)),
+                          "%s has no explanation rule" % name)
+
+
 class NoProgrammerPhrasingTests(unittest.TestCase):
     def test_no_parenthesized_s_in_package_strings(self):
         # "7 asset(s)" reads as programmer phrasing. Every string

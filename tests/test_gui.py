@@ -25,7 +25,7 @@ try:
     from PySide6.QtCore import QRect, QSettings, Qt
     from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, \
         QDialog, QFileDialog, QInputDialog, QLabel, QMessageBox, \
-        QPushButton, QTabWidget, QWidget
+        QPushButton, QScrollArea, QTabWidget, QWidget
 except ImportError as exc:
     # Task 63: every test here needs Qt, so skip the module when
     # PySide6 is what is missing — but a genuinely broken import
@@ -11266,6 +11266,239 @@ class AutosaveGuiTests(unittest.TestCase):
         self.assertEqual(win2.tileset_base_a_path, self.base)
         self.assertIsNotNone(win2.tileset_tiles)
         self.assertEqual(len(win2.tileset_tiles), 47)
+
+
+class FieldExplanationTests(unittest.TestCase):
+    """Task 89 (plain-words field explanations, U20): every
+    field on the Image and Video tabs explains itself in one
+    plain line directly underneath it."""
+
+    # key -> (attribute of the control it explains, offset).
+    # The offset is how many layout items after the control
+    # (or its row) the line sits: 1 normally, 2 for the second
+    # line under a shared row (the seed row holds the seed and
+    # the size, each with its own line).
+    EXPECTED = {
+        # Image tab
+        "normalmap_strength_spin": ("normalmap_strength_spin", 1),
+        "procedural_kind_combo": ("procedural_kind_combo", 1),
+        "procedural_seed_spin": ("procedural_seed_spin", 1),
+        "procedural_size_spin": ("procedural_size_spin", 2),
+        "size_combo": ("size_combo", 1),
+        "image_size_row": ("width_spin", 1),
+        "aspect_check": ("aspect_check", 1),
+        "palette_combo": ("palette_combo", 1),
+        "colors_spin": ("colors_spin", 1),
+        "dither_check": ("dither_check", 1),
+        "preset_combo": ("preset_combo", 1),
+        "zoom_slider": ("zoom_slider", 1),
+        "layer_list": ("layer_list", 1),
+        # Video tab
+        "video_fps_combo": ("video_fps_combo", 1),
+        "video_every_spin": ("video_every_spin", 1),
+        "video_start_edit": ("video_start_edit", 1),
+        "video_end_edit": ("video_end_edit", 1),
+        "video_size_combo": ("video_size_combo", 1),
+        "video_size_row": ("video_width_spin", 1),
+        "video_aspect_check": ("video_aspect_check", 1),
+        "video_palette_combo": ("video_palette_combo", 1),
+        "video_colors_spin": ("video_colors_spin", 1),
+        "video_dither_check": ("video_dither_check", 1),
+        "video_preset_combo": ("video_preset_combo", 1),
+        "video_zoom_slider": ("video_zoom_slider", 1),
+        "sheet_cols_combo": ("sheet_cols_combo", 1),
+        "sheet_padding_spin": ("sheet_padding_spin", 1),
+        "sheet_fps_spin": ("sheet_fps_spin", 1),
+        "sheet_pack_combo": ("sheet_pack_combo", 1),
+        "sheet_trim_check": ("sheet_trim_check", 1),
+        "sheet_atlas_padding_spin": ("sheet_atlas_padding_spin", 1),
+        "sheet_extrude_spin": ("sheet_extrude_spin", 1),
+        "video_tag_list": ("video_tag_list", 1),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.lib_dir = tempfile.mkdtemp()
+        self.win = MainWindow(library_dir=self.lib_dir)
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.lib_dir, ignore_errors=True)
+
+    def _item_index(self, layout, widget):
+        """Index of the layout item holding a widget — directly,
+        or inside a child row layout."""
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item.widget() is widget:
+                return i
+            child = item.layout()
+            if child is not None:
+                for j in range(child.count()):
+                    if child.itemAt(j).widget() is widget:
+                        return i
+        return -1
+
+    def test_every_field_has_a_line_and_no_line_is_stray(self):
+        # The registry is the coverage list: a field without a
+        # line is a missing key, a line without a field is a
+        # stray one.
+        self.assertEqual(set(self.win.field_explanations),
+                         set(self.EXPECTED))
+
+    def test_lines_are_plain_words(self):
+        # One short sentence, plain words, no em-dash, no "(s)".
+        for key, label in self.win.field_explanations.items():
+            text = label.text()
+            self.assertTrue(text, key)
+            self.assertEqual(label.objectName(), "explanation",
+                             key)
+            self.assertTrue(label.wordWrap(), key)
+            self.assertNotIn("\u2014", text, key)
+            self.assertNotIn("(s)", text, key)
+            self.assertTrue(text.endswith("."), key)
+            self.assertLessEqual(len(text), 70, key)
+
+    def test_lines_sit_directly_under_their_fields(self):
+        # The line is the next item after its field (or its
+        # field's row) in the same layout — not somewhere
+        # nearby in the column.
+        for key, (attr, offset) in self.EXPECTED.items():
+            label = self.win.field_explanations[key]
+            layout = label.parent().layout()
+            self.assertIsNotNone(layout, key)
+            control = getattr(self.win, attr)
+            control_index = self._item_index(layout, control)
+            self.assertGreaterEqual(control_index, 0, key)
+            self.assertEqual(layout.indexOf(label),
+                             control_index + offset, key)
+
+    def test_the_tasks_named_fields_say_what_they_do(self):
+        # The five fields the task names by name, pinned word
+        # for word — these are the ones a user trips over.
+        texts = {key: label.text() for key, label in
+                 self.win.field_explanations.items()}
+        self.assertEqual(
+            texts["video_fps_combo"],
+            "How many frames to take from each second of video.")
+        self.assertEqual(
+            texts["video_every_spin"],
+            "Keeps one frame in every N. Higher means fewer "
+            "frames.")
+        self.assertEqual(
+            texts["colors_spin"],
+            "The most colors the sprite may use. Fewer is "
+            "chunkier.")
+        self.assertEqual(
+            texts["dither_check"],
+            "Fakes shades between colors with a checker "
+            "pattern.")
+        self.assertEqual(
+            texts["size_combo"],
+            "The size of the finished sprite, in pixels.")
+
+    def test_prompt_tab_has_no_explanation(self):
+        # The Prompt tab is out of this build's scope — the
+        # shared preset helper only adds the line for the
+        # Image and Video tabs.
+        self.assertNotIn("prompt_preset_combo",
+                         self.win.field_explanations)
+
+    def test_lines_do_not_widen_the_column(self):
+        # A word-wrapped label's size hint is its unwrapped
+        # text width — left alone, the longest line stretches
+        # the whole column past the 268 px scroll area and the
+        # right edge of every widget clips (the seed line's
+        # tail and the preset buttons vanished this way before
+        # the fix). Both columns' inner widgets must fit their
+        # viewports, and every line must be tall enough for
+        # its wrapped text. Each tab is checked with that tab
+        # current — a hidden tab's widgets keep stale sizes.
+        # The dark stylesheet is applied for the check: the
+        # app always runs styled, and an unstyled window
+        # leaves the hidden tab's wrapped labels one line
+        # tall (their heights settle only once the style
+        # polishes them).
+        from PySide6.QtCore import QRect
+        from pixel_forge.gui import DARK_STYLESHEET
+        image_keys = [key for key in self.EXPECTED
+                      if not key.startswith("video_")
+                      and not key.startswith("sheet_")]
+        video_keys = [key for key in self.EXPECTED
+                      if key not in image_keys]
+        previous_sheet = self.app.styleSheet()
+        self.app.setStyleSheet(DARK_STYLESHEET)
+        try:
+            self._check_column_widths(image_keys, video_keys)
+        finally:
+            self.app.setStyleSheet(previous_sheet)
+
+    def _check_column_widths(self, image_keys, video_keys):
+        self.win.resize(1020, 640)
+        self.win.show()
+        self.app.processEvents()
+        image_scroll = None
+        for scroll in self.win.findChildren(QScrollArea):
+            if scroll.widget() is self.win.import_btn.parent():
+                image_scroll = scroll
+        self.assertIsNotNone(image_scroll)
+        for index, scroll, keys in (
+                (0, image_scroll, image_keys),
+                (1, self.win.video_controls_scroll, video_keys)):
+            if index == 1:
+                for section in self.win.video_sections.values():
+                    section.setExpanded(True)
+            self.win.tabs.setCurrentIndex(index)
+            self.app.processEvents()
+            self.assertLessEqual(
+                scroll.widget().width(), scroll.viewport().width(),
+                "tab %d column wider than its viewport" % index)
+            for key in keys:
+                label = self.win.field_explanations[key]
+                metrics = label.fontMetrics()
+                needed = metrics.boundingRect(
+                    QRect(0, 0, label.width(), 10000),
+                    Qt.TextFlag.TextWordWrap, label.text())
+                self.assertGreaterEqual(label.height(),
+                                        needed.height(), key)
+
+    def test_lines_are_visible_when_the_window_is_shown(self):
+        # The window is shown first: with a hidden window every
+        # isVisible() reads False, so the check would pass
+        # without proving anything. Each tab's lines are
+        # checked with that tab current — a label on a tab
+        # that is not showing reads hidden, whatever its
+        # section does. The Video sections start collapsed
+        # (except Frames and Export), so they are all opened
+        # first.
+        for section in self.win.video_sections.values():
+            section.setExpanded(True)
+        self.win.resize(1020, 640)
+        self.win.show()
+        self.app.processEvents()
+        image_keys = [key for key in self.EXPECTED
+                      if not key.startswith("video_")
+                      and not key.startswith("sheet_")]
+        self.win.tabs.setCurrentIndex(0)  # Image tab
+        self.app.processEvents()
+        for key in image_keys:
+            self.assertTrue(
+                self.win.field_explanations[key].isVisible(),
+                key)
+        self.win.tabs.setCurrentIndex(1)  # Video tab
+        self.app.processEvents()
+        for key in self.EXPECTED:
+            if key not in image_keys:
+                self.assertTrue(
+                    self.win.field_explanations[key].isVisible(),
+                    key)
 
 
 if __name__ == "__main__":

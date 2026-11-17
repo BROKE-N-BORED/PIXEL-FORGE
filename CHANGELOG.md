@@ -1,5 +1,14 @@
 # Pixel Forge changelog
 
+## 0.80 — 2026-11-16
+
+Plain-words field explanations (task 89). Every field on
+the Image and Video tabs now explains itself in one plain
+line directly underneath it — fps, Nth frame, max colors,
+dithering, sizes, and the rest, in words a child or
+grandparent can read. The tooltips stay as a second layer.
+Nothing behaves differently.
+
 ## 0.79 — 2026-11-16
 
 Pixel-native visual identity (task 88). The app now looks

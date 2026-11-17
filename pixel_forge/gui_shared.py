@@ -176,6 +176,7 @@ QLabel { background-color: transparent; }
 QLabel#heading { font-weight: bold; font-size: 13px; color: #ffb066; }
 QPushButton#sectionHeader { font-weight: bold; font-size: 13px; color: #ffb066; background: transparent; border: none; text-align: left; padding: 4px 0; }
 QLabel#warning { color: #ffb066; }
+QLabel#explanation { font-size: 12px; color: #b8b5b0; }
 QLabel[overLimit="true"] { color: #ffb066; }
 QPushButton { background-color: #3a3a42; border: 1px solid #55555e;
     border-radius: 0px; padding: 7px 14px; }
@@ -235,7 +236,8 @@ QTextEdit { background-color: #2e2e35; border: 1px solid #55555e; }
 # hover 5.48:1, heading and warning 6.37:1, status text 6.06:1,
 # input text 15.63:1, menu text 15.63:1, tab text 12.03:1,
 # tooltip text 15.63:1, progress text on its chunk 5.04:1,
-# list text 15.63:1. All pinned in tests/test_polish.py. The
+# list text 15.63:1, explanation text 6.58:1 (dark 7.65:1).
+# All pinned in tests/test_polish.py. The
 # light accent is #8a4513 throughout (headings, slider, checked
 # borders, selected tab bar, ticked checkboxes); the progress
 # chunk is the lighter #d97a2e so the dark text stays readable
@@ -246,6 +248,7 @@ QLabel { background-color: transparent; }
 QLabel#heading { font-weight: bold; font-size: 13px; color: #8a4513; }
 QPushButton#sectionHeader { font-weight: bold; font-size: 13px; color: #8a4513; background: transparent; border: none; text-align: left; padding: 4px 0; }
 QLabel#warning { color: #8a4513; }
+QLabel#explanation { font-size: 12px; color: #55555e; }
 QLabel[overLimit="true"] { color: #8a4513; }
 QPushButton { background-color: #e2e2de; border: 1px solid #b8b8b2;
     border-radius: 0px; padding: 7px 14px; }

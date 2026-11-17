@@ -163,6 +163,10 @@ class ImageTabMixin:
         normalmap_view_row.addWidget(self.normalmap_show_btn)
         normalmap_view_row.addStretch(1)
         form.addLayout(normalmap_view_row)
+        form.addWidget(self._explain(
+            "normalmap_strength_spin",
+            "How strong the bumps look. Higher is more "
+            "dramatic."))
         self.normalmap_export_btn = QPushButton("Export normal map")
         self.normalmap_export_btn.setToolTip(
             "Save the normal map as a PNG next to the sprite")
@@ -201,10 +205,21 @@ class ImageTabMixin:
         procedural_row.addWidget(self.procedural_generate_btn)
         procedural_row.addStretch(1)
         form.addLayout(procedural_row)
+        form.addWidget(self._explain(
+            "procedural_kind_combo",
+            "What kind of sprite to make."))
         procedural_seed_row = QHBoxLayout()
         self.procedural_seed_spin = QSpinBox()
         self.procedural_seed_spin.setRange(-1000000, 1000000)
         self.procedural_seed_spin.setValue(1)
+        # Task 89: the spin's size hint is its widest value
+        # ("Seed -1000000", 120 px), which pushed the whole
+        # seed row to 293 px — past the column's 252 px
+        # viewport, so the size spin's right edge clipped.
+        # Capped at 76 px, the row (76 + 78 + 83 + spacing)
+        # fits; a long seed scrolls inside the spin, the way
+        # a long number does in any spin box.
+        self.procedural_seed_spin.setMaximumWidth(76)
         self.procedural_seed_spin.setPrefix("Seed ")
         self.procedural_seed_spin.setToolTip(
             "The number the sprite is made from. The same kind "
@@ -227,6 +242,12 @@ class ImageTabMixin:
         procedural_seed_row.addWidget(self.procedural_size_spin)
         procedural_seed_row.addStretch(1)
         form.addLayout(procedural_seed_row)
+        form.addWidget(self._explain(
+            "procedural_seed_spin",
+            "Same kind and seed always make the same sprite."))
+        form.addWidget(self._explain(
+            "procedural_size_spin",
+            "The sprite's size in pixels, width and height."))
         self.procedural_seed_label = QLabel("")
         self.procedural_seed_label.setWordWrap(True)
         self.procedural_seed_label.setToolTip(
@@ -242,6 +263,9 @@ class ImageTabMixin:
         self.size_combo.setCurrentIndex(1)  # 32 x 32
         self.size_combo.currentIndexChanged.connect(self._on_preset)
         form.addWidget(self.size_combo)
+        form.addWidget(self._explain(
+            "size_combo",
+            "The size of the finished sprite, in pixels."))
 
         size_row = QHBoxLayout()
         self.width_spin = QSpinBox()
@@ -259,12 +283,19 @@ class ImageTabMixin:
         size_row.addWidget(self.width_spin)
         size_row.addWidget(self.height_spin)
         form.addLayout(size_row)
+        form.addWidget(self._explain(
+            "image_size_row",
+            "Width and height in pixels. Editing one picks "
+            "Custom."))
 
         self.aspect_check = QCheckBox("Keep aspect ratio")
         self.aspect_check.setToolTip(
             "Keep the original proportions when resizing")
         self.aspect_check.toggled.connect(self._on_control_changed)
         form.addWidget(self.aspect_check)
+        form.addWidget(self._explain(
+            "aspect_check",
+            "Keeps the picture's shape, so nothing stretches."))
 
         form.addWidget(self._section("Palette"))
         self.palette_combo = QComboBox()
@@ -274,6 +305,9 @@ class ImageTabMixin:
         self.palette_combo.currentIndexChanged.connect(
             self._on_control_changed)
         form.addWidget(self.palette_combo)
+        form.addWidget(self._explain(
+            "palette_combo",
+            "The colors the sprite is made from."))
 
         palette_btn_row = QHBoxLayout()
         self.palettes_btn = QPushButton("Palettes…")
@@ -302,12 +336,20 @@ class ImageTabMixin:
         self.colors_spin.valueChanged.connect(self._on_control_changed)
         colors_row.addWidget(self.colors_spin)
         form.addLayout(colors_row)
+        form.addWidget(self._explain(
+            "colors_spin",
+            "The most colors the sprite may use. Fewer is "
+            "chunkier."))
 
         self.dither_check = QCheckBox("Dithering")
         self.dither_check.setToolTip("Ordered (Bayer) dithering")
         self.dither_check.setChecked(True)
         self.dither_check.toggled.connect(self._on_control_changed)
         form.addWidget(self.dither_check)
+        form.addWidget(self._explain(
+            "dither_check",
+            "Fakes shades between colors with a checker "
+            "pattern."))
 
         self._build_preset_section(form, "image")
 
@@ -327,6 +369,10 @@ class ImageTabMixin:
         self.zoom_fit_btn.clicked.connect(self._on_fit_image_zoom)
         zoom_row.addWidget(self.zoom_fit_btn)
         form.addLayout(zoom_row)
+        form.addWidget(self._explain(
+            "zoom_slider",
+            "How big the preview looks. It does not change "
+            "the sprite."))
 
         # Layer stack (task 35): the list shows the stack top
         # first — row 0 is the top layer. The check on each row
@@ -348,6 +394,9 @@ class ImageTabMixin:
         self.layer_list.itemChanged.connect(
             self._on_layer_item_changed)
         form.addWidget(self.layer_list)
+        form.addWidget(self._explain(
+            "layer_list",
+            "Layers stack top first. Click one to paint on it."))
         # Two rows of two: four buttons in one row overflow
         # the 268 px column and push Move down off the edge.
         layer_row = QHBoxLayout()

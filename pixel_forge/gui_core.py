@@ -7,7 +7,7 @@ split (task 58).
 from . import __version__, procedural
 from PySide6.QtCore import (QRect, QSettings, QTimer, QUrl, Qt)
 from PySide6.QtGui import (QAction, QDesktopServices, QKeySequence, QShortcut)
-from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea, QStatusBar, QTabWidget, QTextEdit, QVBoxLayout)
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QStatusBar, QTabWidget, QTextEdit, QVBoxLayout)
 from .autosave import (autosave_home, crashed, discard_recovery, empty_recovery, load_recovery, load_recovery_image, mark_clean_exit, mark_running, recovery_image_path, recovery_path, save_recovery_image)
 from .codeinput import CODE_EXTENSIONS
 from .gui_code import CodeTabMixin
@@ -50,6 +50,11 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         # built: control signals fire during construction, and
         # the dirty-marking hooks read these flags. The crash
         # check and the timer come at the end of __init__.
+        # Field explanations (task 89, U20): every field on the
+        # Image and Video tabs has one plain line under it,
+        # keyed by the control (or row) it explains — the
+        # suite pins the full set against this dict.
+        self.field_explanations = {}
         self._autosave_ready = False
         self._autosave_broken = False
         self._autosave_dirty = False
@@ -1041,6 +1046,35 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         return label
 
 
+    def _explain(self, key, text):
+        """One plain line under a field (task 89, U20).
+
+        The line is what a child or grandparent reads — one
+        short sentence in plain words, no jargon, no em-dash,
+        no programmer plural. It sits directly under its
+        field in the
+        column; the tooltip stays as the second layer. The
+        label is registered in field_explanations under a key
+        naming the control (or row) it explains, so the suite
+        can pin that every field has one and no line is
+        missing or stray.
+        """
+        label = QLabel(text)
+        label.setObjectName("explanation")
+        label.setWordWrap(True)
+        # A word-wrapped label's size hint is its unwrapped
+        # text width — left alone, the longest line stretches
+        # the whole column past the 268 px scroll area and the
+        # right edge of every widget clips (the seed line's
+        # tail vanished this way). Ignored horizontally, the
+        # label takes the column's width and wraps to it; its
+        # height follows through heightForWidth.
+        label.setSizePolicy(QSizePolicy.Policy.Ignored,
+                            QSizePolicy.Policy.Preferred)
+        self.field_explanations[key] = label
+        return label
+
+
     @staticmethod
     def _scrollable_column(controls):
         """Wrap a tab's control column in a vertical scroll area.
@@ -1092,6 +1126,14 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
             lambda _i, t=tab: self._on_library_preset(t))
         form.addWidget(combo)
         setattr(self, prefix + "preset_combo", combo)
+        # Task 89: the preset picker explains itself on the
+        # Image and Video tabs only — the Prompt tab is out of
+        # this build's scope.
+        if tab in ("image", "video"):
+            form.addWidget(self._explain(
+                prefix + "preset_combo",
+                "A saved set of size, palette, and color "
+                "choices."))
         # A skipped user preset warns HERE, in the open — the old
         # status-bar-only message was easy to miss, and the
         # pickers silently dropping to built-ins-only looked like

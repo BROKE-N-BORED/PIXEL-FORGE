@@ -87,6 +87,10 @@ class VideoTabMixin:
                 "extract_fps"))
         fps_row.addWidget(self.video_fps_combo)
         body.addLayout(fps_row)
+        body.addWidget(self._explain(
+            "video_fps_combo",
+            "How many frames to take from each second of "
+            "video."))
 
         every_row = QHBoxLayout()
         every_row.addWidget(QLabel("Keep every Nth frame"))
@@ -98,6 +102,10 @@ class VideoTabMixin:
             self._on_video_extract_changed)
         every_row.addWidget(self.video_every_spin)
         body.addLayout(every_row)
+        body.addWidget(self._explain(
+            "video_every_spin",
+            "Keeps one frame in every N. Higher means fewer "
+            "frames."))
 
         start_row = QHBoxLayout()
         start_row.addWidget(QLabel("Start time"))
@@ -109,6 +117,9 @@ class VideoTabMixin:
             self._on_video_extract_changed)
         start_row.addWidget(self.video_start_edit)
         body.addLayout(start_row)
+        body.addWidget(self._explain(
+            "video_start_edit",
+            "Start taking frames at this time, in seconds."))
 
         end_row = QHBoxLayout()
         end_row.addWidget(QLabel("End time"))
@@ -120,6 +131,9 @@ class VideoTabMixin:
             self._on_video_extract_changed)
         end_row.addWidget(self.video_end_edit)
         body.addLayout(end_row)
+        body.addWidget(self._explain(
+            "video_end_edit",
+            "Stop taking frames at this time, in seconds."))
 
         # Frame-count estimate (task 25): "about 240 frames" at
         # the current settings, blank until a video is loaded or
@@ -142,6 +156,9 @@ class VideoTabMixin:
         self.video_size_combo.currentIndexChanged.connect(
             self._on_video_preset)
         body.addWidget(self.video_size_combo)
+        body.addWidget(self._explain(
+            "video_size_combo",
+            "The size of each frame, in pixels."))
 
         video_size_row = QHBoxLayout()
         self.video_width_spin = QSpinBox()
@@ -161,6 +178,10 @@ class VideoTabMixin:
         video_size_row.addWidget(self.video_width_spin)
         video_size_row.addWidget(self.video_height_spin)
         body.addLayout(video_size_row)
+        body.addWidget(self._explain(
+            "video_size_row",
+            "Width and height in pixels. Editing one picks "
+            "Custom."))
 
         self.video_aspect_check = QCheckBox("Keep aspect ratio")
         self.video_aspect_check.setToolTip(
@@ -168,6 +189,9 @@ class VideoTabMixin:
         self.video_aspect_check.toggled.connect(
             self._on_video_control_changed)
         body.addWidget(self.video_aspect_check)
+        body.addWidget(self._explain(
+            "video_aspect_check",
+            "Keeps the picture's shape, so nothing stretches."))
 
         palette = self._video_section("palette",
                                       "Palette")
@@ -180,6 +204,9 @@ class VideoTabMixin:
         self.video_palette_combo.currentIndexChanged.connect(
             self._on_video_control_changed)
         body.addWidget(self.video_palette_combo)
+        body.addWidget(self._explain(
+            "video_palette_combo",
+            "The colors the frames are made from."))
 
         video_colors_row = QHBoxLayout()
         video_colors_row.addWidget(QLabel("Max colors"))
@@ -192,6 +219,10 @@ class VideoTabMixin:
             self._on_video_control_changed)
         video_colors_row.addWidget(self.video_colors_spin)
         body.addLayout(video_colors_row)
+        body.addWidget(self._explain(
+            "video_colors_spin",
+            "The most colors the frames may use. Fewer is "
+            "chunkier."))
 
         self.video_dither_check = QCheckBox("Dithering")
         self.video_dither_check.setToolTip(
@@ -200,6 +231,10 @@ class VideoTabMixin:
         self.video_dither_check.toggled.connect(
             self._on_video_control_changed)
         body.addWidget(self.video_dither_check)
+        body.addWidget(self._explain(
+            "video_dither_check",
+            "Fakes shades between colors with a checker "
+            "pattern."))
 
         preset = self._video_section("preset", "Preset")
         form.addWidget(preset)
@@ -239,6 +274,10 @@ class VideoTabMixin:
             self._on_fit_video_zoom)
         video_zoom_row.addWidget(self.video_zoom_fit_btn)
         body.addLayout(video_zoom_row)
+        body.addWidget(self._explain(
+            "video_zoom_slider",
+            "How big the preview looks. It does not change "
+            "the frames."))
 
         body.addWidget(self._section("Spritesheet"))
         sheet_cols_row = QHBoxLayout()
@@ -253,6 +292,9 @@ class VideoTabMixin:
             lambda _i: self._mark_video_preset_custom("sheet_cols"))
         sheet_cols_row.addWidget(self.sheet_cols_combo)
         body.addLayout(sheet_cols_row)
+        body.addWidget(self._explain(
+            "sheet_cols_combo",
+            "How many frames fit across one row of the sheet."))
 
         sheet_padding_row = QHBoxLayout()
         sheet_padding_row.addWidget(QLabel("Padding"))
@@ -267,6 +309,9 @@ class VideoTabMixin:
                 "sheet_padding"))
         sheet_padding_row.addWidget(self.sheet_padding_spin)
         body.addLayout(sheet_padding_row)
+        body.addWidget(self._explain(
+            "sheet_padding_spin",
+            "Blank pixels between frames in the sheet."))
 
         sheet_fps_row = QHBoxLayout()
         sheet_fps_row.addWidget(QLabel("Sheet fps"))
@@ -281,6 +326,9 @@ class VideoTabMixin:
             lambda _v: self._mark_video_preset_custom("sheet_fps"))
         sheet_fps_row.addWidget(self.sheet_fps_spin)
         body.addLayout(sheet_fps_row)
+        body.addWidget(self._explain(
+            "sheet_fps_spin",
+            "How fast the sheet plays, in frames per second."))
 
         # Atlas packing (task 38): MaxRects packs mixed-size
         # sprites tight instead of a grid. Grid is the current
@@ -301,6 +349,10 @@ class VideoTabMixin:
             self._on_sheet_pack_changed)
         sheet_pack_row.addWidget(self.sheet_pack_combo)
         body.addLayout(sheet_pack_row)
+        body.addWidget(self._explain(
+            "sheet_pack_combo",
+            "Grid lays frames in rows, MaxRects packs them "
+            "tight."))
 
         self.sheet_trim_check = QCheckBox("Trim transparent borders")
         self.sheet_trim_check.setToolTip(
@@ -308,6 +360,9 @@ class VideoTabMixin:
             "packing — the cut is recorded in the metadata")
         self.sheet_trim_check.setEnabled(False)
         body.addWidget(self.sheet_trim_check)
+        body.addWidget(self._explain(
+            "sheet_trim_check",
+            "Cuts clear edges off each frame before packing."))
 
         sheet_atlas_padding_row = QHBoxLayout()
         sheet_atlas_padding_row.addWidget(QLabel("Atlas padding"))
@@ -322,6 +377,10 @@ class VideoTabMixin:
         sheet_atlas_padding_row.addWidget(
             self.sheet_atlas_padding_spin)
         body.addLayout(sheet_atlas_padding_row)
+        body.addWidget(self._explain(
+            "sheet_atlas_padding_spin",
+            "Empty space kept around each sprite in the "
+            "atlas."))
 
         sheet_extrude_row = QHBoxLayout()
         sheet_extrude_row.addWidget(QLabel("Extrude"))
@@ -335,6 +394,10 @@ class VideoTabMixin:
         self.sheet_extrude_spin.setEnabled(False)
         sheet_extrude_row.addWidget(self.sheet_extrude_spin)
         body.addLayout(sheet_extrude_row)
+        body.addWidget(self._explain(
+            "sheet_extrude_spin",
+            "Copies each edge outward so scaled sheets stay "
+            "clean."))
 
         self.sheet_preview_btn = QPushButton("Preview spritesheet")
         self.sheet_preview_btn.setToolTip(
@@ -356,6 +419,10 @@ class VideoTabMixin:
         self.video_tag_list.itemSelectionChanged.connect(
             self._on_video_tag_selected)
         body.addWidget(self.video_tag_list)
+        body.addWidget(self._explain(
+            "video_tag_list",
+            "Named frame groups, like walk or idle. Pick one "
+            "to play it."))
         tag_btn_row = QHBoxLayout()
         self.video_tag_add_btn = QPushButton("Add tag")
         self.video_tag_add_btn.setToolTip(
