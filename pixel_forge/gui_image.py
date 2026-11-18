@@ -352,6 +352,14 @@ class ImageTabMixin:
             "pattern."))
 
         self._build_preset_section(form, "image")
+        # Task 91: hovering a palette or a preset previews its
+        # effect without applying it — the variants are
+        # rendered ahead of time (see _schedule_hover_prefetch),
+        # so the hover itself never renders.
+        self._install_hover_preview(self.palette_combo, "image",
+                                    "palette")
+        self._install_hover_preview(self.preset_combo, "image",
+                                    "preset")
 
         form.addWidget(self._section("Zoom"))
         zoom_row = QHBoxLayout()
@@ -472,6 +480,26 @@ class ImageTabMixin:
         after_layout = QVBoxLayout(after_pane)
         after_layout.setContentsMargins(0, 0, 0, 0)
         after_layout.addWidget(self._section("Pixel art"))
+        # Hold to compare (task 91): the button IS the hint —
+        # its text says what holding it does, so the gesture
+        # can be found instead of guessed. While held, the
+        # canvas below shows the original in place of the
+        # result; letting go brings the result back. Nothing
+        # is selected or applied by holding.
+        compare_row = QHBoxLayout()
+        self.compare_btn = QPushButton("Hold to see the original")
+        self.compare_btn.setToolTip(
+            "Hold this button to see the original image in "
+            "place of the pixel art. Let go to see the result "
+            "again")
+        self.compare_btn.setEnabled(False)
+        self.compare_btn.pressed.connect(
+            lambda: self._on_compare_hold_start("image"))
+        self.compare_btn.released.connect(
+            self._on_compare_hold_end)
+        compare_row.addWidget(self.compare_btn)
+        compare_row.addStretch(1)
+        after_layout.addLayout(compare_row)
         # Pixel editor toolbar (task 33): the tools sit above
         # the canvas they work on. Nothing is selected by
         # default — the canvas does nothing on click until a
@@ -1218,6 +1246,13 @@ class ImageTabMixin:
         self._update_editor_enabled()
         self.export_btn.setEnabled(True)
         self.save_library_btn.setEnabled(True)
+        self.compare_btn.setEnabled(True)
+        # Task 91: a fresh pixelize means a fresh source or
+        # fresh settings, so every cached hover variant is
+        # stale — drop them and queue the new set to render at
+        # idle.
+        self._invalidate_hover_cache("image")
+        self._schedule_hover_prefetch("image")
         if not self._normalmap_running():
             self.normalmap_btn.setEnabled(True)
 
@@ -1256,6 +1291,15 @@ class ImageTabMixin:
             before = gui_module.checkerboard_pixmap(source, fit, smooth=True)
             self._before_pixmap_cache = (source, fit, before)
         self.before_label.setPixmap(before)
+        # Task 91: while the compare is held, the result pane
+        # shows the original at the result's size — every
+        # refresh (a zoom drag, a control change) keeps the
+        # hold showing, and the release restores through here.
+        if self._compare_held == "image":
+            compare = self._compare_pixmap_for("image")
+            if compare is not None:
+                self.after_label.setPixmap(compare)
+                return
         if self._showing_normal_map and \
                 self.normal_map_image is not None:
             self._show_after_image(self.normal_map_image)

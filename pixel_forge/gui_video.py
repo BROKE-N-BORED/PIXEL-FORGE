@@ -243,6 +243,15 @@ class VideoTabMixin:
         # already says Preset.
         self._build_preset_section(body, "video",
                                    with_heading=False)
+        # Task 91: hovering a palette or a preset previews
+        # its effect on the current frame, without applying
+        # it — the variants are rendered ahead of time (see
+        # _schedule_hover_prefetch), so the hover itself
+        # never renders.
+        self._install_hover_preview(self.video_palette_combo,
+                                    "video", "palette")
+        self._install_hover_preview(self.video_preset_combo,
+                                    "video", "preset")
 
         # Animation holds the preview zoom, the sheet
         # settings, and the tags: the sheet settings
@@ -518,6 +527,30 @@ class VideoTabMixin:
         preview_layout = QVBoxLayout(preview_pane)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.addWidget(self._section("Animation preview"))
+        # Hold to compare (task 91): the button IS the hint —
+        # its text says what holding it does, so the gesture
+        # can be found instead of guessed. The Video preview
+        # has never had an original view before — while held,
+        # the preview shows the extracted frame before
+        # pixelize; letting go brings the pixelized frame
+        # back. Split-sheet frames have no raw set, so the
+        # button stays quiet for them (see
+        # _update_video_buttons).
+        video_compare_row = QHBoxLayout()
+        self.video_compare_btn = QPushButton(
+            "Hold to see the original")
+        self.video_compare_btn.setToolTip(
+            "Hold this button to see the extracted frame "
+            "before pixelize. Let go to see the pixelized "
+            "frame again")
+        self.video_compare_btn.setEnabled(False)
+        self.video_compare_btn.pressed.connect(
+            lambda: self._on_compare_hold_start("video"))
+        self.video_compare_btn.released.connect(
+            self._on_compare_hold_end)
+        video_compare_row.addWidget(self.video_compare_btn)
+        video_compare_row.addStretch(1)
+        preview_layout.addLayout(video_compare_row)
         self.video_preview_label = QLabel(
             "Import a video to see its frames here")
         self.video_preview_label.setAlignment(
@@ -810,6 +843,17 @@ class VideoTabMixin:
             shutil.rmtree(self.video_raw_dir, ignore_errors=True)
             self.video_raw_dir = None
         self.video_raw_frames = []
+        # Task 91: the raw frames are gone, so the compare
+        # view and the hover variants built from them are gone
+        # too — drop their caches, and end a video hold (its
+        # button goes quiet with the frames; a held compare
+        # must not outlive the frames it shows).
+        self._video_compare_cache = None
+        self._video_compare_raw = None
+        self._hover_video_frame = None
+        if self._compare_held == "video":
+            self._compare_held = None
+        self._invalidate_hover_cache("video")
 
 
     def _video_pixelize_settings(self):
@@ -1110,6 +1154,14 @@ class VideoTabMixin:
             self._on_fit_video_zoom()
         self._update_video_info()
         self._update_video_buttons()
+        # Task 91: fresh frames mean fresh hover variants — the
+        # old ones were rendered from the old clip or the old
+        # settings. A re-pixelize lands here too, with the same
+        # raw frames but new settings, so the old variants are
+        # stale either way.
+        self._invalidate_hover_cache("video")
+        self._hover_video_frame = self.video_current
+        self._schedule_hover_prefetch("video")
         if result["fresh"]:
             self.statusBar().showMessage(
                 "Loaded %s (%d frames)"
@@ -1302,12 +1354,39 @@ class VideoTabMixin:
     def _refresh_video_preview(self):
         if not self.video_frames:
             return
+        # Task 91: a frame change while the animation is
+        # stopped means a new hover source — queue that
+        # frame's variants at idle. During playback the
+        # frame changes every tick, so nothing is queued
+        # until it stops.
+        if (not self.video_timer.isActive()
+                and self._hover_video_frame != self.video_current):
+            self._hover_video_frame = self.video_current
+            self._schedule_hover_prefetch("video")
+        # Task 91: while the compare is held, the preview
+        # shows the extracted frame before pixelize — every
+        # refresh (a strip click, a scrub, a zoom drag) keeps
+        # the hold showing, and the release restores through
+        # here. The onion skin does not apply to the original.
+        if self._compare_held == "video":
+            compare = self._compare_pixmap_for("video")
+            if compare is not None:
+                self.video_preview_label.setPixmap(compare)
+                self._refresh_video_preview_meta()
+                return
         frame = self.video_frames[self.video_current]
         if self.video_onion_check.isChecked():
             frame = self._onion_frame()
         pixmap = gui_module.checkerboard_pixmap(frame, self.video_zoom_slider.value(),
                                      smooth=False)
         self.video_preview_label.setPixmap(pixmap)
+        self._refresh_video_preview_meta()
+
+    def _refresh_video_preview_meta(self):
+        """The counter, scrubber, and duration spin that sit
+        under the preview — the same whatever the preview is
+        showing (task 91: the compare view keeps them, so the
+        frame stays identified while held)."""
         kept = self._kept_indices()
         self.video_counter_label.setText(
             "Frame %d of %d (%d kept)"
@@ -1608,6 +1687,11 @@ class VideoTabMixin:
         self.video_duration_spin.setEnabled(kept)
         self.video_scrub_slider.setEnabled(kept)
         self.video_onion_check.setEnabled(kept)
+        # Task 91: the compare button needs frames AND their
+        # raw originals — split-sheet frames are finished
+        # pixel art with no raw set, so it stays quiet there.
+        self.video_compare_btn.setEnabled(
+            has_frames and bool(self.video_raw_frames))
         self._on_video_tag_selected()
 
 

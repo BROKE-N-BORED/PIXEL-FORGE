@@ -5,7 +5,7 @@ split (task 58).
 """
 
 from . import __version__, procedural
-from PySide6.QtCore import (QRect, QSettings, QTimer, Qt)
+from PySide6.QtCore import (QEvent, QRect, QSettings, QTimer, Qt)
 from PySide6.QtGui import (QAction, QKeySequence, QShortcut)
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QStatusBar, QTabWidget, QTextEdit, QVBoxLayout)
 from .autosave import (autosave_home, crashed, discard_recovery, empty_recovery, load_recovery, load_recovery_image, mark_clean_exit, mark_running, recovery_image_path, recovery_path, save_recovery_image)
@@ -166,6 +166,31 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         self._generated_seed = None
         self.result_image = None
         self._updating_size = False
+        # Hold to compare + hover to preview (task 91):
+        # _compare_held is the tab ("image" or "video") whose
+        # compare button is held down, or None — while it is
+        # set, that tab's preview shows the original instead
+        # of the result. _hovering is the (tab, kind) whose
+        # hover preview is showing, or None. _hover_cache
+        # holds rendered variants keyed by (tab, source key,
+        # settings tuple) — a hover only ever shows a cached
+        # variant, it never renders. The prefetch queue is
+        # drained one variant per timer tick at idle, so a
+        # load never blocks on rendering every variant.
+        self._compare_held = None
+        self._hovering = None
+        self._hover_cache = {}
+        self._hover_prefetch_queue = []
+        self._hover_prefetch_timer = QTimer(self)
+        self._hover_prefetch_timer.setSingleShot(True)
+        self._hover_prefetch_timer.setInterval(0)
+        self._hover_prefetch_timer.timeout.connect(
+            self._hover_prefetch_step)
+        self._hover_views = {}
+        self._compare_pixmap_cache = None
+        self._video_compare_cache = None
+        self._video_compare_raw = None
+        self._hover_video_frame = None
         # Pixel editor (task 33): the result's edit state, the
         # chosen tool and color, and the drag in progress.
         # _result_original is the freshly pixelized result — the
@@ -2276,6 +2301,336 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
                 self._refresh_prompt_pixmaps()
 
 
+    # ------------------------------------------- hold to compare (task 91)
+
+    def _on_compare_hold_start(self, tab):
+        """A compare button went down — show the original in
+        that tab's preview until it is released. The Video
+        hold stops playback first: comparing one frame while
+        the animation runs would swap the original under the
+        user's finger."""
+        if tab == "video":
+            self._stop_playback()
+        self._compare_held = tab
+        if tab == "image":
+            self._refresh_pixmaps()
+        else:
+            self._refresh_video_preview()
+
+    def _on_compare_hold_end(self):
+        """A compare button came back up — the result returns."""
+        tab = self._compare_held
+        self._compare_held = None
+        if tab == "image":
+            self._refresh_pixmaps()
+        elif tab == "video":
+            self._refresh_video_preview()
+
+    def _video_compare_raw_image(self, path):
+        """The extracted frame at path, loaded once per path —
+        the compare view and the hover prefetch both read it,
+        and re-reading the PNG on every hold would stall the
+        first hold of every frame."""
+        cached = self._video_compare_raw
+        if cached is not None and cached[0] == path:
+            return cached[1]
+        try:
+            image = gui_module.load_image(path)
+        except PixelForgeError:
+            return None
+        self._video_compare_raw = (path, image)
+        return image
+
+    def _compare_pixmap_for(self, tab):
+        """The original for one tab's preview, at the result's
+        displayed size — or None when there is nothing to
+        compare (no image loaded, no frames, no raw frame).
+        Cached per (source, result size, zoom); the key is
+        checked on every call, so no explicit invalidation is
+        needed."""
+        if tab == "image":
+            source = self.source_image
+            result = self.result_image
+            if source is None or result is None:
+                return None
+            zoom = self.zoom_slider.value()
+            key = (id(source), result.width(), result.height(),
+                   zoom)
+            cached = self._compare_pixmap_cache
+            if cached is not None and cached[0] == key:
+                return cached[1]
+            pixmap = gui_module.compare_pixmap(
+                source, result.width(), result.height(), zoom)
+            self._compare_pixmap_cache = (key, pixmap)
+            return pixmap
+        if not self.video_frames or not self.video_raw_frames:
+            return None
+        index = self.video_current
+        if index >= len(self.video_raw_frames):
+            return None
+        raw_path = self.video_raw_frames[index]
+        frame = self.video_frames[index]
+        zoom = self.video_zoom_slider.value()
+        key = (raw_path, frame.width(), frame.height(), zoom)
+        cached = self._video_compare_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        raw = self._video_compare_raw_image(raw_path)
+        if raw is None:
+            return None
+        pixmap = gui_module.compare_pixmap(
+            raw, frame.width(), frame.height(), zoom)
+        self._video_compare_cache = (key, pixmap)
+        return pixmap
+
+
+    # ------------------------------------------- hover to preview (task 91)
+
+    # The six pixelize fields a hover variant is keyed on, in
+    # order — a palette item swaps only the palette, a preset
+    # item carries its own six.
+    _PIXELIZE_FIELDS = ("width", "height", "keep_aspect",
+                        "palette", "max_colors", "dither")
+
+    def _install_hover_preview(self, combo, tab, kind):
+        """Watch one picker's popup for hovers (task 91). The
+        popup view reports the item under the mouse, and the
+        combo reports the highlighted item for keyboard
+        navigation — either one shows that item's cached
+        variant in the tab's preview. Leaving the popup (or
+        closing it) puts the current result back. kind is
+        "palette" or "preset"."""
+        view = combo.view()
+        view.setMouseTracking(True)
+        view.entered.connect(
+            lambda index, t=tab, k=kind: self._on_hover_item(t, k, index))
+        combo.highlighted.connect(
+            lambda row, t=tab, k=kind, c=combo:
+            self._on_hover_row(t, k, c, row))
+        view.installEventFilter(self)
+        self._hover_views[view] = tab
+
+    def eventFilter(self, obj, event):
+        # Task 91: a picker popup closing (Hide) or the mouse
+        # leaving it (Leave) ends the hover preview. Both are
+        # no-ops when no hover preview is showing.
+        if obj in self._hover_views and event.type() in (
+                QEvent.Type.Hide, QEvent.Type.Leave):
+            self._end_hover_preview(self._hover_views[obj])
+        return super().eventFilter(obj, event)
+
+    def _hover_settings(self, tab, kind, data):
+        """The pixelize settings one picker item stands for, as
+        a tuple — or None when the item has no preview (Custom,
+        a separator, a preset that no longer loads). A palette
+        item keeps the tab's current settings and swaps only
+        the palette; a preset item carries its own six fields,
+        falling back to the current value for any field it does
+        not carry."""
+        if data is None:
+            return None
+        current = self._read_tab_settings(tab)
+        if kind == "palette":
+            settings = dict(current)
+            settings["palette"] = data
+        else:
+            try:
+                kind_name, name = data.split(":", 1)
+                preset = self.preset_store.get(
+                    name, builtin=(kind_name == "builtin"))
+            except (ValueError, PixelForgeError):
+                return None
+            if preset is None:
+                return None
+            settings = {field: preset.get(field, current[field])
+                        for field in self._PIXELIZE_FIELDS}
+        return tuple(settings[field]
+                     for field in self._PIXELIZE_FIELDS)
+
+    def _hover_source(self, tab):
+        """The (source key, source image) a tab's hover
+        variants are rendered from — or None when there is
+        nothing loaded. The Image tab renders from the loaded
+        image; the Video tab renders from the current frame's
+        extracted file."""
+        if tab == "image":
+            if self.source_image is None:
+                return None
+            return (id(self.source_image), self.source_image)
+        if not self.video_frames or not self.video_raw_frames:
+            return None
+        index = self.video_current
+        if index >= len(self.video_raw_frames):
+            return None
+        path = self.video_raw_frames[index]
+        raw = self._video_compare_raw_image(path)
+        if raw is None:
+            return None
+        return (path, raw)
+
+    def _invalidate_hover_cache(self, tab=None):
+        """Drop the cached variants (and any prefetch still
+        queued) — the source or the settings moved, so every
+        variant is stale. tab=None clears both tabs. A hover
+        preview showing for the cleared tab is restored to the
+        current result, so a stale variant can never linger."""
+        hovering = self._hovering
+        if tab is None:
+            self._hover_cache = {}
+            self._hover_prefetch_queue = []
+        else:
+            self._hover_cache = {
+                key: value for key, value in self._hover_cache.items()
+                if key[0] != tab}
+            self._hover_prefetch_queue = [
+                job for job in self._hover_prefetch_queue
+                if job[0] != tab]
+        self._hover_prefetch_timer.stop()
+        if hovering is not None and (
+                tab is None or hovering[0] == tab):
+            self._hovering = None
+            if hovering[0] == "image":
+                self._refresh_pixmaps()
+            else:
+                self._refresh_video_preview()
+
+    def _schedule_hover_prefetch(self, tab):
+        """Queue the variants for one tab's pickers — every
+        palette and every preset — to render at idle, one per
+        timer tick, smallest first. Already-cached variants
+        are skipped, and a video schedule drops other frames'
+        entries first, so the cache never grows past one
+        frame's worth."""
+        source = self._hover_source(tab)
+        if source is None:
+            return
+        source_key, image = source
+        if tab == "video":
+            self._hover_cache = {
+                key: value for key, value in self._hover_cache.items()
+                if key[0] != "video" or key[1] == source_key}
+            self._hover_prefetch_queue = [
+                job for job in self._hover_prefetch_queue
+                if job[0] != "video" or job[1] == source_key]
+        controls = self._tab_controls(tab)
+        wanted = set()
+        for kind, combo in (("palette", controls["palette"]),
+                            ("preset", controls["preset_combo"])):
+            for row in range(combo.count()):
+                settings = self._hover_settings(
+                    tab, kind, combo.itemData(row))
+                if settings is not None:
+                    wanted.add(settings)
+        queued = {(job[0], job[1], job[2])
+                  for job in self._hover_prefetch_queue}
+        for settings in sorted(wanted,
+                               key=lambda s: s[0] * s[1]):
+            key = (tab, source_key, settings)
+            if key in self._hover_cache or key in queued:
+                continue
+            self._hover_prefetch_queue.append(
+                (tab, source_key, settings, image))
+        if self._hover_prefetch_queue and \
+                not self._hover_prefetch_timer.isActive():
+            self._hover_prefetch_timer.start()
+
+    def _hover_prefetch_step(self):
+        """Render one queued variant into the cache. A variant
+        that fails to render is skipped, never retried — the
+        hover just shows nothing for it. The timer is stopped
+        whenever the queue runs out, so no window is ever left
+        with an armed timer and nothing to render — the re-arm
+        on the second-to-last step used to leave exactly that,
+        and the stray fire counted against the hover in
+        test_hover_triggers_no_render."""
+        if not self._hover_prefetch_queue:
+            self._hover_prefetch_timer.stop()
+            return
+        tab, source_key, settings, image = \
+            self._hover_prefetch_queue.pop(0)
+        try:
+            variant = gui_module.pixelize_image(
+                image,
+                width=settings[0], height=settings[1],
+                keep_aspect=settings[2], palette=settings[3],
+                max_colors=settings[4], dither=settings[5],
+                palettes=self.palette_store.user_palettes())
+        except PixelForgeError:
+            variant = None
+        if variant is not None:
+            self._hover_cache[(tab, source_key, settings)] = variant
+        if self._hover_prefetch_queue:
+            self._hover_prefetch_timer.start()
+        else:
+            self._hover_prefetch_timer.stop()
+
+    def _render_hover_variants_now(self):
+        """Drain the prefetch queue at once — the tests and the
+        proof use this instead of waiting on the idle timer."""
+        self._hover_prefetch_timer.stop()
+        while self._hover_prefetch_queue:
+            self._hover_prefetch_step()
+        self._hover_prefetch_timer.stop()
+
+    def _on_hover_row(self, tab, kind, combo, row):
+        """A picker item was highlighted (keyboard navigation,
+        or the mouse on a real display) — show its cached
+        variant. Row -1 means no item is highlighted: the
+        current result comes back."""
+        if row < 0:
+            self._end_hover_preview(tab)
+            return
+        self._show_hover_variant(
+            tab, kind, self._hover_settings(tab, kind,
+                                            combo.itemData(row)))
+
+    def _on_hover_item(self, tab, kind, index):
+        """The mouse entered one picker item — show its cached
+        variant in the tab's preview."""
+        if not index.isValid():
+            return
+        controls = self._tab_controls(tab)
+        combo = controls["palette"] if kind == "palette" \
+            else controls["preset_combo"]
+        self._show_hover_variant(
+            tab, kind, self._hover_settings(tab, kind,
+                                            combo.itemData(index.row())))
+
+    def _show_hover_variant(self, tab, kind, settings):
+        """Show one cached variant in a tab's preview. A
+        variant that is not cached yet shows nothing: the
+        hover never renders, it only ever displays what the
+        prefetch already made."""
+        if settings is None:
+            return
+        source = self._hover_source(tab)
+        if source is None:
+            return
+        variant = self._hover_cache.get((tab, source[0], settings))
+        if variant is None:
+            return
+        self._hovering = (tab, kind)
+        if tab == "image":
+            self._show_after_image(variant)
+        else:
+            self.video_preview_label.setPixmap(
+                gui_module.checkerboard_pixmap(
+                    variant, self.video_zoom_slider.value(),
+                    smooth=False))
+
+    def _end_hover_preview(self, tab):
+        """The mouse left the picker — the current result comes
+        back. A no-op when no hover preview is showing, so the
+        popup's Hide and Leave events can both call it freely."""
+        if self._hovering is None or self._hovering[0] != tab:
+            return
+        self._hovering = None
+        if tab == "image":
+            self._refresh_pixmaps()
+        else:
+            self._refresh_video_preview()
+
+
     def _mark_video_preset_custom(self, field):
         """A video control changed by hand — if the picked preset
         carries that field, the tab no longer matches it, so the
@@ -2376,6 +2731,12 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
                     combo.setCurrentIndex(index)
                 self.statusBar().showMessage(
                     "Palette %r is gone — using From image" % current)
+        # Task 91: the palettes themselves changed — a palette
+        # edited under the same name would serve a stale hover
+        # variant, so the caches go and the new set is queued.
+        self._invalidate_hover_cache()
+        self._schedule_hover_prefetch("image")
+        self._schedule_hover_prefetch("video")
 
 
     def _open_palette_editor(self, prefill=None, prefill_name=None):
@@ -2464,6 +2825,11 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         # a phantom picker-only step (task 30).
         if self._tab_settings is not None:
             self._sync_tab_settings()
+        # Task 91: the preset list changed — a saved preset
+        # has no cached variant yet, so queue the new set
+        # (already-cached variants are skipped).
+        self._schedule_hover_prefetch("image")
+        self._schedule_hover_prefetch("video")
 
 
     def _update_preset_buttons(self, tab):

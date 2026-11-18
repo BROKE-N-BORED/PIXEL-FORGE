@@ -399,6 +399,26 @@ def code_filter():
     return "Code (%s);;All files (*)" % patterns
 
 
+def _pixmap_over_checkerboard(scaled):
+    """A scaled QImage composited over the checkerboard, so
+    transparency reads clearly in the preview. Shared by
+    checkerboard_pixmap and compare_pixmap — the board is the
+    same in both, only the scaling differs."""
+    width, height = scaled.width(), scaled.height()
+    canvas = QImage(width, height, QImage.Format.Format_ARGB32)
+    painter = QPainter(canvas)
+    cell = 12
+    light = Qt.GlobalColor.lightGray
+    dark = Qt.GlobalColor.darkGray
+    for y in range(0, height, cell):
+        for x in range(0, width, cell):
+            color = light if ((x // cell) + (y // cell)) % 2 == 0 else dark
+            painter.fillRect(x, y, cell, cell, color)
+    painter.drawImage(0, 0, scaled)
+    painter.end()
+    return QPixmap.fromImage(canvas)
+
+
 def checkerboard_pixmap(image, scale, smooth):
     """Scale an image and composite it over a checkerboard so
     transparency reads clearly in the preview.
@@ -418,18 +438,27 @@ def checkerboard_pixmap(image, scale, smooth):
             Qt.TransformationMode.FastTransformation)
     scaled = to_qimage(image).scaled(
         width, height, Qt.AspectRatioMode.IgnoreAspectRatio, mode)
-    canvas = QImage(width, height, QImage.Format.Format_ARGB32)
-    painter = QPainter(canvas)
-    cell = 12
-    light = Qt.GlobalColor.lightGray
-    dark = Qt.GlobalColor.darkGray
-    for y in range(0, height, cell):
-        for x in range(0, width, cell):
-            color = light if ((x // cell) + (y // cell)) % 2 == 0 else dark
-            painter.fillRect(x, y, cell, cell, color)
-    painter.drawImage(0, 0, scaled)
-    painter.end()
-    return QPixmap.fromImage(canvas)
+    return _pixmap_over_checkerboard(scaled)
+
+
+def compare_pixmap(image, width, height, zoom):
+    """The original at the RESULT's displayed size (task 91) —
+    the hold-to-compare view. The original is scaled to exactly
+    width x height pixels (the result's size, so the two line
+    up), then by the zoom, smoothly — a pixelized original
+    would defeat the comparison. Same MAX_DISPLAY cap and the
+    same checkerboard as checkerboard_pixmap."""
+    width = max(1, int(width * zoom))
+    height = max(1, int(height * zoom))
+    longest = max(width, height)
+    if longest > MAX_DISPLAY:
+        factor = MAX_DISPLAY / longest
+        width = max(1, int(width * factor))
+        height = max(1, int(height * factor))
+    scaled = to_qimage(image).scaled(
+        width, height, Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation)
+    return _pixmap_over_checkerboard(scaled)
 
 
 def thumb_pixmap(image, size):
@@ -511,6 +540,13 @@ class _PixelCanvas(QLabel):
         return QPoint(int(px), int(py))
 
     def mousePressEvent(self, event):
+        # Task 91: while the compare is held the canvas shows
+        # the ORIGINAL, not the result — a click there would
+        # paint blind onto pixels the user cannot see. The
+        # canvas stays dead until the hold is released.
+        if getattr(self._window, "_compare_held", None) == "image":
+            event.ignore()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._window._canvas_press(
                 self.pixel_at(event.position().toPoint()))
@@ -519,6 +555,9 @@ class _PixelCanvas(QLabel):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if getattr(self._window, "_compare_held", None) == "image":
+            event.ignore()
+            return
         if event.buttons() & Qt.MouseButton.LeftButton:
             self._window._canvas_move(
                 self.pixel_at(event.position().toPoint()))
@@ -527,6 +566,9 @@ class _PixelCanvas(QLabel):
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if getattr(self._window, "_compare_held", None) == "image":
+            event.ignore()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._window._canvas_release(
                 self.pixel_at(event.position().toPoint()))

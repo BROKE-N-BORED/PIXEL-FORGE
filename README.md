@@ -362,6 +362,13 @@ it keeps them and prints the way to remove them by hand.
   filename next to the source file, or the last-used export
   folder when there is no source; and the window title shows
   the version.
+- **Compare and preview:** the Pixel art pane and the Animation
+  preview each have a "Hold to see the original" button — hold
+  it to see the original in place of the result, let go to see
+  the result again. Hovering a preset or a palette in its picker
+  previews its effect on the spot without applying anything;
+  moving off puts the current result back, and clicking applies
+  as before.
 
 **Command line:**
 

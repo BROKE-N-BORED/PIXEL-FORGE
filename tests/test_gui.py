@@ -12476,5 +12476,393 @@ class ActivityTests(unittest.TestCase):
         self.assertTrue(self.win._activity_cancel.isHidden())
 
 
+class CompareHoverTests(unittest.TestCase):
+    """Task 91 (U16/U34): hold to compare + hover to preview.
+    A visible "Hold to see the original" button on the Image
+    and Video tabs shows the original while held and restores
+    the result on release; hovering a preset or palette in its
+    picker previews its cached variant without applying it,
+    and the hover never renders. Runner group g14."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.tmp = tempfile.mkdtemp()
+        self.win = MainWindow()
+        self.win.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _wait_for_video(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.video_worker is None
+                    and not self.win._video_debounce_timer.isActive()):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _load_image(self):
+        src = write_image(make_gradient_image(96, 96),
+                          os.path.join(self.tmp, "photo.png"))
+        self.assertTrue(self.win.load_image(src))
+        self.app.processEvents()
+        return src
+
+    def _load_video(self):
+        from pixel_forge import video as video_mod
+        if video_mod.find_ffmpeg() is None:
+            self.skipTest("ffmpeg not installed")
+        clip = make_test_video(os.path.join(self.tmp, "clip.mp4"),
+                               duration=1, fps=8, width=80,
+                               height=60)
+        self.win.tabs.setCurrentIndex(1)
+        self.assertTrue(self.win.load_video(clip))
+        self.assertTrue(self._wait_for_video())
+        return clip
+
+    def _hover(self, combo, row):
+        """Drive one real hover: the popup view's entered
+        signal, the way the mouse delivers it."""
+        index = combo.view().model().index(row, 0)
+        combo.view().entered.emit(index)
+        self.app.processEvents()
+
+    # --------------------------------------------------- the hint
+
+    def test_compare_buttons_are_the_hint(self):
+        # The button text says what holding it does — the
+        # gesture can be found, not guessed. Plain words, no
+        # em-dash, a tooltip on each, quiet until there is
+        # something to compare.
+        for button in (self.win.compare_btn,
+                       self.win.video_compare_btn):
+            self.assertEqual(button.text(),
+                             "Hold to see the original")
+            self.assertNotIn("\u2014", button.text())
+            self.assertNotIn("\u2014", button.toolTip())
+            self.assertTrue(button.toolTip())
+            self.assertFalse(button.isEnabled())
+        self._load_image()
+        self.assertTrue(self.win.compare_btn.isEnabled())
+
+    # --------------------------------------------------- image hold
+
+    def test_image_hold_shows_original_release_restores(self):
+        self._load_image()
+        result = self.win.after_label.pixmap().toImage()
+        self.win.compare_btn.pressed.emit()
+        self.app.processEvents()
+        held = self.win.after_label.pixmap().toImage()
+        self.assertNotEqual(held, result,
+                            "holding still shows the result")
+        expected = self.win._compare_pixmap_for("image")
+        self.assertIsNotNone(expected)
+        self.assertEqual(held, expected.toImage(),
+                         "holding shows something else than the "
+                         "original at the result size")
+        self.win.compare_btn.released.emit()
+        self.app.processEvents()
+        self.assertEqual(self.win.after_label.pixmap().toImage(),
+                         result, "release did not restore the result")
+
+    def test_image_hold_matches_result_size(self):
+        # The comparison only reads when the two line up: the
+        # held original is the result's displayed size.
+        self._load_image()
+        result = self.win.after_label.pixmap()
+        self.win.compare_btn.pressed.emit()
+        self.app.processEvents()
+        held = self.win.after_label.pixmap()
+        self.assertEqual((held.width(), held.height()),
+                         (result.width(), result.height()))
+        self.win.compare_btn.released.emit()
+
+    def test_canvas_is_dead_while_held(self):
+        # The canvas shows the original while held — a click
+        # there would paint blind onto pixels the user cannot
+        # see, so the canvas ignores it entirely.
+        from PySide6.QtTest import QTest
+        self._load_image()
+        self.win._on_editor_tool("pencil")
+        with mock.patch.object(self.win, "_canvas_press") as press:
+            pos = self.win.after_label.pos_for_pixel(0, 0)
+            QTest.mousePress(self.win.after_label,
+                             Qt.MouseButton.LeftButton, pos=pos)
+            self.assertEqual(press.call_count, 1)
+            self.win.compare_btn.pressed.emit()
+            self.app.processEvents()
+            QTest.mousePress(self.win.after_label,
+                             Qt.MouseButton.LeftButton, pos=pos)
+            self.assertEqual(press.call_count, 1,
+                             "a canvas press landed while the "
+                             "original was showing")
+            self.win.compare_btn.released.emit()
+            self.app.processEvents()
+            QTest.mousePress(self.win.after_label,
+                             Qt.MouseButton.LeftButton, pos=pos)
+            self.assertEqual(press.call_count, 2)
+
+    # --------------------------------------------------- video hold
+
+    def test_video_hold_shows_original_release_restores(self):
+        self._load_video()
+        self.assertTrue(self.win.video_compare_btn.isEnabled())
+        result = self.win.video_preview_label.pixmap().toImage()
+        self.win.video_compare_btn.pressed.emit()
+        self.app.processEvents()
+        held = self.win.video_preview_label.pixmap().toImage()
+        self.assertNotEqual(held, result,
+                            "holding still shows the pixelized frame")
+        expected = self.win._compare_pixmap_for("video")
+        self.assertIsNotNone(expected)
+        self.assertEqual(held, expected.toImage(),
+                         "holding shows something else than the "
+                         "extracted frame")
+        self.win.video_compare_btn.released.emit()
+        self.app.processEvents()
+        self.assertEqual(
+            self.win.video_preview_label.pixmap().toImage(),
+            result, "release did not restore the pixelized frame")
+
+    def test_video_compare_disabled_without_raw_frames(self):
+        # Split-sheet frames are finished pixel art — there is
+        # no raw set to compare against, so the button stays
+        # quiet for them.
+        frame = make_solid_image(32, 32, 200, 30, 30)
+        self.win._load_split_frames([frame], [125], [], "sheet")
+        self.app.processEvents()
+        self.assertTrue(self.win.video_frames)
+        self.assertFalse(self.win.video_compare_btn.isEnabled())
+
+    def test_video_hold_stops_playback(self):
+        self._load_video()
+        self.win.video_play_btn.click()
+        self.app.processEvents()
+        self.assertTrue(self.win.video_timer.isActive())
+        self.win.video_compare_btn.pressed.emit()
+        self.app.processEvents()
+        self.assertFalse(self.win.video_timer.isActive(),
+                         "playback kept running under the hold")
+        self.win.video_compare_btn.released.emit()
+
+    # --------------------------------------------------- hover
+
+    def test_hover_palette_previews_without_applying(self):
+        self._load_image()
+        self.win._render_hover_variants_now()
+        result = self.win.after_label.pixmap().toImage()
+        before = self.win.result_image
+        row = self.win.palette_combo.findData("gameboy")
+        self.assertGreaterEqual(row, 0)
+        self._hover(self.win.palette_combo, row)
+        hovered = self.win.after_label.pixmap().toImage()
+        self.assertNotEqual(hovered, result,
+                            "hovering the palette changed nothing")
+        # Nothing applied: the picker, the controls, and the
+        # result are all exactly as they were.
+        self.assertEqual(self.win.palette_combo.currentData(),
+                         "image")
+        self.assertEqual(self.win.result_image, before)
+        self.win._end_hover_preview("image")
+        self.app.processEvents()
+        self.assertEqual(self.win.after_label.pixmap().toImage(),
+                         result, "leaving did not restore the result")
+
+    def test_hover_preset_previews_without_applying(self):
+        self._load_image()
+        self.win._render_hover_variants_now()
+        result = self.win.after_label.pixmap().toImage()
+        row = self.win.preset_combo.findData("builtin:Game Boy 32")
+        self.assertGreaterEqual(row, 0)
+        self._hover(self.win.preset_combo, row)
+        self.assertNotEqual(
+            self.win.after_label.pixmap().toImage(), result,
+            "hovering the preset changed nothing")
+        self.assertEqual(self.win.preset_combo.currentData(),
+                         None)
+        self.assertEqual(self.win.width_spin.value(), 32)
+        self.assertEqual(self.win.colors_spin.value(), 16)
+        self.win._end_hover_preview("image")
+        self.app.processEvents()
+        self.assertEqual(self.win.after_label.pixmap().toImage(),
+                         result)
+
+    def test_hover_triggers_no_render(self):
+        # The rule: a hover never renders — it only displays
+        # what the prefetch already made. Count pixelize calls
+        # across two hovers (palette + preset).
+        import pixel_forge.gui as gui_mod
+        self._load_image()
+        self.win._render_hover_variants_now()
+        # The cache is warm: stop the prefetch timer and flush
+        # the event loop, so the only pixelize calls the
+        # counter can see are the hovers' own.
+        self.win._hover_prefetch_timer.stop()
+        self.app.processEvents()
+        calls = []
+        original = gui_mod.pixelize_image
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        with mock.patch.object(gui_mod, "pixelize_image", counting):
+            palette_row = self.win.palette_combo.findData("gameboy")
+            self._hover(self.win.palette_combo, palette_row)
+            preset_row = self.win.preset_combo.findData(
+                "builtin:Game Boy 32")
+            self._hover(self.win.preset_combo, preset_row)
+            self.win._end_hover_preview("image")
+        self.assertEqual(calls, [],
+                         "hovering rendered %d time(s)" % len(calls))
+
+    def test_hover_with_cold_cache_shows_nothing(self):
+        # A variant the prefetch has not made yet shows nothing
+        # — the preview stays on the current result rather than
+        # stalling on a render.
+        self._load_image()
+        self.win._invalidate_hover_cache("image")
+        result = self.win.after_label.pixmap().toImage()
+        row = self.win.palette_combo.findData("gameboy")
+        self._hover(self.win.palette_combo, row)
+        self.assertEqual(self.win.after_label.pixmap().toImage(),
+                         result)
+        self.assertIsNone(self.win._hovering)
+
+    def test_hover_ends_when_popup_closes_or_leaves(self):
+        # Both ways out of a popup — closing it (Hide) and the
+        # mouse leaving it (Leave) — put the result back.
+        from PySide6.QtCore import QEvent
+        self._load_image()
+        self.win._render_hover_variants_now()
+        result = self.win.after_label.pixmap().toImage()
+        row = self.win.palette_combo.findData("gameboy")
+        view = self.win.palette_combo.view()
+        self._hover(self.win.palette_combo, row)
+        self.assertIsNotNone(self.win._hovering)
+        self.win.eventFilter(view, QEvent(QEvent.Type.Hide))
+        self.app.processEvents()
+        self.assertIsNone(self.win._hovering)
+        self.assertEqual(self.win.after_label.pixmap().toImage(),
+                         result)
+        self._hover(self.win.palette_combo, row)
+        self.assertIsNotNone(self.win._hovering)
+        self.win.eventFilter(view, QEvent(QEvent.Type.Leave))
+        self.app.processEvents()
+        self.assertIsNone(self.win._hovering)
+        self.assertEqual(self.win.after_label.pixmap().toImage(),
+                         result)
+
+    def test_click_applies_after_hover(self):
+        # Hover previews, click applies: picking the hovered
+        # palette re-pixelizes to exactly the previewed
+        # variant.
+        self._load_image()
+        self.win._render_hover_variants_now()
+        settings = self.win._hover_settings("image", "palette",
+                                            "gameboy")
+        source = self.win._hover_source("image")
+        variant = self.win._hover_cache[("image", source[0],
+                                         settings)]
+        row = self.win.palette_combo.findData("gameboy")
+        self._hover(self.win.palette_combo, row)
+        self.win.palette_combo.setCurrentIndex(row)
+        self.app.processEvents()
+        self.assertEqual(self.win.palette_combo.currentData(),
+                         "gameboy")
+        self.assertEqual(self.win.result_image, variant,
+                         "applying the palette did not land on "
+                         "the previewed variant")
+
+    def test_prefetch_fills_cache_at_idle(self):
+        # Without any manual drain, the idle timer renders the
+        # variants — a few event-loop pumps fill the cache.
+        self._load_image()
+        deadline = time.monotonic() + 10
+        settings = self.win._hover_settings("image", "palette",
+                                            "gameboy")
+        source = self.win._hover_source("image")
+        key = ("image", source[0], settings)
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if key in self.win._hover_cache:
+                break
+            time.sleep(0.05)
+        self.assertIn(key, self.win._hover_cache,
+                      "the idle prefetch never rendered the "
+                      "gameboy variant")
+
+    def test_control_change_invalidates_cache(self):
+        # A control change moves the settings, so the variants
+        # rendered under the old settings are gone.
+        self._load_image()
+        self.win._render_hover_variants_now()
+        settings = self.win._hover_settings("image", "palette",
+                                            "image")
+        source = self.win._hover_source("image")
+        old_key = ("image", source[0], settings)
+        self.assertIn(old_key, self.win._hover_cache)
+        self.win.colors_spin.setValue(8)
+        self.app.processEvents()
+        self.assertNotIn(old_key, self.win._hover_cache,
+                         "a variant from the old color count "
+                         "survived the control change")
+
+    # --------------------------------------------------- video hover
+
+    def test_video_hover_palette_previews_without_applying(self):
+        self._load_video()
+        self.win._render_hover_variants_now()
+        result = self.win.video_preview_label.pixmap().toImage()
+        frames_before = list(self.win.video_frames)
+        row = self.win.video_palette_combo.findData("gameboy")
+        self.assertGreaterEqual(row, 0)
+        self._hover(self.win.video_palette_combo, row)
+        self.assertNotEqual(
+            self.win.video_preview_label.pixmap().toImage(), result,
+            "hovering the palette changed nothing")
+        self.assertEqual(
+            self.win.video_palette_combo.currentData(), "image")
+        self.assertEqual(self.win.video_frames, frames_before)
+        self.win._end_hover_preview("video")
+        self.app.processEvents()
+        self.assertEqual(
+            self.win.video_preview_label.pixmap().toImage(), result)
+
+    def test_video_hover_triggers_no_render(self):
+        import pixel_forge.gui as gui_mod
+        self._load_video()
+        self.win._render_hover_variants_now()
+        # The cache is warm: stop the prefetch timer and flush
+        # the event loop, so the only pixelize calls the
+        # counter can see are the hovers' own.
+        self.win._hover_prefetch_timer.stop()
+        self.app.processEvents()
+        calls = []
+        original = gui_mod.pixelize_image
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        with mock.patch.object(gui_mod, "pixelize_image", counting):
+            row = self.win.video_palette_combo.findData("gameboy")
+            self._hover(self.win.video_palette_combo, row)
+            self.win._end_hover_preview("video")
+        self.assertEqual(calls, [],
+                         "hovering rendered %d time(s)" % len(calls))
+
+
 if __name__ == "__main__":
     unittest.main()

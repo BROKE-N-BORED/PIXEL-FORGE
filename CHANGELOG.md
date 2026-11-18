@@ -1,5 +1,20 @@
 # Pixel Forge changelog
 
+## 0.84 — 2026-11-18
+
+Hold to compare and hover to preview (task 91). The
+Pixel art pane and the Animation preview each have a
+"Hold to see the original" button: hold it and the
+original shows in place of the result, let go and the
+result comes back. The Video preview has never had an
+original view before — it shows the extracted frame
+before pixelize. Hovering a preset or a palette in its
+picker previews its effect on the spot, without
+applying anything — the previews are rendered ahead of
+time, so hovering never waits on a render. Moving off
+puts the current result back; clicking applies as
+before. Nothing else behaves differently.
+
 ## 0.83 — 2026-11-18
 
 Silent update check and ask-first auto-update (task 103).
