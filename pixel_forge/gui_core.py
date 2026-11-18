@@ -333,6 +333,26 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         self._build_menu_bar()
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready — import an image to begin.")
+        # Activity indicator (task 90): a square accent dot, a
+        # short plain-words text, and a Cancel button, pinned to
+        # the right of the status bar. Hidden until an operation
+        # starts — the running set below is the only state; the
+        # dot is static, there is no animation loop and no timer.
+        self._activity_running = {}
+        self._activity_cancelling = set()
+        self._activity_saved_message = None
+        self._activity_dot = QLabel()
+        self._activity_dot.setObjectName("activityDot")
+        self._activity_text = QLabel()
+        self._activity_text.setObjectName("activityText")
+        self._activity_cancel = QPushButton("Cancel")
+        self._activity_cancel.setObjectName("activityCancel")
+        self._activity_cancel.setToolTip("Stop the running operation")
+        self._activity_cancel.clicked.connect(self._on_activity_cancel)
+        for widget in (self._activity_dot, self._activity_text,
+                       self._activity_cancel):
+            widget.hide()
+            self.statusBar().addPermanentWidget(widget)
         self._refresh_preset_combos()
         self._refresh_library()
         self._refresh_prompt_status()
@@ -367,6 +387,103 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         # first control change has a "before" to record against.
         self._sync_tab_settings()
         self._refresh_undo_actions()
+
+
+    # ================================================ activity indicator
+
+    def _activity_start(self, key, text, cancel=None):
+        """Show the status-bar activity indicator for one running
+        operation (task 90, U16/U26). key names the operation
+        ("video", "prompt", ...); text is the plain-words line
+        ("Extracting frames…", "Generating 2 of 3 candidates");
+        cancel is the operation's own cancel slot, or None when
+        the operation cannot be stopped. Several operations can
+        run at once — the indicator shows the most recently
+        started one, and a finish only clears its own key, so a
+        finished operation never hides one still running."""
+        if not hasattr(self, "_activity_running"):
+            return
+        if not self._activity_running:
+            # The indicator borrows the message area while work
+            # runs: save what was showing and clear it, so a
+            # stale message cannot sit beside the live indicator
+            # disagreeing with it — a video run's "Extracting
+            # frames…" would otherwise stay up while the
+            # indicator moved on to "Pixelizing frame 12 of
+            # 48". The saved message is restored when the last
+            # operation finishes, so a quiet operation (the
+            # automatic update check finding nothing) leaves
+            # the status bar exactly as it was.
+            self._activity_saved_message = \
+                self.statusBar().currentMessage()
+            self.statusBar().clearMessage()
+        self._activity_running[key] = (text, cancel)
+        self._activity_cancelling.discard(key)
+        self._activity_refresh()
+
+    def _activity_update(self, key, text):
+        """Update the indicator's text for a running operation —
+        the determinate counts ("Pixelizing frame 12 of 40").
+        A stale update for a finished operation is ignored."""
+        if not hasattr(self, "_activity_running"):
+            return
+        if key in self._activity_running:
+            _old, cancel = self._activity_running[key]
+            self._activity_running[key] = (text, cancel)
+            self._activity_refresh()
+
+    def _activity_finish(self, key):
+        """An operation ended (done, failed, or cancelled) — drop
+        it from the running set and show the next most recent
+        one, or hide the indicator when nothing is running."""
+        if not hasattr(self, "_activity_running"):
+            return
+        if key in self._activity_running:
+            del self._activity_running[key]
+            self._activity_cancelling.discard(key)
+            if (not self._activity_running
+                    and self._activity_saved_message is not None):
+                # Give the message area back: whatever was
+                # showing before the work started. A done slot
+                # that sets its own message runs after this and
+                # replaces it with the outcome.
+                self.statusBar().showMessage(
+                    self._activity_saved_message)
+                self._activity_saved_message = None
+            self._activity_refresh()
+
+    def _activity_refresh(self):
+        """Redraw the indicator from the running set."""
+        if not self._activity_running:
+            self._activity_dot.hide()
+            self._activity_text.hide()
+            self._activity_cancel.hide()
+            return
+        key = next(reversed(self._activity_running))
+        text, cancel = self._activity_running[key]
+        self._activity_text.setText(text)
+        self._activity_dot.show()
+        self._activity_text.show()
+        self._activity_cancel.setVisible(cancel is not None)
+        self._activity_cancel.setEnabled(
+            key not in self._activity_cancelling)
+
+    def _on_activity_cancel(self):
+        """The indicator's Cancel button: call the shown
+        operation's own cancel slot — the same one its tab
+        button calls — then disable the button so a second
+        press cannot double-cancel. The operation's own
+        cancelled slot clears the indicator when the stop
+        lands."""
+        if not self._activity_running:
+            return
+        key = next(reversed(self._activity_running))
+        _text, cancel = self._activity_running[key]
+        if cancel is None:
+            return
+        self._activity_cancelling.add(key)
+        self._activity_cancel.setEnabled(False)
+        cancel()
 
 
     # ================================================ menus, shortcuts, help
@@ -2676,6 +2793,7 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         worker.done.connect(self._on_update_check_done)
         self.update_worker = worker
         worker.start()
+        self._activity_start("update", "Checking for updates…")
         return True
 
 
@@ -2706,6 +2824,7 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         if self.sender() is not self.update_worker:
             return
         self.update_worker = None
+        self._activity_finish("update")
         state = result.get("state")
         manual = result.get("manual", False)
         if state == "newer":

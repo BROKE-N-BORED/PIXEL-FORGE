@@ -459,6 +459,7 @@ class CodeTabMixin:
         if self.sender() is not self.texture_worker:
             return
         self.texture_worker = None
+        self._activity_finish("texture")
         texture = result["image"]
         self.code_kind = "texture"
         # An overridden skin keeps its skin path and layout —
@@ -558,6 +559,7 @@ class CodeTabMixin:
         if self.sender() is not self.texture_worker:
             return
         self.texture_worker = None
+        self._activity_finish("texture")
         gui_module.warn_dialog(self, "Texture import failed", message)
         self.statusBar().showMessage("Texture load failed")
 
@@ -591,6 +593,10 @@ class CodeTabMixin:
         self.texture_worker.done.connect(self._on_texture_done)
         self.texture_worker.failed.connect(self._on_texture_failed)
         self.statusBar().showMessage("Loading texture…")
+        # No Cancel: the render is one call that cannot be
+        # interrupted mid-flight, and a newer run supersedes —
+        # _stop_texture_worker waits for the old one first.
+        self._activity_start("texture", "Loading texture…")
         self.texture_worker.start()
 
 

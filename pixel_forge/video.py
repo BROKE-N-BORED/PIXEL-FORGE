@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from .pixelize import PixelForgeError, load_image, pixelize_image
@@ -48,6 +49,13 @@ VIDEO_EXTENSIONS = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v",
 
 TIME_RE = re.compile(
     r"^(?:(\d+):)?(?:(\d+):)?(\d+(?:\.\d+)?)$")
+
+
+class ExtractionCancelled(Exception):
+    """The user cancelled a frame extraction. Not an error —
+    the old frames stay, and the half-extracted temp dir is
+    cleaned up by the caller (the Video worker). Mirrors
+    bgremove.RemovalCancelled and imagegen.GenerationCancelled."""
 
 
 def find_ffmpeg():
@@ -249,7 +257,7 @@ def build_filter(fps, every):
 
 
 def extract_frames(video_path, out_dir, fps=DEFAULT_FPS, every=1,
-                   start=None, end=None):
+                   start=None, end=None, cancel_event=None):
     """Extract frames from a video with ffmpeg.
 
     Returns the extracted frame paths in playback order. fps picks
@@ -257,7 +265,16 @@ def extract_frames(video_path, out_dir, fps=DEFAULT_FPS, every=1,
     every Nth frame of those; start/end trim the range (seconds or
     MM:SS). Raises PixelForgeError with a readable message on any
     failure — missing ffmpeg, missing file, unreadable video, or an
-    empty result.
+    empty result. cancel_event (a threading.Event, task 90) stops
+    the ffmpeg run mid-flight: the process is killed and
+    ExtractionCancelled is raised instead. The ffmpeg run uses
+    Popen with a communicate() timeout loop rather than
+    subprocess.run, so the event is checked while ffmpeg works
+    (a blocking run call could never see it) — communicate()
+    drains the pipes on every pass, so a chatty ffmpeg cannot
+    deadlock on a full stderr buffer. The 30 minute timeout
+    stands: a run past it is killed and raises PixelForgeError
+    with the same message as before.
     """
     ffmpeg = require_ffmpeg()
     video = Path(video_path)
@@ -288,22 +305,40 @@ def extract_frames(video_path, out_dir, fps=DEFAULT_FPS, every=1,
         cmd += ["-vf", video_filter]
     cmd += ["-vsync", "0", pattern]
 
+    # A cancel set before the run starts aborts before ffmpeg
+    # spawns — the loop below only sees the event on a timeout,
+    # and a fast ffmpeg could finish before the first one.
+    if cancel_event is not None and cancel_event.is_set():
+        raise ExtractionCancelled()
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=1800)
-    except subprocess.TimeoutExpired:
-        raise PixelForgeError(
-            "ffmpeg took too long on %s — try a shorter range or a "
-            "lower fps" % video.name)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
     except OSError as exc:
         raise PixelForgeError("could not run ffmpeg: %s" % exc)
+    deadline = time.monotonic() + 1800
+    while True:
+        try:
+            _out, stderr = proc.communicate(timeout=0.1)
+            break
+        except subprocess.TimeoutExpired:
+            if (cancel_event is not None
+                    and cancel_event.is_set()):
+                proc.kill()
+                proc.communicate()
+                raise ExtractionCancelled()
+            if time.monotonic() > deadline:
+                proc.kill()
+                proc.communicate()
+                raise PixelForgeError(
+                    "ffmpeg took too long on %s — try a shorter "
+                    "range or a lower fps" % video.name)
     if proc.returncode != 0:
         # Slice the LIST of lines, not the joined string: taking
         # [-3:] of the joined string gave the last 3 characters,
         # which the old "; ".join then garbled into "p; u; t"
         # (review B3). The last 3 non-blank lines, each on its
         # own line; empty output leaves no detail at all.
-        lines = [line for line in (proc.stderr or "").splitlines()
+        lines = [line for line in (stderr or "").splitlines()
                  if line.strip()]
         tail = lines[-3:]
         detail = ("\n" + "\n".join(tail)) if tail else ""

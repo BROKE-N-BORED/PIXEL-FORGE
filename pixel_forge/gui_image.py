@@ -629,6 +629,8 @@ class ImageTabMixin:
         self.bgremove_cancel_btn.setEnabled(True)
         self.import_btn.setEnabled(False)
         self.statusBar().showMessage("Removing background…")
+        self._activity_start("bgremove", "Removing background…",
+                             cancel=self._on_bgremove_cancel)
         self.bgremove_worker.start()
 
 
@@ -642,6 +644,7 @@ class ImageTabMixin:
 
     def _bgremove_finished(self):
         """Buttons back after a run ends, whatever the outcome."""
+        self._activity_finish("bgremove")
         self.bgremove_worker = None
         self.import_btn.setEnabled(True)
         self.bgremove_cancel_btn.setEnabled(False)
@@ -737,6 +740,8 @@ class ImageTabMixin:
         self.gridsnap_cancel_btn.setEnabled(True)
         self.import_btn.setEnabled(False)
         self.statusBar().showMessage("Finding the pixel grid…")
+        self._activity_start("gridsnap", "Finding the pixel grid…",
+                             cancel=self._on_gridsnap_cancel)
         self.gridsnap_worker.start()
 
 
@@ -750,6 +755,7 @@ class ImageTabMixin:
 
     def _gridsnap_finished(self):
         """Buttons back after a run ends, whatever the outcome."""
+        self._activity_finish("gridsnap")
         self.gridsnap_worker = None
         self.import_btn.setEnabled(True)
         self.gridsnap_cancel_btn.setEnabled(False)
@@ -854,6 +860,9 @@ class ImageTabMixin:
         self.normalmap_cancel_btn.setEnabled(True)
         self.normalmap_strength_spin.setEnabled(False)
         self.statusBar().showMessage("Generating the normal map…")
+        self._activity_start("normalmap",
+                             "Generating the normal map…",
+                             cancel=self._on_normalmap_cancel)
         self.normalmap_worker.start()
 
 
@@ -867,6 +876,7 @@ class ImageTabMixin:
 
     def _normalmap_finished(self):
         """Buttons back after a run ends, whatever the outcome."""
+        self._activity_finish("normalmap")
         self.normalmap_worker = None
         self.normalmap_cancel_btn.setEnabled(False)
         self.normalmap_strength_spin.setEnabled(True)

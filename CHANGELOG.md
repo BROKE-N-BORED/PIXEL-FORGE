@@ -1,5 +1,17 @@
 # Pixel Forge changelog
 
+## 0.82 — 2026-11-17
+
+Activity light, progress, and Cancel (task 90). The status bar
+now shows what the app is doing while it works: a square accent
+dot and a short line naming the operation, with a real count
+where one can be measured ("Pixelizing frame 12 of 40",
+"Generating 2 of 3 candidates"). Video extraction can be
+cancelled mid-run now, and the old frames stay. The
+indicator's Cancel button stops any operation that offers one.
+Exports, library copies, and the update check show busy text
+while they run. Nothing else behaves differently.
+
 ## 0.81 — 2026-11-17
 
 The pixel-grid motif, fixed properly (task 88). The lists, the

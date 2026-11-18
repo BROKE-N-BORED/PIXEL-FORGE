@@ -124,13 +124,119 @@ class VideoTests(unittest.TestCase):
         if not os.path.exists(garbage):
             with open(garbage, "w") as f:
                 f.write("this is not a video")
-        proc = mock.Mock(returncode=1, stderr=stderr, stdout="")
-        with mock.patch.object(video_mod.subprocess, "run",
+        proc = mock.Mock(returncode=1)
+        proc.communicate.return_value = ("", stderr)
+        with mock.patch.object(video_mod.subprocess, "Popen",
                                return_value=proc):
             with self.assertRaises(PixelForgeError) as ctx:
                 video_mod.extract_frames(
                     garbage, os.path.join(self.tmp, out_name))
         return str(ctx.exception)
+
+    def test_extract_cancel_before_start(self):
+        # Task 90: a cancel set before the run starts aborts
+        # before ffmpeg spawns — the loop only sees the event
+        # on a timeout, and a fast ffmpeg could finish first.
+        import threading
+        event = threading.Event()
+        event.set()
+        clip = make_test_video(os.path.join(self.tmp, "cancel-before.mp4"))
+        with self.assertRaises(video_mod.ExtractionCancelled):
+            video_mod.extract_frames(
+                clip, os.path.join(self.tmp, "cancel-before-out"),
+                cancel_event=event)
+
+    def test_extract_cancel_mid_run(self):
+        # Task 90: a cancel set while ffmpeg is running kills
+        # it and raises ExtractionCancelled. The fake ffmpeg
+        # never finishes on its own, so the only way out is
+        # the cancel — no timing race.
+        import threading
+
+        class BlockingProc:
+            """An ffmpeg that runs until killed."""
+            def __init__(self):
+                self.returncode = None
+                self.killed = False
+
+            def communicate(self, timeout=None):
+                if self.killed:
+                    self.returncode = -9
+                    return ("", "")
+                raise subprocess.TimeoutExpired(
+                    cmd="ffmpeg", timeout=timeout)
+
+            def kill(self):
+                self.killed = True
+
+        event = threading.Event()
+        started = threading.Event()
+        clip = make_test_video(os.path.join(self.tmp, "cancel-mid.mp4"))
+        errors = []
+
+        def run_extract():
+            try:
+                video_mod.extract_frames(
+                    clip, os.path.join(self.tmp, "cancel-mid-out"),
+                    cancel_event=event)
+            except video_mod.ExtractionCancelled:
+                pass
+            except Exception as exc:  # noqa: BLE001 - re-raised below
+                errors.append(exc)
+
+        proc = BlockingProc()
+        real_communicate = proc.communicate
+
+        def communicating(timeout=None):
+            started.set()
+            return real_communicate(timeout=timeout)
+
+        proc.communicate = communicating
+        with mock.patch.object(video_mod.subprocess, "Popen",
+                               return_value=proc):
+            worker = threading.Thread(target=run_extract)
+            worker.start()
+            # Only cancel once the loop is actually polling —
+            # cancelling earlier would hit the pre-flight check
+            # instead, and the kill would never be exercised.
+            self.assertTrue(started.wait(timeout=5),
+                            "extract_frames never started polling")
+            event.set()
+            worker.join(timeout=10)
+        self.assertFalse(worker.is_alive(),
+                         "extract_frames did not stop on cancel")
+        self.assertEqual(errors, [])
+        self.assertTrue(proc.killed, "ffmpeg was not killed")
+
+    def test_extract_waits_through_timeouts(self):
+        # Task 90: the communicate() timeout loop keeps waiting
+        # while ffmpeg works — a timeout is a poll tick, not a
+        # failure. The fake ffmpeg times out twice, then exits
+        # cleanly; with no frames written the run ends on the
+        # empty-result error, having waited through both ticks.
+        calls = {"count": 0}
+
+        class SlowProc:
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                calls["count"] += 1
+                if calls["count"] < 3:
+                    raise subprocess.TimeoutExpired(
+                        cmd="ffmpeg", timeout=timeout)
+                return ("", "")
+
+            def kill(self):
+                pass
+
+        clip = make_test_video(os.path.join(self.tmp, "slow.mp4"))
+        with mock.patch.object(video_mod.subprocess, "Popen",
+                               return_value=SlowProc()):
+            with self.assertRaises(PixelForgeError) as ctx:
+                video_mod.extract_frames(
+                    clip, os.path.join(self.tmp, "slow-out"))
+        self.assertIn("no frames extracted", str(ctx.exception))
+        self.assertEqual(calls["count"], 3)
 
     def test_extract_failure_shows_last_three_lines(self):
         # Review B3: the old code sliced the last 3 characters

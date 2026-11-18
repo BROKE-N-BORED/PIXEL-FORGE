@@ -96,10 +96,11 @@ from .undo import Command as UndoCommand
 from .undo import UndoStack
 from .updates import check_for_update
 from .video import (DEFAULT_FPS, FPS_PRESETS, FRAME_COUNT_CONFIRM,
-                    VIDEO_EXTENSIONS, estimate_frame_count,
-                    extract_frames, onion_blend, parse_time,
-                    probe_duration, probe_frame_durations,
-                    require_ffmpeg, write_gif)
+                    VIDEO_EXTENSIONS, ExtractionCancelled,
+                    estimate_frame_count, extract_frames,
+                    onion_blend, parse_time, probe_duration,
+                    probe_frame_durations, require_ffmpeg,
+                    write_gif)
 
 
 class _GuiModuleProxy:
@@ -232,6 +233,9 @@ QWidget#section { background-color: transparent; }
 QWidget#sectionBody { background-color: transparent; }
 QSplitter::handle { background-color: #3a3a42; }
 QStatusBar { background-color: #1a1a1f; color: #b8b5b0; }
+QLabel#activityDot { background-color: #e07020; min-width: 10px; max-width: 10px; min-height: 10px; max-height: 10px; }
+QLabel#activityText { color: #b8b5b0; }
+QPushButton#activityCancel { padding: 2px 8px; }
 QTabWidget::pane { border: 1px solid #3a3a42; }
 QTabBar::tab { background-color: #2e2e35; border: 1px solid #3a3a42;
     border-bottom: none; padding: 8px 16px; margin-right: 2px; }
@@ -311,6 +315,9 @@ QWidget#section { background-color: transparent; }
 QWidget#sectionBody { background-color: transparent; }
 QSplitter::handle { background-color: #d4d4cf; }
 QStatusBar { background-color: #e9e9e6; color: #55555e; }
+QLabel#activityDot { background-color: #8a4513; min-width: 10px; max-width: 10px; min-height: 10px; max-height: 10px; }
+QLabel#activityText { color: #55555e; }
+QPushButton#activityCancel { padding: 2px 8px; }
 QTabWidget::pane { border: 1px solid #d4d4cf; }
 QTabBar::tab { background-color: #e2e2de; border: 1px solid #d4d4cf;
     border-bottom: none; padding: 8px 16px; margin-right: 2px; }
@@ -651,14 +658,31 @@ class VideoWorker(QThread):
     Two modes: "reload" extracts with ffmpeg then pixelizes
     (owns a fresh temp dir, handed over in the result), and
     "repixelize" pixelizes the raw frames it was handed.
+
+    Progress + cancel (task 90): the pixelize loop reports
+    each frame (done, total) so the status bar can count it,
+    and cancel() stops the run — the extraction kills its
+    ffmpeg at once (extract_frames takes the event), the
+    pixelize loop checks between frames. A cancelled run
+    cleans up its temp dir and emits cancelled, never failed:
+    the old frames stay, exactly as a superseded run leaves
+    them. The extraction phase has no count (ffmpeg does not
+    report one), so the GUI shows busy text until the first
+    progress signal lands.
     """
     done = Signal(dict)   # mode, frames, raw, raw_dir, fps, fresh,
                           # path, durations
     failed = Signal(str)  # readable error message
+    progress = Signal(int, int)  # frames pixelized, total frames
+    cancelled = Signal()
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
         self.settings = dict(settings)
+        self._cancel_event = threading.Event()
+
+    def cancel(self):
+        self._cancel_event.set()
 
     def run(self):
         settings = self.settings
@@ -670,7 +694,8 @@ class VideoWorker(QThread):
                 raw = extract_frames(
                     settings["path"], tmp,
                     fps=settings["fps"], every=settings["every"],
-                    start=settings["start"], end=settings["end"])
+                    start=settings["start"], end=settings["end"],
+                    cancel_event=self._cancel_event)
                 # Task 83: a GIF's own per-frame delays, probed
                 # from the file — the GUI applies them when the
                 # count matches the extracted frames, and falls
@@ -681,15 +706,29 @@ class VideoWorker(QThread):
                         settings["path"])
             else:
                 raw = settings["raw_frames"]
-            frames = [gui_module.pixelize_image(
-                gui_module.load_image(raw_path),
-                width=settings["width"], height=settings["height"],
-                keep_aspect=settings["keep_aspect"],
-                palette=settings["palette"],
-                max_colors=settings["max_colors"],
-                dither=settings["dither"],
-                palettes=settings.get("palettes"))
-                for raw_path in raw]
+            frames = []
+            total = len(raw)
+            for index, raw_path in enumerate(raw, start=1):
+                if self._cancel_event.is_set():
+                    if tmp is not None:
+                        shutil.rmtree(tmp, ignore_errors=True)
+                    self.cancelled.emit()
+                    return
+                frames.append(gui_module.pixelize_image(
+                    gui_module.load_image(raw_path),
+                    width=settings["width"],
+                    height=settings["height"],
+                    keep_aspect=settings["keep_aspect"],
+                    palette=settings["palette"],
+                    max_colors=settings["max_colors"],
+                    dither=settings["dither"],
+                    palettes=settings.get("palettes")))
+                self.progress.emit(index, total)
+        except ExtractionCancelled:
+            if tmp is not None:
+                shutil.rmtree(tmp, ignore_errors=True)
+            self.cancelled.emit()
+            return
         except PixelForgeError as exc:
             if tmp is not None:
                 shutil.rmtree(tmp, ignore_errors=True)

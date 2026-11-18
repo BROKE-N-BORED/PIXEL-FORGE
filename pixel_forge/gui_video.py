@@ -3,9 +3,9 @@
 One of the MainWindow mixins (task 58).
 """
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QEventLoop, QSize, Qt
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget)
 from .atlas import DEFAULT_PADDING, write_atlas
 from .engine_export import FORMAT_INFO
 from .gui_shared import (CollapsibleSection, EngineExportDialog, MAX_CUSTOM_SIZE, SIZE_PRESETS, STRIP_THUMB, SheetSplitDialog, SpritesheetDialog, TagDialog, VIDEO_DEBOUNCE_MS, VideoWorker, _KeepDropCommand, dimmed_pixmap, gui_module, thumb_pixmap, video_filter)
@@ -943,8 +943,12 @@ class VideoTabMixin:
         runs never stack up behind each other."""
         if settings["mode"] == "reload":
             self.statusBar().showMessage("Extracting frames…")
+            self._activity_start("video", "Extracting frames…",
+                                 cancel=self._on_video_cancel)
         else:
             self.statusBar().showMessage("Pixelizing…")
+            self._activity_start("video", "Pixelizing…",
+                                 cancel=self._on_video_cancel)
         worker = VideoWorker(settings, parent=self)
         if self.video_worker is not None:
             old = self.video_worker
@@ -954,7 +958,54 @@ class VideoTabMixin:
         self.video_worker = worker
         worker.done.connect(self._on_video_run_done)
         worker.failed.connect(self._on_video_run_failed)
+        worker.progress.connect(self._on_video_progress)
+        worker.cancelled.connect(self._on_video_cancelled)
         worker.start()
+
+
+    def _on_video_progress(self, done, total):
+        # Only the current worker counts — a superseded run's
+        # progress must not rewrite the new run's counts. The
+        # first signal also marks the end of the extraction
+        # phase (ffmpeg reports no count, so the indicator
+        # showed busy text until now).
+        if self.sender() is not self.video_worker:
+            return
+        self._activity_update(
+            "video", "Pixelizing frame %d of %d" % (done, total))
+
+
+    def _on_video_cancel(self):
+        """The indicator's Cancel button for a video run (task
+        90): stop the extraction or the pixelize pass. The old
+        frames stay — the cancelled slot says so."""
+        if self.video_worker is not None:
+            mode = self.video_worker.settings["mode"]
+            self.video_worker.cancel()
+            self.statusBar().showMessage(
+                "Cancelling, stopping the extraction…"
+                if mode == "reload" else
+                "Cancelling, stopping the pixelizing…")
+
+
+    def _on_video_cancelled(self):
+        if self.sender() is not self.video_worker:
+            self._video_orphans.discard(self.sender())
+            return
+        mode = self.sender().settings["mode"]
+        self.video_worker = None
+        self._activity_finish("video")
+        # Autosave (task 55): no frames landed, so a pending
+        # crash-recovery keep/drop set has nothing to land on.
+        self._autosave_pending_video = None
+        if mode == "reload":
+            self.statusBar().showMessage(
+                "Extraction cancelled, the old frames are "
+                "unchanged")
+        else:
+            self.statusBar().showMessage(
+                "Pixelizing cancelled, the old frames are "
+                "unchanged")
 
 
     def _schedule_video_run(self, reload):
@@ -988,6 +1039,7 @@ class VideoTabMixin:
                 shutil.rmtree(tmp, ignore_errors=True)
             return
         self.video_worker = None
+        self._activity_finish("video")
         if result["mode"] == "reload":
             self._cleanup_video_raw()
             self.video_raw_dir = result["raw_dir"]
@@ -1098,6 +1150,7 @@ class VideoTabMixin:
             self._video_orphans.discard(worker)
             return
         self.video_worker = None
+        self._activity_finish("video")
         # Autosave (task 55): no frames landed, so a pending
         # crash-recovery keep/drop set has nothing to land on.
         self._autosave_pending_video = None
@@ -1122,12 +1175,18 @@ class VideoTabMixin:
 
 
     def _stop_video_worker(self):
+        # Task 90: cancel first, then wait — closing during a
+        # long extraction used to wait out the 10 seconds and
+        # abandon the thread still running. A cancelled run
+        # stops promptly and cleans up its own temp dir.
         if self.video_worker is not None:
             if self.video_worker.isRunning():
+                self.video_worker.cancel()
                 self.video_worker.wait(10000)
             self.video_worker = None
         for orphan in list(self._video_orphans):
             if orphan.isRunning():
+                orphan.cancel()
                 orphan.wait(10000)
         self._video_orphans.clear()
 
@@ -1765,12 +1824,35 @@ class VideoTabMixin:
             gui_module.warn_dialog(self, "Could not export frames",
                                 "could not create %s: %s" % (out, exc))
             return False
-        for number, index in enumerate(kept, start=1):
+        # Snapshot the frames up front: the loop pumps paint
+        # events so the indicator repaints (task 90, below), and
+        # a pending video run could land mid-export and replace
+        # video_frames — the snapshot keeps the export writing
+        # the frames it started with.
+        frames = [self.video_frames[index] for index in kept]
+        total = len(frames)
+        self._activity_start("export",
+                             "Exporting frames… 0 of %d" % total)
+        for number, frame in enumerate(frames, start=1):
             dest = out / ("frame_%03d.png" % number)
-            if not self.video_frames[index].save(str(dest), "PNG"):
+            if not frame.save(str(dest), "PNG"):
+                self._activity_finish("export")
                 gui_module.warn_dialog(self, "Could not export frames",
                                     "could not write: %s" % dest)
                 return False
+            self._activity_update(
+                "export",
+                "Exporting frames… %d of %d" % (number, total))
+            # Repaint only: user input stays queued, so no click
+            # can land mid-export and re-enter the tab (a second
+            # export dialog on top of this one would write the
+            # same files twice). No Cancel is offered here for
+            # the same reason — a press could not be processed
+            # while input is excluded, and stopping would leave
+            # a half-written folder.
+            QApplication.processEvents(
+                QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        self._activity_finish("export")
         self.statusBar().showMessage(
             "Exported %d frames to %s" % (len(kept), out.name))
         return True
@@ -1899,6 +1981,17 @@ class VideoTabMixin:
         meta_path = path.with_suffix(".json")
         pack, trim, atlas_padding, extrude = \
             self._sheet_pack_settings()
+        # One write call either way, so busy text and no count
+        # and no Cancel — stopping mid-write would leave a
+        # half-written PNG and JSON pair (task 90). A paint
+        # pass first, or the text would never show: the GUI
+        # thread is inside the write.
+        self._activity_start(
+            "export",
+            "Exporting atlas…" if pack == "maxrects"
+            else "Exporting spritesheet…")
+        QApplication.processEvents(
+            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
         if pack == "maxrects":
             try:
                 metadata, _files = write_atlas(
@@ -1908,9 +2001,11 @@ class VideoTabMixin:
                     durations=self._kept_durations(),
                     tags=self.video_tags)
             except PixelForgeError as exc:
+                self._activity_finish("export")
                 gui_module.warn_dialog(self, "Could not export atlas", str(exc))
                 return False
             deduped = metadata["deduped"]
+            self._activity_finish("export")
             self.statusBar().showMessage(
                 "Exported atlas: %s, %s%s"
                 % (plural(len(metadata["sheets"]), "sheet"),
@@ -1924,8 +2019,10 @@ class VideoTabMixin:
                                    durations=self._kept_durations(),
                                    tags=self.video_tags)
         except PixelForgeError as exc:
+            self._activity_finish("export")
             gui_module.warn_dialog(self, "Could not export spritesheet", str(exc))
             return False
+        self._activity_finish("export")
         self.statusBar().showMessage(
             "Exported spritesheet: %d frames, %d x %d grid, %s"
             % (len(kept), metadata["columns"], metadata["rows"],
@@ -1993,11 +2090,20 @@ class VideoTabMixin:
         out = Path(path)
         if out.suffix.lower() != ".gif":
             out = out.with_suffix(".gif")
+        # One ffmpeg call, so no count and no Cancel — the
+        # indicator shows busy text while it runs (task 90).
+        # A paint pass first, or the text would never show on
+        # a fast export: the GUI thread is inside write_gif.
+        self._activity_start("export", "Exporting GIF…")
+        QApplication.processEvents(
+            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
         try:
             write_gif(images, durations, str(out))
         except PixelForgeError as exc:
+            self._activity_finish("export")
             gui_module.warn_dialog(self, "Could not export GIF", str(exc))
             return False
+        self._activity_finish("export")
         self.statusBar().showMessage(
             "Exported GIF: %d frames, %s" % (len(kept), out.name))
         return True

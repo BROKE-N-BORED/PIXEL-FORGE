@@ -1366,12 +1366,14 @@ class VideoGuiTests(unittest.TestCase):
     def test_load_keeps_window_responsive(self):
         # v0.9: the import runs on a worker thread, so the event
         # loop must keep running while it works — load_video
-        # returns at once with an "Extracting frames…" status.
+        # returns at once with an "Extracting frames…"
+        # indicator (task 90: the indicator, not the status
+        # message, is the "what is running" display now).
         from PySide6.QtCore import QTimer
         fired = []
         self.assertTrue(self.win.load_video(self.clip))
         self.assertIn("Extracting frames",
-                      self.win.statusBar().currentMessage())
+                      self.win._activity_text.text())
         QTimer.singleShot(0, lambda: fired.append(True))
         self.app.processEvents()
         self.assertTrue(fired, "event loop did not run during load")
@@ -4316,12 +4318,14 @@ class CodeTabTests(unittest.TestCase):
     def test_texture_load_keeps_window_responsive(self):
         # v0.8: the texture loads on a worker thread, so the event
         # loop must keep running while it works — load_game_asset
-        # returns at once with a "Loading texture…" status.
+        # returns at once with a "Loading texture…" indicator
+        # (task 90: the indicator, not the status message, is
+        # the "what is running" display now).
         from PySide6.QtCore import QTimer
         fired = []
         self.assertTrue(self.win.load_game_asset(self.big_texture))
         self.assertIn("Loading texture",
-                      self.win.statusBar().currentMessage())
+                      self.win._activity_text.text())
         QTimer.singleShot(0, lambda: fired.append(True))
         self.app.processEvents()
         self.assertTrue(fired, "event loop did not run during load")
@@ -11685,6 +11689,253 @@ class GridTests(unittest.TestCase):
                 self.assertTrue(os.path.isfile(url),
                                 "%s tile url is missing: %s"
                                 % (name, url))
+
+
+class ActivityTests(unittest.TestCase):
+    """Task 90 (U16/U26): the status-bar activity indicator —
+    a square accent dot, a short plain-words line, and a Cancel
+    button where the operation can stop safely. Runner group
+    g12."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.tmp = tempfile.mkdtemp()
+        self.win = MainWindow()
+        self.win.tabs.setCurrentIndex(1)
+        self.win.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _wait_for_video(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.video_worker is None
+                    and not self.win._video_debounce_timer.isActive()):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _video_clip(self):
+        from pixel_forge import video as video_mod
+        if video_mod.find_ffmpeg() is None:
+            self.skipTest("ffmpeg not installed")
+        return make_test_video(os.path.join(self.tmp, "clip.mp4"))
+
+    def test_indicator_hidden_at_startup(self):
+        self.assertTrue(self.win._activity_dot.isHidden())
+        self.assertTrue(self.win._activity_text.isHidden())
+        self.assertTrue(self.win._activity_cancel.isHidden())
+        self.assertEqual(self.win._activity_cancel.text(), "Cancel")
+        self.assertTrue(self.win._activity_cancel.toolTip())
+
+    def test_start_update_finish(self):
+        calls = []
+        self.win._activity_start("test", "Doing a test thing…",
+                                 cancel=lambda: calls.append(1))
+        self.app.processEvents()
+        self.assertTrue(self.win._activity_dot.isVisible())
+        self.assertTrue(self.win._activity_text.isVisible())
+        self.assertEqual(self.win._activity_text.text(),
+                         "Doing a test thing…")
+        self.assertTrue(self.win._activity_cancel.isVisible())
+        self.assertTrue(self.win._activity_cancel.isEnabled())
+        self.win._activity_update("test",
+                                  "Doing a test thing… 3 of 9")
+        self.assertEqual(self.win._activity_text.text(),
+                         "Doing a test thing… 3 of 9")
+        # The Cancel button calls the operation's own cancel
+        # slot once, then disables itself so a second press
+        # cannot double-cancel.
+        self.win._activity_cancel.click()
+        self.assertEqual(calls, [1])
+        self.assertFalse(self.win._activity_cancel.isEnabled())
+        self.win._activity_cancel.click()
+        self.assertEqual(calls, [1])
+        self.win._activity_finish("test")
+        self.assertTrue(self.win._activity_dot.isHidden())
+        self.assertTrue(self.win._activity_text.isHidden())
+        self.assertTrue(self.win._activity_cancel.isHidden())
+
+    def test_newest_operation_shows_finish_reveals_older(self):
+        self.win._activity_start("first", "First thing…")
+        self.win._activity_start("second", "Second thing…")
+        self.assertEqual(self.win._activity_text.text(),
+                         "Second thing…")
+        self.win._activity_finish("second")
+        self.assertEqual(self.win._activity_text.text(),
+                         "First thing…")
+        self.assertTrue(self.win._activity_dot.isVisible())
+        self.win._activity_finish("first")
+        self.assertTrue(self.win._activity_dot.isHidden())
+
+    def test_stale_update_and_finish_ignored(self):
+        # An update or finish for an operation that is not
+        # running (a superseded worker's late signal) must not
+        # crash and must not touch the running operation.
+        self.win._activity_start("live", "Live thing…")
+        self.win._activity_update("gone", "Gone thing…")
+        self.win._activity_finish("gone")
+        self.assertEqual(self.win._activity_text.text(),
+                         "Live thing…")
+        self.assertTrue(self.win._activity_dot.isVisible())
+        self.win._activity_finish("live")
+
+    def test_no_cancel_button_for_uncancellable_op(self):
+        self.win._activity_start("busy", "Busy thing…")
+        self.app.processEvents()
+        self.assertTrue(self.win._activity_dot.isVisible())
+        self.assertTrue(self.win._activity_cancel.isHidden())
+        self.win._activity_finish("busy")
+
+    def test_message_area_borrowed_and_restored(self):
+        # The indicator borrows the message area while work runs
+        # — a stale message must not sit beside the live
+        # indicator disagreeing with it — and gives it back
+        # when the last operation finishes, so a quiet
+        # operation leaves the status bar exactly as it was.
+        self.win.statusBar().showMessage("Ready to work.")
+        self.win._activity_start("first", "First thing…")
+        self.assertEqual(self.win.statusBar().currentMessage(), "")
+        # A second operation starting does not clobber the
+        # saved message, and finishing it does not restore
+        # early while the first is still running.
+        self.win._activity_start("second", "Second thing…")
+        self.win._activity_finish("second")
+        self.assertEqual(self.win.statusBar().currentMessage(), "")
+        self.win._activity_finish("first")
+        self.assertEqual(self.win.statusBar().currentMessage(),
+                         "Ready to work.")
+
+    def test_video_run_shows_progress_counts(self):
+        import re
+        clip = self._video_clip()
+        # 48 frames at 128 px: slow enough to observe under
+        # load, fast enough to finish inside the timeout.
+        self.win.video_fps_combo.setCurrentIndex(
+            self.win.video_fps_combo.findData(24))
+        self.win.video_width_spin.setValue(128)
+        self.win.video_height_spin.setValue(128)
+        self.assertTrue(self.win.load_video(clip))
+        seen = []
+        deadline = time.monotonic() + 60
+        progress = None
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if self.win._activity_dot.isVisible():
+                text = self.win._activity_text.text()
+                seen.append(text)
+                if re.search(r"Pixelizing frame \d+ of \d+", text):
+                    progress = text
+                    break
+            if (self.win.video_worker is None
+                    and not self.win._video_debounce_timer.isActive()):
+                break
+            time.sleep(0.02)
+        self.assertIsNotNone(
+            progress,
+            "no determinate progress text seen; indicator texts "
+            "were: %r" % seen[:20])
+        self.assertTrue(self._wait_for_video(timeout=60))
+        self.assertTrue(self.win._activity_dot.isHidden())
+        self.assertTrue(self.win._activity_text.isHidden())
+        self.assertIn(len(self.win.video_frames), (47, 48))
+
+    def test_video_cancel_from_indicator_stops_run(self):
+        import re
+        clip = self._video_clip()
+        self.assertTrue(self.win.load_video(clip))
+        self.assertTrue(self._wait_for_video())
+        frames_before = len(self.win.video_frames)
+        self.assertIn(frames_before, (15, 16))
+        # A slow reload: 48 frames at 128 px.
+        self.win.video_fps_combo.setCurrentIndex(
+            self.win.video_fps_combo.findData(24))
+        self.win.video_width_spin.setValue(128)
+        self.win.video_height_spin.setValue(128)
+        deadline = time.monotonic() + 60
+        clicked = False
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if self.win._activity_dot.isVisible():
+                match = re.search(
+                    r"Pixelizing frame (\d+) of (\d+)",
+                    self.win._activity_text.text())
+                if match and int(match.group(1)) < int(match.group(2)) - 5:
+                    # At least 5 frames still to go — the cancel
+                    # lands mid-run, not on the last frame.
+                    self.assertTrue(
+                        self.win._activity_cancel.isVisible())
+                    self.win._activity_cancel.click()
+                    clicked = True
+                    break
+            if (self.win.video_worker is None
+                    and not self.win._video_debounce_timer.isActive()):
+                break
+            time.sleep(0.02)
+        self.assertTrue(clicked,
+                        "the slow run never showed progress with "
+                        "frames still to go")
+        self.assertTrue(self._wait_for_video(timeout=60))
+        self.assertIsNone(self.win.video_worker)
+        self.assertTrue(self.win._activity_dot.isHidden())
+        self.assertTrue(self.win._activity_text.isHidden())
+        # The old frames are unchanged by a cancelled run.
+        self.assertEqual(len(self.win.video_frames), frames_before)
+        self.assertIn("cancelled",
+                      self.win.statusBar().currentMessage().lower())
+
+    def test_export_frames_shows_progress_mid_run(self):
+        from PySide6.QtCore import QTimer
+        clip = self._video_clip()
+        self.assertTrue(self.win.load_video(clip))
+        self.assertTrue(self._wait_for_video())
+        out = os.path.join(self.tmp, "frames")
+        seen = []
+
+        def record():
+            seen.append((self.win._activity_text.text(),
+                         self.win._activity_dot.isVisible()))
+
+        # Fires inside the export's own processEvents pass —
+        # the timer cannot fire before the call starts, because
+        # nothing pumps the loop in between.
+        QTimer.singleShot(0, record)
+        self.assertTrue(self.win.export_frames(out))
+        self.assertTrue(
+            any("Exporting frames" in text and visible
+                for text, visible in seen),
+            "indicator never showed during the export; saw %r"
+            % seen)
+        self.assertTrue(self.win._activity_dot.isHidden())
+        self.assertTrue(self.win._activity_text.isHidden())
+        self.assertEqual(len(os.listdir(out)),
+                         len(self.win.video_frames))
+
+    def test_tiny_export_leaves_indicator_hidden(self):
+        clip = self._video_clip()
+        self.assertTrue(self.win.load_video(clip))
+        self.assertTrue(self._wait_for_video())
+        # Keep one frame: the export is instant, and the
+        # indicator must not stick around afterwards.
+        self.win.video_keep = (
+            [True] + [False] * (len(self.win.video_frames) - 1))
+        out = os.path.join(self.tmp, "one")
+        self.assertTrue(self.win.export_frames(out))
+        self.assertEqual(os.listdir(out), ["frame_001.png"])
+        self.assertTrue(self.win._activity_dot.isHidden())
+        self.assertTrue(self.win._activity_text.isHidden())
+        self.assertTrue(self.win._activity_cancel.isHidden())
 
 
 if __name__ == "__main__":

@@ -364,6 +364,85 @@ class ExplanationContrastTests(unittest.TestCase):
                           "%s has no explanation rule" % name)
 
 
+class ActivityStyleTests(unittest.TestCase):
+    """Task 90 — the status-bar activity indicator's rules:
+    a square accent dot, text in the status-bar color (no new
+    text color, so no new contrast pair), and a compact Cancel
+    button. Pinned in both themes."""
+
+    ACCENTS = {"DARK_STYLESHEET": "#e07020",
+               "LIGHT_STYLESHEET": "#8a4513"}
+
+    def test_activity_rules_present_in_both_themes(self):
+        # The selector-set test pins the two sheets equal, but
+        # a rule in neither sheet would pass it — pin that the
+        # activity rules exist at all.
+        for name in ("DARK_STYLESHEET", "LIGHT_STYLESHEET"):
+            selectors = _selectors(_stylesheet(name))
+            for selector in ("QLabel#activityDot",
+                             "QLabel#activityText",
+                             "QPushButton#activityCancel"):
+                self.assertIn(selector, selectors,
+                              "%s has no %s rule" % (name, selector))
+
+    def test_activity_dot_uses_the_theme_accent(self):
+        for name, accent in self.ACCENTS.items():
+            sheet = _stylesheet(name)
+            rule = re.search(
+                r'QLabel#activityDot \{([^}]*)\}', sheet)
+            self.assertIsNotNone(rule, "%s has no dot rule" % name)
+            body = rule.group(1)
+            self.assertIn("background-color: %s;" % accent, body,
+                          "%s dot is not the theme accent" % name)
+            # Square corners (v0.79 identity): a fixed 10 px
+            # square, no rounding.
+            for size in ("min-width: 10px;", "max-width: 10px;",
+                         "min-height: 10px;", "max-height: 10px;"):
+                self.assertIn(size, body,
+                              "%s dot is not a fixed 10 px square"
+                              % name)
+            self.assertNotIn("border-radius", body,
+                             "%s dot is rounded" % name)
+
+    def test_activity_text_reuses_the_status_bar_color(self):
+        # No new text color: the indicator text is the same
+        # color as the status bar's own text, which already
+        # clears the task-22 bar in both themes.
+        for name in ("DARK_STYLESHEET", "LIGHT_STYLESHEET"):
+            sheet = _stylesheet(name)
+            status = re.search(
+                r'QStatusBar \{[^}]*color: (#[0-9a-f]{6});',
+                sheet).group(1)
+            rule = re.search(
+                r'QLabel#activityText \{[^}]*color: (#[0-9a-f]{6});',
+                sheet)
+            self.assertIsNotNone(
+                rule, "%s styles no activity text color" % name)
+            self.assertEqual(rule.group(1), status,
+                             "%s activity text %s is a new color, "
+                             "not the status-bar color %s"
+                             % (name, rule.group(1), status))
+            bg = re.search(
+                r'QStatusBar \{ background-color: (#[0-9a-f]{6});',
+                sheet).group(1)
+            self.assertGreaterEqual(
+                contrast_ratio(rule.group(1), bg), 4.5,
+                "%s activity text %s on %s is %.2f:1, under WCAG "
+                "AA 4.5:1" % (name, rule.group(1), bg,
+                              contrast_ratio(rule.group(1), bg)))
+
+    def test_activity_cancel_button_is_compact(self):
+        for name in ("DARK_STYLESHEET", "LIGHT_STYLESHEET"):
+            sheet = _stylesheet(name)
+            rule = re.search(
+                r'QPushButton#activityCancel \{([^}]*)\}', sheet)
+            self.assertIsNotNone(
+                rule, "%s has no activity Cancel rule" % name)
+            self.assertIn("padding: 2px 8px;", rule.group(1),
+                          "%s activity Cancel button is not compact"
+                          % name)
+
+
 class NoProgrammerPhrasingTests(unittest.TestCase):
     def test_no_parenthesized_s_in_package_strings(self):
         # "7 asset(s)" reads as programmer phrasing. Every string

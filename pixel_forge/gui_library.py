@@ -3,9 +3,9 @@
 One of the MainWindow mixins (task 58).
 """
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QEventLoop, QSize, Qt
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
 from .gui_shared import (SaveToLibraryDialog, _LibraryDeleteCommand, gui_module, thumb_pixmap)
 from .library import SOURCE_LABELS, unreadable_reason
 from .palettes import PALETTE_LABELS
@@ -793,7 +793,18 @@ class LibraryTabMixin:
     def _on_library_find_duplicates(self):
         """List duplicate groups (identical files) and offer to
         remove the extras, keeping the first of each group."""
-        groups = self.library.duplicates()
+        # Hashing every file can take seconds on a big library
+        # — busy text while it runs (task 90). A paint pass
+        # first, or the text would never show: the GUI thread
+        # is inside the hash loop. No Cancel: the loop is
+        # synchronous and cannot be interrupted.
+        self._activity_start("library", "Finding duplicates…")
+        QApplication.processEvents(
+            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        try:
+            groups = self.library.duplicates()
+        finally:
+            self._activity_finish("library")
         if not groups:
             self.statusBar().showMessage(
                 "No duplicates in the library")
@@ -829,12 +840,21 @@ class LibraryTabMixin:
             self, "Export the library", "")
         if not dest:
             return
+        # Copying every sprite can take a while — busy text
+        # while it runs (task 90). No Cancel: the copy is
+        # synchronous, and stopping would leave a half-copied
+        # library behind.
+        self._activity_start("library", "Exporting the library…")
+        QApplication.processEvents(
+            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
         try:
             count = self.library.export_to(dest)
         except PixelForgeError as exc:
+            self._activity_finish("library")
             gui_module.warn_dialog(self, "Could not export the library",
                         str(exc))
             return
+        self._activity_finish("library")
         self.statusBar().showMessage(
             "Exported %s to %s" % (plural(count, "sprite"), dest))
 
@@ -844,12 +864,21 @@ class LibraryTabMixin:
             self, "Import a library", "")
         if not src:
             return
+        # Copying a whole library in can take a while — busy
+        # text while it runs (task 90). No Cancel: the import
+        # is synchronous, and stopping would leave a
+        # half-imported library behind.
+        self._activity_start("library", "Importing a library…")
+        QApplication.processEvents(
+            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
         try:
             report = self.library.import_from(src)
         except PixelForgeError as exc:
+            self._activity_finish("library")
             gui_module.warn_dialog(self, "Could not import the library",
                         str(exc))
             return
+        self._activity_finish("library")
         self._refresh_library()
         parts = ["added %s" % plural(len(report["added"]),
                                      "sprite")]

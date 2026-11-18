@@ -538,6 +538,10 @@ class PromptTabMixin:
         self.prompt_worker.cancelled.connect(
             self._on_prompt_cancelled)
         self.prompt_worker.start()
+        self._activity_start(
+            "prompt",
+            "Generating 0 of %s" % plural(total, "candidate"),
+            cancel=self._on_prompt_cancel)
 
 
     def _confirm_model_fallback(self, model):
@@ -665,6 +669,10 @@ class PromptTabMixin:
         self.prompt_progress.setFormat(
             "Generating… %v of %m — "
             + self._prompt_elapsed_text())
+        self._activity_update(
+            "prompt",
+            "Generating %d of %s"
+            % (done, plural(total, "candidate")))
         if self.sender().mode == "regenerate":
             # A re-roll replaces a candidate the strip already
             # shows — appending would duplicate it. The done
@@ -683,6 +691,7 @@ class PromptTabMixin:
         if (self.sender() is not self.prompt_worker
                 or self.prompt_batch_dir is None):
             return
+        self._activity_finish("prompt")
         self._prompt_elapsed_timer.stop()
         took = self._prompt_elapsed_text()
         self.prompt_progress.setFormat("%v of %m candidates")
@@ -740,6 +749,7 @@ class PromptTabMixin:
         if (self.sender() is not self.prompt_worker
                 or self.prompt_batch_dir is None):
             return
+        self._activity_finish("prompt")
         self._prompt_elapsed_timer.stop()
         self.prompt_progress.setFormat("%v of %m candidates")
         self.prompt_generate_btn.setEnabled(True)
@@ -754,6 +764,7 @@ class PromptTabMixin:
         if (self.sender() is not self.prompt_worker
                 or self.prompt_batch_dir is None):
             return
+        self._activity_finish("prompt")
         self._prompt_elapsed_timer.stop()
         self.prompt_progress.setFormat("%v of %m candidates")
         self.prompt_generate_btn.setEnabled(True)
