@@ -5,8 +5,8 @@ split (task 58).
 """
 
 from . import __version__, procedural
-from PySide6.QtCore import (QRect, QSettings, QTimer, QUrl, Qt)
-from PySide6.QtGui import (QAction, QDesktopServices, QKeySequence, QShortcut)
+from PySide6.QtCore import (QRect, QSettings, QTimer, Qt)
+from PySide6.QtGui import (QAction, QKeySequence, QShortcut)
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QStatusBar, QTabWidget, QTextEdit, QVBoxLayout)
 from .autosave import (autosave_home, crashed, discard_recovery, empty_recovery, load_recovery, load_recovery_image, mark_clean_exit, mark_running, recovery_image_path, recovery_path, save_recovery_image)
 from .codeinput import CODE_EXTENSIONS
@@ -14,7 +14,7 @@ from .gui_code import CodeTabMixin
 from .gui_image import ImageTabMixin
 from .gui_library import LibraryTabMixin
 from .gui_prompt import PromptTabMixin
-from .gui_shared import (AUTOSAVE_DEBOUNCE_MS, HowToUseDialog, PaletteEditorDialog, SIZE_PRESETS, TEXTURE_DEBOUNCE_MS, THEMES, UpdateCheckWorker, VIDEO_DEBOUNCE_MS, _ControlChangeCommand, _PresetDeleteCommand, clamp_geometry, gui_module)
+from .gui_shared import (AUTOSAVE_DEBOUNCE_MS, HowToUseDialog, PaletteEditorDialog, SIZE_PRESETS, TEXTURE_DEBOUNCE_MS, THEMES, UpdateCheckWorker, UpdateDownloadWorker, VIDEO_DEBOUNCE_MS, _ControlChangeCommand, _PresetDeleteCommand, clamp_geometry, gui_module)
 from .gui_tileset import TilesetTabMixin
 from .gui_video import VideoTabMixin
 from .imagegen import load_batch
@@ -151,6 +151,9 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         # keeps it to one run per launch.
         self.update_worker = None
         self._update_check_started = False
+        # Update download (task 103): the worker pulling a
+        # release, or None. One download at a time.
+        self.update_download_worker = None
         # How to Use index (task 86): the one dialog instance,
         # or None until first opened. It is kept and re-shown
         # after close, never recreated while it exists.
@@ -650,12 +653,13 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         library_action = QAction("Library location", self)
         library_action.triggered.connect(self._show_library_location)
         help_menu.addAction(library_action)
-        # Update check (task 48): a manual check that works
-        # whether or not the automatic one is on — the user
-        # asking is not phoning home — and the opt-in itself, a
-        # checkable action that mirrors the saved setting. Off
-        # by default: nothing is checked, and no request is
-        # made, until the user turns it on.
+        # Update check (tasks 48 + 103): a manual check that
+        # works whether or not the automatic one is on — the
+        # user asking is not phoning home — and the on-startup
+        # switch, a checkable action that mirrors the saved
+        # setting. On by default since task 103: up to date
+        # means nothing happens at all, and turning it off
+        # here stops the launch check.
         help_menu.addSeparator()
         check_action = QAction("Check for updates", self)
         check_action.setToolTip("Ask GitHub whether a newer "
@@ -2693,9 +2697,10 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         if not self._autosave_offered:
             self._autosave_offered = True
             self._autosave_ready = True
-        # Update check (task 48): once per launch, after the
-        # window is shown, and only when the user opted in —
-        # off by default, so a fresh install makes no request.
+        # Update check (tasks 48 + 103): once per launch, after
+        # the window is shown. On by default since task 103 —
+        # up to date means nothing happens at all — and the
+        # Help menu switch still turns it off.
         if not self._update_check_started:
             self._update_check_started = True
             if self._load_update_check():
@@ -2758,14 +2763,16 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
 
 
     def _load_update_check(self):
-        """The saved update-check choice (task 48): True only
-        when the settings say so — missing means off, the
-        first-launch look. Off is the default, so a fresh
-        install makes no network request at all."""
+        """The saved update-check choice (tasks 48 + 103):
+        True when the settings say so, or say nothing at all
+        — on by default since task 103, so a fresh install
+        checks quietly on launch. A window without settings
+        never checks: no persistence, no check. Turning it
+        off in the Help menu is still remembered."""
         if self._settings is None:
             return False
         return bool(self._settings.value(
-            "check_updates_on_startup", type=bool))
+            "check_updates_on_startup", True, type=bool))
 
 
     def _on_toggle_update_check(self, checked):
@@ -2810,17 +2817,16 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
 
 
     def _on_update_check_done(self, result):
-        """One check finished (task 48). A stale result — from
-        a worker that is no longer the running one — is
-        ignored. A newer release is told plainly, with the
-        version and a way to open the release page, whether the
-        check was manual or automatic: the automatic check only
-        runs when the user opted in, so telling them is the
-        feature working. Up to date is told only when the user
-        asked — an automatic check that finds nothing stays
-        quiet. A failed check is told only when the user asked
-        (a warning with the reason); an automatic failure is a
-        status-bar line at most, never a modal on startup."""
+        """One check finished (tasks 48 + 103). A stale result —
+        from a worker that is no longer the running one — is
+        ignored. A newer release is asked about plainly, with
+        the version and a short what's-new, whether the check
+        was manual or automatic. Up to date is told only when
+        the user asked — an automatic check that finds nothing
+        stays quiet. A failed check is told only when the user
+        asked (a warning with the reason); an automatic failure
+        is a status-bar line at most, never a modal on
+        startup."""
         if self.sender() is not self.update_worker:
             return
         self.update_worker = None
@@ -2847,21 +2853,214 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
 
 
     def _show_update_available(self, result):
-        """A newer release is out (task 48): say so plainly,
-        with the version, and offer the release page. The check
-        never downloads or installs anything — the user
-        downloads the new release themselves."""
+        """A newer release is out (task 103): ask first. Plain
+        words, the new version and a short what's-new, buttons
+        Update / Not now with Not now the safe default (U23).
+        Tapping Update starts the pull — download, checksum,
+        install — and Not now does nothing at all; the check
+        runs again on the next launch."""
+        notes = gui_module.shorten_notes(result.get("notes") or "")
+        text = ("Pixel Forge %s is out. You have %s."
+                % (result["latest"], __version__))
+        if notes:
+            text += "\n\n" + notes
         box = QMessageBox(self)
-        box.setWindowTitle("A new release is on GitHub")
-        box.setText("Pixel Forge %s is on GitHub. You have %s."
-                    % (result["latest"], __version__))
-        open_button = box.addButton(
-            "Open the release page",
-            QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+        box.setWindowTitle("Pixel Forge %s is out"
+                           % result["latest"])
+        box.setText(text)
+        update_button = box.addButton(
+            "Update", QMessageBox.ButtonRole.AcceptRole)
+        not_now_button = box.addButton(
+            "Not now", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(not_now_button)
         box.exec()
-        if box.clickedButton() is open_button:
-            QDesktopServices.openUrl(QUrl(result["url"]))
+        if box.clickedButton() is update_button:
+            self._start_update_download(result)
+
+
+    def _start_update_download(self, result):
+        """Start pulling a newer release (task 103). Never
+        while a long operation is running — the activity
+        indicator knows what is running, so a busy app says so
+        plainly and waits instead of queuing behind it. Never
+        from a source tree — there is no install to replace.
+        Never without the release's files: a release with no
+        zip, or no checksum sidecar, is refused in plain words
+        before anything downloads. Returns False when the
+        update does not start, True when the worker is
+        running."""
+        if self.update_download_worker is not None \
+                and self.update_download_worker.isRunning():
+            self.statusBar().showMessage(
+                "Already downloading the update.")
+            return False
+        if getattr(self, "_activity_running", None):
+            running = next(reversed(
+                self._activity_running.values()))
+            gui_module.warn_dialog(
+                self, "Pixel Forge is busy",
+                "Pixel Forge is busy right now (%s). Let that "
+                "finish, then check for updates again."
+                % running[0])
+            return False
+        if gui_module.find_installed_root() is None:
+            gui_module.warn_dialog(
+                self, "Cannot update this copy",
+                "This copy of Pixel Forge is running from a "
+                "source folder, not an install, so there is "
+                "nothing to update in place. Get the new "
+                "release from GitHub instead.")
+            return False
+        latest = result["latest"]
+        assets = result.get("assets") or {}
+        zip_name = gui_module.zip_name_for(latest)
+        sidecar_name = gui_module.sidecar_name_for(latest)
+        zip_asset = assets.get(zip_name)
+        sidecar_asset = assets.get(sidecar_name)
+        if zip_asset is None:
+            gui_module.warn_dialog(
+                self, "Cannot update",
+                "This release has no download for Pixel Forge, "
+                "so there is nothing to update with.")
+            return False
+        if sidecar_asset is None:
+            gui_module.warn_dialog(
+                self, "Cannot update",
+                "This release has no checksum file, so Pixel "
+                "Forge will not install it.")
+            return False
+        work_dir = gui_module.updates_home()
+        try:
+            work_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            gui_module.warn_dialog(
+                self, "Cannot update",
+                "The update folder could not be created: %s"
+                % exc)
+            return False
+        worker = UpdateDownloadWorker(
+            latest, zip_asset["url"], zip_asset.get("size") or 0,
+            sidecar_asset["url"], work_dir, self)
+        worker.progress.connect(self._on_update_download_progress)
+        worker.done.connect(self._on_update_download_done)
+        worker.failed.connect(self._on_update_download_failed)
+        worker.cancelled.connect(
+            self._on_update_download_cancelled)
+        self.update_download_worker = worker
+        worker.start()
+        self._activity_start(
+            "update", "Downloading the update…",
+            cancel=self._on_update_download_cancel)
+        return True
+
+
+    def _on_update_download_progress(self, done_bytes,
+                                     total_bytes):
+        # Only the current worker counts — a superseded run's
+        # progress must not rewrite the new run's counts.
+        if self.sender() is not self.update_download_worker:
+            return
+        if total_bytes > 0:
+            percent = done_bytes * 100 // total_bytes
+            self._activity_update(
+                "update",
+                "Downloading the update… %d%%" % percent)
+        else:
+            self._activity_update(
+                "update", "Downloading the update…")
+
+
+    def _on_update_download_cancel(self):
+        """The indicator's Cancel button for an update
+        download (task 103): stop the download. The partial
+        file stays, so the next try resumes where this one
+        stopped, and the old version is untouched."""
+        if self.update_download_worker is not None:
+            self.update_download_worker.cancel()
+            self.statusBar().showMessage(
+                "Cancelling the update download…")
+
+
+    def _on_update_download_done(self, result):
+        if self.sender() is not self.update_download_worker:
+            return
+        self.update_download_worker = None
+        self._activity_finish("update")
+        self._ask_restart_after_update(result["version"])
+
+
+    def _on_update_download_failed(self, message):
+        if self.sender() is not self.update_download_worker:
+            return
+        self.update_download_worker = None
+        self._activity_finish("update")
+        gui_module.warn_dialog(self, "Could not update", message)
+
+
+    def _on_update_download_cancelled(self):
+        if self.sender() is not self.update_download_worker:
+            return
+        self.update_download_worker = None
+        self._activity_finish("update")
+        self.statusBar().showMessage(
+            "Update cancelled, nothing changed")
+
+
+    def _ask_restart_after_update(self, version):
+        """The update is installed (task 103): ask about
+        restarting. Yes restarts the program on its own with
+        the update applied; No waits — the update completes
+        on the next restart, and the status bar says so. No is
+        the default: restarting closes the window, so it is
+        never the Enter-key choice."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Update ready")
+        box.setText("Pixel Forge %s is downloaded and ready. "
+                    "Restart now to complete the update?"
+                    % version)
+        yes_button = box.addButton(
+            "Yes", QMessageBox.ButtonRole.AcceptRole)
+        no_button = box.addButton(
+            "No", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(no_button)
+        box.exec()
+        if box.clickedButton() is yes_button:
+            self._restart_now()
+        else:
+            self.statusBar().showMessage(
+                "The update will finish the next time Pixel "
+                "Forge starts.")
+
+
+    def _restart_now(self):
+        """Restart the program on its own with the update
+        applied (task 103): start a fresh copy of the
+        launcher, then close this window — the app quits
+        when its last window closes, and the fresh copy
+        already loads the new files. A failed restart leaves
+        this window open and says so plainly."""
+        try:
+            gui_module.restart_program()
+        except Exception as exc:  # noqa: BLE001 - plain words
+            gui_module.warn_dialog(
+                self, "Could not restart",
+                "%s Start Pixel Forge again from the menu to "
+                "finish the update." % exc)
+            return
+        self.close()
+
+
+    def _stop_update_download_worker(self):
+        """Cancel a running update download and wait for it
+        (task 103). The partial file stays, so the next try
+        resumes. The install step itself cannot be cancelled
+        — pip runs to completion — so the wait is bounded by
+        the install, and the window only closes after it."""
+        if self.update_download_worker is not None:
+            if self.update_download_worker.isRunning():
+                self.update_download_worker.cancel()
+                self.update_download_worker.wait(30000)
+            self.update_download_worker = None
 
 
     def _stop_update_worker(self):
@@ -2898,6 +3097,7 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         self._stop_gridsnap_worker()
         self._stop_normalmap_worker()
         self._stop_update_worker()
+        self._stop_update_download_worker()
         self._stop_prompt_worker()
         self._stop_texture_worker()
         self._stop_video_worker()

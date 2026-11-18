@@ -1,5 +1,20 @@
 # Pixel Forge changelog
 
+## 0.83 — 2026-11-18
+
+Silent update check and ask-first auto-update (task 103).
+Pixel Forge now checks for a newer release each time it
+starts, quietly — up to date means nothing happens at all,
+and the Help menu switch still turns the check off. When a
+newer release is out, a popup asks first: Update downloads
+it, checks its checksum against the checksum file published
+with the release, and installs it over the current install
+(the venv and your library and models are untouched), then
+asks whether to restart now or on the next start. The
+download shows progress in the status bar, can be cancelled,
+and resumes where it stopped. An update never starts while
+another long job is running. Nothing else behaves differently.
+
 ## 0.82 — 2026-11-17
 
 Activity light, progress, and Cancel (task 90). The status bar

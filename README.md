@@ -757,23 +757,32 @@ the text reads, and it is one undo step like every other edit.
 
 ## Updates
 
-Pixel Forge never phones home by default: with the default
-settings the app makes no network request at all. The Help
-menu has two update actions. Check for updates asks GitHub
-whether a newer Pixel Forge is out, right now: the user
-asking is not phoning home, so it works whether or not the
-automatic check is on. Check for updates on startup turns the
-same check on once per launch, and the choice is remembered.
+Pixel Forge checks for a newer release once each time it
+starts, quietly: up to date means nothing happens at all, no
+popup and no message. The Help menu has two update actions.
+Check for updates asks GitHub whether a newer Pixel Forge is
+out, right now: the user asking is not phoning home, so it
+works whether or not the automatic check is on. Check for
+updates on startup turns the launch check off and on, and the
+choice is remembered.
 
-When a newer release is out, the app says so plainly, with the
-version, and offers the release page to open in the browser.
-The check never downloads or installs anything: the user
-downloads the new release themselves. The request is a plain
-GET to the public releases endpoint; it sends no identifying
-information. A failed check (no network, a timeout, an answer
-the app does not understand) never crashes anything: a manual
-check says why it could not run, and an automatic one leaves
-a line in the status bar.
+When a newer release is out, the app asks first, with the
+version and a short what's-new: Update or Not now. Only on
+Update does anything download. The download shows progress
+in the status bar, can be cancelled, and resumes where it
+stopped. Before anything installs, the download's checksum is
+checked against the checksum file published with the release;
+a mismatch, a missing checksum file, or a checksum file that
+does not parse means no install at all. The install replaces
+the app files only — the venv and your library and models are
+untouched — and then the app asks whether to restart now or
+on the next start. An update never starts while another long
+job is running. The request is a plain GET to the public
+releases endpoint; it sends no identifying information. A
+failed check (no network, a timeout, an answer the app does
+not understand) never crashes anything: a manual check says
+why it could not run, and an automatic one leaves a line in
+the status bar.
 
 ## Self-test
 

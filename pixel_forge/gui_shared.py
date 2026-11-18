@@ -94,7 +94,12 @@ from .tileset import (BLOB_SHAPES, DEFAULT_BLOB_SHAPE, MODE_NAMES,
                       export_tileset, wang_tiles)
 from .undo import Command as UndoCommand
 from .undo import UndoStack
-from .updates import check_for_update
+from .updates import (DownloadCancelled, check_for_update,
+                      download_file, fetch_text,
+                      find_installed_root, install_update,
+                      parse_sidecar, restart_program,
+                      shorten_notes, sidecar_name_for,
+                      updates_home, verify_zip, zip_name_for)
 from .video import (DEFAULT_FPS, FPS_PRESETS, FRAME_COUNT_CONFIRM,
                     VIDEO_EXTENSIONS, ExtractionCancelled,
                     estimate_frame_count, extract_frames,
@@ -954,6 +959,75 @@ class UpdateCheckWorker(QThread):
                       "reason": "the update check failed: %s" % exc}
         result["manual"] = self.manual
         self.done.emit(result)
+
+
+class UpdateDownloadWorker(QThread):
+    """Downloads a release, verifies it, and installs it
+    (task 103) — off the GUI thread, so a slow download never
+    freezes the window.
+
+    The steps, in order: fetch the checksum sidecar and parse
+    it (missing or unparseable refuses the update, exactly
+    like a mismatch); download the release zip with Range
+    resume into the updates folder; check its SHA-256 against
+    the sidecar; install it over the current install with the
+    venv's own pip. Every step is one of updates.py's plain
+    functions, called through gui_module so tests can stub
+    them — the worker itself holds no download logic. The
+    signals carry plain dicts and strings only. cancel()
+    stops the download between chunks; a cancelled run emits
+    cancelled, keeps the partial file for the next try to
+    resume, and never reaches the install. There is no cancel
+    once the install starts — pip runs to completion, and the
+    window's close waits for it.
+    """
+    progress = Signal(int, int)  # downloaded bytes, total (0 unknown)
+    done = Signal(dict)  # {"version": ...}
+    failed = Signal(str)  # readable error message
+    cancelled = Signal()
+
+    def __init__(self, version, zip_url, zip_size, sidecar_url,
+                 work_dir, parent=None):
+        super().__init__(parent)
+        self.version = version
+        self.zip_url = zip_url
+        self.zip_size = zip_size
+        self.sidecar_url = sidecar_url
+        self.work_dir = Path(work_dir)
+        self._cancel_event = threading.Event()
+
+    def cancel(self):
+        self._cancel_event.set()
+
+    def run(self):
+        try:
+            sidecar_text = gui_module.fetch_text(self.sidecar_url)
+            expected = gui_module.parse_sidecar(sidecar_text)
+            if expected is None:
+                self.failed.emit(
+                    "this release has no checksum file, so "
+                    "Pixel Forge will not install it")
+                return
+            zip_path = (self.work_dir
+                        / ("pixel-forge-v%s.zip" % self.version))
+            gui_module.download_file(
+                self.zip_url, zip_path,
+                expected_size=self.zip_size or None,
+                cancel_event=self._cancel_event,
+                progress=lambda done, total:
+                    self.progress.emit(done, total))
+            gui_module.verify_zip(zip_path, expected)
+            gui_module.install_update(zip_path, self.version)
+        except DownloadCancelled:
+            self.cancelled.emit()
+            return
+        except PixelForgeError as exc:
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - window must stay up
+            self.failed.emit("the update failed: %s" % exc)
+            return
+        self.done.emit({"version": self.version})
 
 
 class SpritesheetDialog(QDialog):
