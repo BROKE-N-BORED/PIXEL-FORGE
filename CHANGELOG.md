@@ -1,5 +1,16 @@
 # Pixel Forge changelog
 
+## 0.85 — 2026-11-18
+
+Hover-scrub the frame strip (task 92). Hovering a frame
+thumbnail in the Video tab's strip previews that frame in
+the Animation preview without loading it — the current
+frame, the counter, and the scrubber all stay where they
+were, and moving off puts the current frame back.
+Thumbnails are built once when the strip loads, so the
+scrub never waits on a rebuild. Double-click a thumbnail
+to jump to that frame. Nothing else behaves differently.
+
 ## 0.84 — 2026-11-18
 
 Hold to compare and hover to preview (task 91). The

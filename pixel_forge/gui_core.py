@@ -249,6 +249,15 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         # import (None = unknown — no estimate, no confirm).
         self.video_duration = None
         self.video_current = 0
+        # Hover-scrub (task 92): the frame index the strip
+        # hover is peeking at, or None — while set, the
+        # Animation preview shows that frame instead of
+        # video_current, and nothing else moves: the counter,
+        # the scrubber, and the duration spin all stay on the
+        # current frame, and no thumbnail is rebuilt (the
+        # strip's thumbnails are built once in _rebuild_strip
+        # and ride in the items' data).
+        self._video_scrub_index = None
         self._updating_video_size = False
         self.video_timer = QTimer(self)
         self.video_timer.timeout.connect(self._advance_video_frame)
@@ -2417,6 +2426,23 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         if obj in self._hover_views and event.type() in (
                 QEvent.Type.Hide, QEvent.Type.Leave):
             self._end_hover_preview(self._hover_views[obj])
+        # Task 92: the frame strip's viewport. itemEntered
+        # covers moving onto a thumbnail; the filter covers
+        # the two cases it misses — the mouse drifting onto
+        # empty strip space (no item under it) and the mouse
+        # leaving the strip entirely — both of which end the
+        # scrub. The filter never consumes the event: clicks
+        # and drags still reach the strip.
+        strip = getattr(self, "video_strip", None)
+        if strip is not None and obj is strip.viewport():
+            if event.type() == QEvent.Type.Leave:
+                self._end_strip_scrub()
+            elif event.type() == QEvent.Type.MouseMove:
+                item = strip.itemAt(event.pos())
+                if item is None:
+                    self._end_strip_scrub()
+                else:
+                    self._on_strip_hover(item)
         return super().eventFilter(obj, event)
 
     def _hover_settings(self, tab, kind, data):

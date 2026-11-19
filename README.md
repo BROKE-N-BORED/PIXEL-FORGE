@@ -368,7 +368,9 @@ it keeps them and prints the way to remove them by hand.
   the result again. Hovering a preset or a palette in its picker
   previews its effect on the spot without applying anything;
   moving off puts the current result back, and clicking applies
-  as before.
+  as before. Hovering a frame thumbnail in the Video tab's strip
+  previews that frame in the Animation preview without loading
+  it; double-click a thumbnail to jump to that frame.
 
 **Command line:**
 

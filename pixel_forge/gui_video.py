@@ -5,7 +5,7 @@ One of the MainWindow mixins (task 58).
 
 from PySide6.QtCore import QEventLoop, QSize, Qt
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget)
 from .atlas import DEFAULT_PADDING, write_atlas
 from .engine_export import FORMAT_INFO
 from .gui_shared import (CollapsibleSection, EngineExportDialog, MAX_CUSTOM_SIZE, SIZE_PRESETS, STRIP_THUMB, SheetSplitDialog, SpritesheetDialog, TagDialog, VIDEO_DEBOUNCE_MS, VideoWorker, _KeepDropCommand, dimmed_pixmap, gui_module, thumb_pixmap, video_filter)
@@ -660,10 +660,25 @@ class VideoTabMixin:
             self._on_drop_selected)
         strip_head.addWidget(self.video_drop_selected_btn)
         strip_layout.addLayout(strip_head)
+        # Task 92: the hover-scrub hint — the gesture can be
+        # found, not guessed. Same look as the field
+        # explanations (objectName "explanation"), but NOT
+        # registered in field_explanations: that registry pins
+        # the exact set of field lines (FieldExplanationTests),
+        # and this line explains a gesture, not a field.
+        self.video_scrub_hint = QLabel(
+            "Hover a frame to peek at it. Double-click to jump "
+            "to it.")
+        self.video_scrub_hint.setObjectName("explanation")
+        self.video_scrub_hint.setWordWrap(True)
+        self.video_scrub_hint.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        strip_layout.addWidget(self.video_scrub_hint)
         self.video_strip = QListWidget()
         self.video_strip.setToolTip(
-            "Frames — click one to preview it, uncheck to drop "
-            "it, drag to reorder")
+            "Frames — hover one to peek at it, click or "
+            "double-click to jump to it, uncheck to drop it, "
+            "drag to reorder")
         self.video_strip.setIconSize(
             QSize(STRIP_THUMB, STRIP_THUMB))
         self.video_strip.setFlow(QListWidget.Flow.LeftToRight)
@@ -684,6 +699,19 @@ class VideoTabMixin:
             QListWidget.Movement.Snap)
         self.video_strip.itemClicked.connect(
             self._on_strip_item_clicked)
+        # Task 92: hover-scrub. itemEntered reports the
+        # thumbnail under the mouse (mouse tracking on the
+        # viewport is what makes it fire without a button
+        # held); the window's eventFilter watches the same
+        # viewport for the two cases itemEntered misses —
+        # empty strip space and leaving the strip. A
+        # double-click loads at the hovered frame.
+        self.video_strip.setMouseTracking(True)
+        self.video_strip.viewport().setMouseTracking(True)
+        self.video_strip.itemEntered.connect(self._on_strip_hover)
+        self.video_strip.viewport().installEventFilter(self)
+        self.video_strip.itemDoubleClicked.connect(
+            self._on_strip_item_double_clicked)
         self.video_strip.itemChanged.connect(
             self._on_strip_item_changed)
         self.video_strip.itemSelectionChanged.connect(
@@ -1297,6 +1325,10 @@ class VideoTabMixin:
 
 
     def _rebuild_strip(self):
+        # Task 92: new frames mean the peek is stale — a scrub
+        # index from the old set would point at a different
+        # frame now, so the scrub ends here.
+        self._video_scrub_index = None
         if len(self.video_order) != len(self.video_frames):
             # A stale order (or none yet) — natural order.
             self.video_order = list(range(len(self.video_frames)))
@@ -1374,6 +1406,23 @@ class VideoTabMixin:
                 self.video_preview_label.setPixmap(compare)
                 self._refresh_video_preview_meta()
                 return
+        # Task 92: a strip hover peeks at another frame — the
+        # preview shows it, and the meta below stays on the
+        # current frame (the counter, the scrubber, and the
+        # duration spin never move for a peek). The onion skin
+        # does not apply to a peek: it ghosts the previous kept
+        # frame behind the current one, which is meaningless
+        # for a frame the user has not loaded. The compare hold
+        # above wins over a peek.
+        if (self._video_scrub_index is not None
+                and 0 <= self._video_scrub_index
+                < len(self.video_frames)):
+            frame = self.video_frames[self._video_scrub_index]
+            pixmap = gui_module.checkerboard_pixmap(
+                frame, self.video_zoom_slider.value(), smooth=False)
+            self.video_preview_label.setPixmap(pixmap)
+            self._refresh_video_preview_meta()
+            return
         frame = self.video_frames[self.video_current]
         if self.video_onion_check.isChecked():
             frame = self._onion_frame()
@@ -1585,6 +1634,9 @@ class VideoTabMixin:
             return
         self.video_play_tag = tag
         self.video_current = kept[start]
+        # Task 92: a tag play takes the preview too — a peek
+        # ends rather than freezing the preview on one frame.
+        self._video_scrub_index = None
         self._refresh_video_preview()
         self.video_timer.start(
             self._video_frame_duration(self.video_current))
@@ -1633,6 +1685,54 @@ class VideoTabMixin:
         if index is not None:
             self.video_current = index
             self._refresh_video_preview()
+
+
+    def _on_strip_hover(self, item):
+        """The mouse is over a strip thumbnail — peek at that
+        frame in the Animation preview without loading it
+        (task 92). Nothing is selected or applied: video_current,
+        the counter, the scrubber, and the duration spin all
+        stay where they were, and the peek reads the already
+        pixelized frame — no thumbnail is rebuilt, so the scrub
+        never stutters on a slow drive. No audio, no playback:
+        a hover never starts the timer, and while the animation
+        is playing the preview belongs to playback, so a hover
+        does nothing. A drag (a button held) is a reorder, not
+        a peek, so it is ignored too."""
+        if item is None:
+            self._end_strip_scrub()
+            return
+        if self.video_timer.isActive():
+            return
+        if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
+            return
+        index = item.data(Qt.ItemDataRole.UserRole)
+        if index is None or index == self._video_scrub_index:
+            return
+        self._video_scrub_index = index
+        self._refresh_video_preview()
+
+
+    def _end_strip_scrub(self):
+        """The mouse left the strip (or drifted onto empty
+        space) — the preview goes back to the current frame.
+        A no-op when no scrub is showing."""
+        if self._video_scrub_index is None:
+            return
+        self._video_scrub_index = None
+        self._refresh_video_preview()
+
+
+    def _on_strip_item_double_clicked(self, item):
+        """Double-click loads at the hovered frame (task 92) —
+        the peek becomes the current frame, the scrub ends, and
+        the counter, scrubber, and duration spin follow it."""
+        index = item.data(Qt.ItemDataRole.UserRole)
+        if index is None:
+            return
+        self._video_scrub_index = None
+        self.video_current = index
+        self._refresh_video_preview()
 
 
     def _on_strip_item_changed(self, item):
@@ -1816,6 +1916,9 @@ class VideoTabMixin:
         self.video_play_tag = None
         if self.video_current not in kept:
             self.video_current = kept[0]
+        # Task 92: playback takes the preview — a peek ends
+        # rather than freezing the preview on one frame.
+        self._video_scrub_index = None
         self.video_timer.start(
             self._video_frame_duration(self.video_current))
         self.video_play_btn.setText("Pause")

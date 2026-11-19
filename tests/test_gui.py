@@ -12864,5 +12864,355 @@ class CompareHoverTests(unittest.TestCase):
                          "hovering rendered %d time(s)" % len(calls))
 
 
+class HoverScrubTests(unittest.TestCase):
+    """Task 92 (U16/U34): hover-scrub the frame strip.
+    Hovering a strip thumbnail previews that frame in the
+    Animation preview without loading it — the current
+    frame, the counter, and the scrubber stay where they
+    were — and moving off puts the current frame back.
+    Thumbnails are built once at strip load, so a hover
+    never rebuilds one. Double-click loads at the hovered
+    frame. Runner group g15."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.tmp = tempfile.mkdtemp()
+        self.win = MainWindow()
+        self.win.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _wait_for_video(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.video_worker is None
+                    and not self.win._video_debounce_timer.isActive()):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _load_video(self, duration=2, fps=8):
+        from pixel_forge import video as video_mod
+        if video_mod.find_ffmpeg() is None:
+            self.skipTest("ffmpeg not installed")
+        clip = make_test_video(os.path.join(self.tmp, "clip.mp4"),
+                               duration=duration, fps=fps, width=80,
+                               height=60)
+        self.win.tabs.setCurrentIndex(1)
+        self.assertTrue(self.win.load_video(clip))
+        self.assertTrue(self._wait_for_video())
+        self.assertGreaterEqual(len(self.win.video_frames), 8)
+        return clip
+
+    def _preview_image(self):
+        return self.win.video_preview_label.pixmap().toImage()
+
+    def _expected_image(self, index):
+        from pixel_forge.gui_shared import checkerboard_pixmap
+        frame = self.win.video_frames[index]
+        return checkerboard_pixmap(
+            frame, self.win.video_zoom_slider.value(),
+            smooth=False).toImage()
+
+    def _strip_item(self, index):
+        # The strip is in natural order after a fresh load —
+        # row == frame index.
+        item = self.win.video_strip.item(index)
+        self.assertEqual(
+            item.data(Qt.ItemDataRole.UserRole), index)
+        return item
+
+    # --------------------------------------------------- the hint
+
+    def test_hint_line_and_tooltip(self):
+        # The gesture can be found, not guessed: a plain-words
+        # line over the strip and a tooltip that names the
+        # hover and the double-click. No em-dash, no "(s)".
+        hint = self.win.video_scrub_hint
+        self.assertEqual(
+            hint.text(),
+            "Hover a frame to peek at it. Double-click to jump "
+            "to it.")
+        self.assertEqual(hint.objectName(), "explanation")
+        self.assertTrue(hint.wordWrap())
+        self.assertNotIn("\u2014", hint.text())
+        self.assertNotIn("(s)", hint.text())
+        tooltip = self.win.video_strip.toolTip()
+        self.assertIn("hover one to peek", tooltip)
+        self.assertIn("double-click to jump", tooltip)
+        # The hint explains a gesture, not a field — it is
+        # not a registered field explanation.
+        self.assertNotIn(self.win.video_scrub_hint,
+                         self.win.field_explanations.values())
+
+    # --------------------------------------------------- the peek
+
+    def test_hover_peeks_without_loading(self):
+        self._load_video()
+        current = self.win.video_current
+        counter = self.win.video_counter_label.text()
+        scrubber = self.win.video_scrub_slider.value()
+        duration = self.win.video_duration_spin.value()
+        target = current + 5
+        self.win._on_strip_hover(self._strip_item(target))
+        self.app.processEvents()
+        self.assertEqual(self.win._video_scrub_index, target)
+        self.assertEqual(self._preview_image(),
+                         self._expected_image(target),
+                         "the preview does not show the hovered "
+                         "frame")
+        # Nothing loaded: the current frame and every control
+        # that names it are exactly as they were.
+        self.assertEqual(self.win.video_current, current)
+        self.assertEqual(self.win.video_counter_label.text(),
+                         counter)
+        self.assertEqual(self.win.video_scrub_slider.value(),
+                         scrubber)
+        self.assertEqual(self.win.video_duration_spin.value(),
+                         duration)
+
+    def test_hover_moves_between_frames(self):
+        self._load_video()
+        current = self.win.video_current
+        self.win._on_strip_hover(self._strip_item(current + 2))
+        self.app.processEvents()
+        self.assertEqual(self._preview_image(),
+                         self._expected_image(current + 2))
+        self.win._on_strip_hover(self._strip_item(current + 7))
+        self.app.processEvents()
+        self.assertEqual(self._preview_image(),
+                         self._expected_image(current + 7))
+        self.assertEqual(self.win.video_current, current)
+
+    def test_leave_restores_current_frame(self):
+        self._load_video()
+        before = self._preview_image()
+        self.win._on_strip_hover(self._strip_item(5))
+        self.app.processEvents()
+        self.assertNotEqual(self._preview_image(), before)
+        self.win._end_strip_scrub()
+        self.app.processEvents()
+        self.assertIsNone(self.win._video_scrub_index)
+        self.assertEqual(self._preview_image(), before,
+                         "leaving did not restore the current "
+                         "frame")
+
+    def test_hover_same_frame_twice_is_one_refresh(self):
+        # Moving within one thumbnail re-fires the hover, but
+        # the preview only refreshes when the frame changes.
+        self._load_video()
+        with mock.patch.object(
+                self.win, "_refresh_video_preview",
+                wraps=self.win._refresh_video_preview) as refresh:
+            item = self._strip_item(4)
+            self.win._on_strip_hover(item)
+            self.win._on_strip_hover(item)
+            self.win._on_strip_hover(item)
+        self.assertEqual(refresh.call_count, 1)
+
+    # --------------------------------------------------- no rebuild
+
+    def test_hover_triggers_no_thumbnail_rebuild(self):
+        # The rule: thumbnails are built once at strip load —
+        # a hover never rebuilds one and never re-pixelizes.
+        import pixel_forge.gui as gui_mod
+        import pixel_forge.gui_video as video_gui_mod
+        self._load_video()
+        # The v0.84 idle prefetch renders variants on timer
+        # ticks — drain it and stop it first, so the only
+        # pixelize calls the counter can see are the hovers'
+        # own (the same setup as the v0.84 no-render test).
+        self.win._render_hover_variants_now()
+        self.win._hover_prefetch_timer.stop()
+        self.app.processEvents()
+        calls = []
+        original_thumb = video_gui_mod.thumb_pixmap
+        original_pixelize = gui_mod.pixelize_image
+
+        def counting_thumb(*args, **kwargs):
+            calls.append("thumb")
+            return original_thumb(*args, **kwargs)
+
+        def counting_pixelize(*args, **kwargs):
+            calls.append("pixelize")
+            return original_pixelize(*args, **kwargs)
+
+        with mock.patch.object(video_gui_mod, "thumb_pixmap",
+                               counting_thumb), \
+            mock.patch.object(gui_mod, "pixelize_image",
+                              counting_pixelize), \
+            mock.patch.object(self.win, "_rebuild_strip",
+                              wraps=self.win._rebuild_strip) \
+                as rebuild:
+            for index in (1, 3, 6, 9, 2):
+                self.win._on_strip_hover(
+                    self._strip_item(index))
+                self.app.processEvents()
+            self.win._end_strip_scrub()
+        self.assertEqual(calls, [],
+                         "hovering rebuilt: %s" % calls)
+        self.assertEqual(rebuild.call_count, 0,
+                         "hovering rebuilt the strip")
+
+    # --------------------------------------------------- double-click
+
+    def test_double_click_loads_hovered_frame(self):
+        self._load_video()
+        current = self.win.video_current
+        target = current + 5
+        self.win._on_strip_hover(self._strip_item(target))
+        self.app.processEvents()
+        self.assertEqual(self.win.video_current, current)
+        self.win.video_strip.itemDoubleClicked.emit(
+            self._strip_item(target))
+        self.app.processEvents()
+        self.assertIsNone(self.win._video_scrub_index)
+        self.assertEqual(self.win.video_current, target)
+        self.assertEqual(self._preview_image(),
+                         self._expected_image(target))
+        self.assertEqual(
+            self.win.video_counter_label.text(),
+            "Frame %d of %d (%d kept)"
+            % (target + 1, len(self.win.video_frames),
+               len(self.win._kept_indices())))
+
+    # --------------------------------------------------- playback
+
+    def test_hover_does_not_start_playback(self):
+        self._load_video()
+        self.win._on_strip_hover(self._strip_item(5))
+        self.app.processEvents()
+        self.assertFalse(self.win.video_timer.isActive())
+        self.assertEqual(self.win.video_play_btn.text(), "Play")
+
+    def test_hover_while_playing_does_nothing(self):
+        self._load_video()
+        self.win.video_play_btn.click()
+        self.app.processEvents()
+        self.assertTrue(self.win.video_timer.isActive())
+        self.win._on_strip_hover(self._strip_item(5))
+        self.app.processEvents()
+        self.assertIsNone(self.win._video_scrub_index,
+                          "a hover peeked during playback")
+        self.win.video_play_btn.click()
+        self.app.processEvents()
+
+    def test_play_clears_scrub(self):
+        self._load_video()
+        self.win._on_strip_hover(self._strip_item(5))
+        self.app.processEvents()
+        self.assertIsNotNone(self.win._video_scrub_index)
+        self.win.video_play_btn.click()
+        self.app.processEvents()
+        self.assertIsNone(self.win._video_scrub_index)
+        self.assertTrue(self.win.video_timer.isActive())
+        self.win.video_play_btn.click()
+        self.app.processEvents()
+
+    def test_rebuild_clears_scrub(self):
+        # New frames make a peek stale — the strip rebuild ends
+        # it rather than pointing at a different frame.
+        self._load_video()
+        self.win._on_strip_hover(self._strip_item(5))
+        self.app.processEvents()
+        self.assertIsNotNone(self.win._video_scrub_index)
+        self.win._rebuild_strip()
+        self.assertIsNone(self.win._video_scrub_index)
+
+    # --------------------------------------------------- the wiring
+
+    def test_event_filter_drives_scrub(self):
+        # The real path: a MouseMove over a thumbnail and a
+        # Leave off the strip, through the window's event
+        # filter — the way the mouse delivers them.
+        from PySide6.QtCore import QEvent, QPoint
+        from PySide6.QtGui import QMouseEvent
+        # A 1 s clip: 8 frames, one strip row, so the space
+        # below the row is empty strip space.
+        self._load_video(duration=1)
+        viewport = self.win.video_strip.viewport()
+        item = self._strip_item(6)
+        rect = self.win.video_strip.visualItemRect(item)
+        move = QMouseEvent(QEvent.Type.MouseMove, rect.center(),
+                           Qt.MouseButton.NoButton,
+                           Qt.MouseButton.NoButton,
+                           Qt.KeyboardModifier.NoModifier)
+        self.assertFalse(self.win.eventFilter(viewport, move))
+        self.app.processEvents()
+        self.assertEqual(self.win._video_scrub_index, 6)
+        self.assertEqual(self._preview_image(),
+                         self._expected_image(6))
+        # Empty strip space ends the scrub — scan for a point
+        # no item covers (the row layout depends on the window
+        # width, so no fixed corner is safe).
+        empty = None
+        for y in range(4, viewport.height(), 10):
+            for x in range(4, viewport.width(), 10):
+                point = QPoint(x, y)
+                if self.win.video_strip.itemAt(point) is None:
+                    empty = point
+                    break
+            if empty is not None:
+                break
+        self.assertIsNotNone(
+            empty, "the strip leaves no empty space to move to")
+        move_empty = QMouseEvent(
+            QEvent.Type.MouseMove, empty, Qt.MouseButton.NoButton,
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+        self.assertFalse(self.win.eventFilter(viewport, move_empty))
+        self.app.processEvents()
+        self.assertIsNone(self.win._video_scrub_index)
+        self.assertEqual(self._preview_image(),
+                         self._expected_image(
+                             self.win.video_current))
+
+    def test_event_filter_leave_ends_scrub(self):
+        from PySide6.QtCore import QEvent
+        self._load_video()
+        viewport = self.win.video_strip.viewport()
+        self.win._on_strip_hover(self._strip_item(4))
+        self.app.processEvents()
+        self.assertIsNotNone(self.win._video_scrub_index)
+        self.assertFalse(
+            self.win.eventFilter(viewport,
+                                 QEvent(QEvent.Type.Leave)))
+        self.app.processEvents()
+        self.assertIsNone(self.win._video_scrub_index)
+
+    def test_drag_does_not_scrub(self):
+        # A button held means a reorder drag, not a peek — the
+        # hover is ignored until the button is up.
+        from PySide6.QtCore import QEvent, QPoint
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtTest import QTest
+        self._load_video()
+        viewport = self.win.video_strip.viewport()
+        item = self._strip_item(6)
+        rect = self.win.video_strip.visualItemRect(item)
+        QTest.mousePress(viewport, Qt.MouseButton.LeftButton,
+                         pos=rect.center())
+        move = QMouseEvent(QEvent.Type.MouseMove, rect.center(),
+                           Qt.MouseButton.LeftButton,
+                           Qt.MouseButton.LeftButton,
+                           Qt.KeyboardModifier.NoModifier)
+        self.win.eventFilter(viewport, move)
+        self.app.processEvents()
+        self.assertIsNone(self.win._video_scrub_index,
+                          "a drag peeked at a frame")
+        QTest.mouseRelease(viewport, Qt.MouseButton.LeftButton,
+                           pos=rect.center())
+
+
 if __name__ == "__main__":
     unittest.main()
