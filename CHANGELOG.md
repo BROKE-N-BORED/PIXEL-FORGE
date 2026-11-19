@@ -1,5 +1,18 @@
 # Pixel Forge changelog
 
+## 0.87 — 2026-11-19
+
+Micro-interactions and spring motion (task 94). Buttons
+dip to 0.97 while pressed and settle back on release.
+Library cards and Prompt candidates lift 4 px under the
+mouse. A frame dropped into a new spot in the Video strip
+lands with a small spring. Picking an editor tool pops its
+button. When a generation or an export finishes, the
+result pops once: no popup, no sound, just a small moment
+that says it landed. All motion is transform-only, under
+300 ms, and interruptible; it never delays a click or
+changes what any action does.
+
 ## 0.86 — 2026-11-18
 
 Pie menu for editor tools (task 93). Right-click the Pixel

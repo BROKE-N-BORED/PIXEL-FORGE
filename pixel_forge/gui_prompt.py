@@ -6,7 +6,7 @@ One of the MainWindow mixins (task 58).
 from PySide6.QtCore import QSize, QUrl, Qt
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget)
-from .gui_shared import (MAX_CUSTOM_SIZE, ORIGINAL_FIT, PromptWorker, SIZE_PRESETS, STRIP_THUMB, gui_module, thumb_pixmap)
+from .gui_shared import (MAX_CUSTOM_SIZE, ORIGINAL_FIT, PromptWorker, SIZE_PRESETS, STRIP_THUMB, _CardLift, gui_module, thumb_pixmap)
 from .history import (batches_dir, load_history, record_batch, record_prompt, save_history)
 from .imagegen import (DEFAULT_COUNT, DEFAULT_NEGATIVE, DEFAULT_SIZE, GENERATION_MIN_RAM_BYTES, LCM_CFG, LCM_STEPS, MAX_PROMPT_LEN, MODEL_FILENAME, MODEL_URL, NEGATIVE_PRESETS, engine_status, find_model, format_bytes, is_pinned_model, load_batch, new_batch, require_engine, require_model, set_keeper, validate_prompt)
 from pathlib import Path
@@ -394,6 +394,10 @@ class PromptTabMixin:
         self.prompt_strip.setMovement(QListWidget.Movement.Static)
         self.prompt_strip.itemClicked.connect(
             self._on_prompt_strip_clicked)
+        # Card hover lift (task 94): the candidates are cards;
+        # the hovered one rises 4 px. Painting only: clicks
+        # land exactly as before.
+        self.prompt_lift = _CardLift(self.prompt_strip)
         strip_layout.addWidget(self.prompt_strip, 1)
         right.addWidget(strip_pane)
 
@@ -717,6 +721,11 @@ class PromptTabMixin:
                 message += " (%d failed)" % len(failed)
             self.statusBar().showMessage(message)
             self._record_current_batch()
+            # The finish moment (task 94): generation landed.
+            # The all-failed path below warns instead and
+            # never reaches this; cancel and failure have
+            # their own handlers and never pulse.
+            self._motion.pulse(self.prompt_after_label)
         else:
             self.prompt_info_label.setText("No candidates generated")
             detail = failed[0].get("error", "") if failed else ""
@@ -742,6 +751,8 @@ class PromptTabMixin:
         self.statusBar().showMessage(
             "Regenerated %s (took %s)" % (target or "candidate", took))
         self._update_prompt_iter_buttons()
+        # The finish moment (task 94): the re-roll landed.
+        self._motion.pulse(self.prompt_after_label)
 
 
     def _on_prompt_failed(self, message):
@@ -1325,6 +1336,8 @@ class PromptTabMixin:
                                 "could not write: %s" % path)
             return False
         self.statusBar().showMessage("Exported %s" % Path(path).name)
+        # The finish moment (task 94): the file is written.
+        self._motion.pulse(self.prompt_after_label)
         return True
 
 

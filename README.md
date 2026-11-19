@@ -374,6 +374,13 @@ it keeps them and prints the way to remove them by hand.
   Right-click the Pixel art canvas, or press Q, for a tool
   wheel at the cursor — flick toward a tool and release to
   pick it. Number keys 1 to 7 pick the tools straight off.
+- **Small motion:** buttons dip a little while pressed;
+  Library and candidate cards lift under the mouse; a frame
+  dropped into a new spot in the strip lands with a small
+  spring; picking an editor tool pops its button; and when
+  a generation or an export finishes, the result pops once,
+  quietly. Every bit of it is quick and never delays the
+  click or the work it decorates.
 
 **Command line:**
 

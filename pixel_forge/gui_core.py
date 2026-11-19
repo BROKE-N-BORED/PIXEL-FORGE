@@ -14,7 +14,7 @@ from .gui_code import CodeTabMixin
 from .gui_image import ImageTabMixin
 from .gui_library import LibraryTabMixin
 from .gui_prompt import PromptTabMixin
-from .gui_shared import (AUTOSAVE_DEBOUNCE_MS, EDITOR_TOOLS, HowToUseDialog, PaletteEditorDialog, SIZE_PRESETS, TEXTURE_DEBOUNCE_MS, THEMES, UpdateCheckWorker, UpdateDownloadWorker, VIDEO_DEBOUNCE_MS, _ControlChangeCommand, _PresetDeleteCommand, clamp_geometry, gui_module)
+from .gui_shared import (AUTOSAVE_DEBOUNCE_MS, EDITOR_TOOLS, HowToUseDialog, PaletteEditorDialog, SIZE_PRESETS, TEXTURE_DEBOUNCE_MS, THEMES, UpdateCheckWorker, UpdateDownloadWorker, VIDEO_DEBOUNCE_MS, _ControlChangeCommand, _Motion, _PresetDeleteCommand, clamp_geometry, gui_module)
 from .gui_tileset import TilesetTabMixin
 from .gui_video import VideoTabMixin
 from .imagegen import load_batch
@@ -427,6 +427,16 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         # first control change has a "before" to record against.
         self._sync_tab_settings()
         self._refresh_undo_actions()
+        # Micro-interactions (task 94): one motion controller
+        # per window: button press dips, finish pulses, the
+        # strip settle. It filters the whole application's
+        # events, so it is installed last, once every widget
+        # exists. It never eats an event: it only watches
+        # presses and releases and animates what they look
+        # like. Parented to the window, so a closed window's
+        # filter goes away with it.
+        self._motion = _Motion(self)
+        QApplication.instance().installEventFilter(self._motion)
 
 
     # ================================================ activity indicator

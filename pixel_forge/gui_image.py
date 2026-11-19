@@ -703,6 +703,8 @@ class ImageTabMixin:
         self._clear_generated_seed()
         self.update_preview()
         self.statusBar().showMessage("Background removed")
+        # The finish moment (task 94), on the new result.
+        self._motion.pulse(self.after_label)
 
 
     def _on_bgremove_failed(self, message):
@@ -818,6 +820,7 @@ class ImageTabMixin:
             "Snapped to a %g px grid (%d x %d sprite)"
             % (result["grid"][0], self.source_image.width(),
                self.source_image.height()))
+        self._motion.pulse(self.after_label)
 
 
     def _on_gridsnap_failed(self, message):
@@ -945,6 +948,7 @@ class ImageTabMixin:
             "Normal map generated, %d x %d"
             % (self.normal_map_image.width(),
                self.normal_map_image.height()))
+        self._motion.pulse(self.after_label)
 
 
     def _on_normalmap_failed(self, message):
@@ -1334,6 +1338,9 @@ class ImageTabMixin:
                                 "could not write: %s" % path)
             return False
         self.statusBar().showMessage("Exported %s" % Path(path).name)
+        # The finish moment (task 94): the exported result
+        # pops once. Decoration only: the file is written.
+        self._motion.pulse(self.after_label)
         return True
 
 
@@ -1421,6 +1428,7 @@ class ImageTabMixin:
                         "could not write: %s" % path)
             return False
         self.statusBar().showMessage("Exported %s" % Path(path).name)
+        self._motion.pulse(self.after_label)
         return True
 
 
@@ -1528,6 +1536,8 @@ class ImageTabMixin:
             "Generated %s, seed %d (%d x %d)"
             % (self._procedural_what(kind, seed), seed,
                sprite.width(), sprite.height()))
+        # The finish moment (task 94), on the new sprite.
+        self._motion.pulse(self.after_label)
 
 
     # ------------------------------------------------ pixel editor
@@ -1604,6 +1614,14 @@ class ImageTabMixin:
         opens a dialog on click instead of painting, so its
         hint says so."""
         self._editor_tool = tool
+        # The morph (task 94): the picked button pops once as
+        # it becomes the tool in hand. Every pick path lands
+        # here (the buttons, the pie wheel, the number keys
+        # all press the real button), so one hook covers all
+        # three. The tools have no panels to morph into: the
+        # pop is the morph.
+        self._motion.pulse(self.editor_tool_buttons[tool],
+                           peak=1.07)
         if tool == "text":
             self.statusBar().showMessage(
                 "Text: click where the text goes")

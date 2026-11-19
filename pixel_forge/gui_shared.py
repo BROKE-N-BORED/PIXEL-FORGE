@@ -9,6 +9,7 @@ imports no tab module.
 import json
 import math
 import os
+from weakref import WeakKeyDictionary
 import random
 import shutil
 import subprocess
@@ -18,21 +19,26 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import (QPoint, QRect, QSettings, QSize, Qt, QThread,
-                            QTimer, QUrl, Signal)
+from PySide6.QtCore import (QEasingCurve, QEvent, QModelIndex, QObject,
+                            QParallelAnimationGroup, QPersistentModelIndex,
+                            QPoint, Property, QPropertyAnimation, QRect,
+                            QSettings, QSize, Qt, QThread, QTimer, QUrl,
+                            Signal)
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont,
                            QFontDatabase, QFontMetrics, QIcon, QImage,
                            QImageReader, QKeySequence, QPainter, QPixmap,
                            QShortcut)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup,
-                               QCheckBox, QColorDialog, QComboBox, QDialog,
-                               QDoubleSpinBox, QFileDialog, QHBoxLayout,
-                               QInputDialog, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMainWindow, QMessageBox,
-                               QProgressBar, QPushButton, QScrollArea,
-                               QSlider, QSpinBox, QSplitter, QStackedWidget,
-                               QStatusBar, QTabWidget, QTextEdit,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView,
+                               QApplication, QButtonGroup, QCheckBox,
+                               QColorDialog, QComboBox, QDialog,
+                               QDoubleSpinBox, QFileDialog, QGraphicsEffect,
+                               QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QMainWindow,
+                               QMessageBox, QProgressBar, QPushButton,
+                               QScrollArea, QSlider, QSpinBox, QSplitter,
+                               QStackedWidget, QStatusBar,
+                               QStyleOptionViewItem, QStyledItemDelegate,
+                               QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
 from . import __version__
 from . import bgremove
@@ -869,6 +875,400 @@ class _PieMenu(QWidget):
                 int(top + number * step + metrics.ascent()
                     - step / 2),
                 line)
+
+
+# ------------------------------------------ micro-interactions (task 94)
+#
+# Small, cheap motion: feedback only, never decoration over
+# slowness. Every animation here is a transform on one
+# widget, runs at most 300 ms, and is interruptible: starting
+# a new one on a widget stops the one already running there,
+# from whatever value it had reached. Nothing loops, and no
+# timer exists while nothing is animating: when an animation
+# finishes at rest, its graphics effect comes off the widget
+# again, so an idle widget renders exactly as it did before
+# task 94. The motion never eats an event, delays a click,
+# or changes what an action does.
+
+PRESS_SCALE = 0.97    # a pressed button dips to this size
+PRESS_MS = 150        # ... over this long, and back again
+LIFT_PX = 4           # a hovered card rises this many pixels
+LIFT_MS = 200         # ... over this long
+SETTLE_MS = 260       # a dropped strip frame springs to rest
+SETTLE_DY = 6.0       # ... starting this many pixels low
+PULSE_MS = 240        # the finish moment: one small pop
+PULSE_PEAK = 1.05     # ... growing to this size at its top
+
+
+class _MotionEffect(QGraphicsEffect):
+    """One widget's motion transform: a scale about its
+    center plus a vertical shift.
+
+    The source is drawn from sourcePixmap() under the
+    transform. drawSource() cannot be used for this: for
+    widget effects it ignores the painter's transform
+    entirely (probed under the offscreen platform: a
+    translate of 60 px plus a 0.5 scale changed zero
+    pixels), while the same transform over sourcePixmap()
+    renders for real. The bounding rect grows a margin on
+    every side so a pulse's overshoot is not clipped by the
+    effect's own frame.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scale = 1.0
+        self._dy = 0.0
+
+    def get_scale(self):
+        return self._scale
+
+    def set_scale(self, value):
+        self._scale = float(value)
+        self.update()
+
+    def get_dy(self):
+        return self._dy
+
+    def set_dy(self, value):
+        self._dy = float(value)
+        self.update()
+
+    scale = Property(float, get_scale, set_scale)
+    dy = Property(float, get_dy, set_dy)
+
+    def boundingRectFor(self, rect):
+        return rect.adjusted(-24, -24, 24, 24)
+
+    def draw(self, painter):
+        offset = QPoint()
+        pixmap = self.sourcePixmap(Qt.LogicalCoordinates, offset)
+        if pixmap.isNull():
+            return
+        center_x = offset.x() + pixmap.width() / 2.0
+        center_y = offset.y() + pixmap.height() / 2.0
+        painter.save()
+        painter.setRenderHint(
+            QPainter.RenderHint.SmoothPixmapTransform)
+        painter.translate(center_x, center_y + self._dy)
+        painter.scale(self._scale, self._scale)
+        painter.translate(-center_x, -center_y)
+        painter.drawPixmap(offset, pixmap)
+        painter.restore()
+
+
+class _Motion(QObject):
+    """One window's micro-interaction controller (task 94).
+
+    Owns every running widget animation for the window, one
+    animation group per widget, and doubles as the press-dip
+    event filter: installed on the application, it watches
+    for button presses and releases (mouse, plus Space and
+    Enter on a focused button) and never eats an event: a
+    click fires exactly as it did before, the dip is only
+    what the press looks like.
+
+    The pieces:
+    - press dip: a button goes down to PRESS_SCALE over
+      PRESS_MS and settles back on release. A hold stays
+      dipped (the hold-to-compare button keeps its gesture;
+      the dip is only its look).
+    - pulse: one small pop, the finish moment when a
+      generation or an export completes, and the picked
+      editor tool's morph (see pulse()).
+    - settle: a frame dropped into a new strip position
+      lands a few pixels low and springs back with an
+      OutBack overshoot.
+    """
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._window = window
+        # widget -> (effect, group). Weak keys: a widget
+        # destroyed mid-animation (a swatch row rebuilt under
+        # a press) takes its effect and group with it, and the
+        # entry simply vanishes instead of leaking.
+        self._running = WeakKeyDictionary()
+
+    # ------------------------------------------------ plumbing
+
+    def _effect_for(self, widget):
+        """The widget's motion effect, created and installed
+        on first use. Any group already running on the widget
+        is stopped, so the new animation starts from the
+        values the old one had reached: interruptible, never
+        queued, never stuck."""
+        entry = self._running.get(widget)
+        if entry is not None:
+            effect, group = entry
+            group.stop()
+            return effect
+        effect = widget.graphicsEffect()
+        if not isinstance(effect, _MotionEffect):
+            effect = _MotionEffect()
+            widget.setGraphicsEffect(effect)
+        return effect
+
+    def _start(self, widget, animations):
+        effect = self._effect_for(widget)
+        group = QParallelAnimationGroup(effect)
+        for animation in animations:
+            group.addAnimation(animation)
+        self._running[widget] = (effect, group)
+        group.finished.connect(
+            lambda w=widget, g=group: self._on_group_done(w, g))
+        group.start()
+        return group
+
+    def _on_group_done(self, widget, group):
+        entry = self._running.get(widget)
+        if entry is None or entry[1] is not group:
+            return    # a newer animation owns the widget now
+        effect = entry[0]
+        del self._running[widget]
+        # Back at rest: take the effect off again, so an idle
+        # widget carries nothing and renders as before.
+        # setGraphicsEffect(None) deletes the effect itself
+        # (the widget owns it), so there is nothing to free.
+        if (effect.scale == 1.0 and effect.dy == 0.0
+                and widget.graphicsEffect() is effect):
+            widget.setGraphicsEffect(None)
+
+    def _animate(self, effect, prop, start, end, duration,
+                 easing):
+        animation = QPropertyAnimation(effect, prop)
+        animation.setStartValue(start)
+        animation.setEndValue(end)
+        animation.setDuration(duration)
+        animation.setEasingCurve(easing)
+        return animation
+
+    # ------------------------------------------------ the pieces
+
+    def press_dip(self, button):
+        """A button went down: dip toward 0.97 over 150 ms,
+        from wherever it is now (a re-press mid-return dips
+        again from there)."""
+        effect = self._effect_for(button)
+        self._start(button, [self._animate(
+            effect, b"scale", effect.scale, PRESS_SCALE,
+            PRESS_MS, QEasingCurve.Type.OutCubic)])
+
+    def release_dip(self, button):
+        """A button came up: settle back to full size over
+        150 ms. A release with no dip running does nothing."""
+        if button not in self._running:
+            return
+        effect = self._effect_for(button)
+        self._start(button, [self._animate(
+            effect, b"scale", effect.scale, 1.0,
+            PRESS_MS, QEasingCurve.Type.OutCubic)])
+
+    def pulse(self, widget, peak=PULSE_PEAK, duration=PULSE_MS):
+        """One small pop: grow to the peak and settle back to
+        rest, all inside a quarter second.
+
+        Two callers: the finish moment (a generation or an
+        export completed: the result surface pops once,
+        quietly: no popup, no sound, no focus change) and
+        picking an editor tool. The task text pairs the tool
+        buttons with panels to morph into, but the tools have
+        no panels: the row sits over the color strip and the
+        canvas, both always on screen. The honest morph is
+        the picked button itself: it pops as it becomes the
+        tool in hand.
+        """
+        effect = self._effect_for(widget)
+        animation = QPropertyAnimation(effect, b"scale")
+        animation.setKeyValueAt(0.0, effect.scale)
+        animation.setKeyValueAt(0.4, peak)
+        animation.setKeyValueAt(1.0, 1.0)
+        animation.setDuration(duration)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._start(widget, [animation])
+
+    def settle(self, widget):
+        """A dropped reorder lands: the widget starts a few
+        pixels low and springs back to rest, overshooting a
+        little on the way (OutBack), inside 300 ms."""
+        effect = self._effect_for(widget)
+        effect.set_dy(SETTLE_DY)
+        self._start(widget, [self._animate(
+            effect, b"dy", SETTLE_DY, 0.0, SETTLE_MS,
+            QEasingCurve.Type.OutBack)])
+
+    # ------------------------------------------------ the filter
+
+    def eventFilter(self, watched, event):
+        """Watch button presses and releases for the dip.
+
+        Always returns False: the event goes on to the button
+        untouched, so every click, hold, and key press behaves
+        exactly as before. Only the left mouse button dips; a
+        right press is the pie menu's, not a dip.
+        """
+        kind = event.type()
+        if kind == QEvent.Type.MouseButtonPress:
+            if (event.button() == Qt.MouseButton.LeftButton
+                    and isinstance(watched, QAbstractButton)
+                    and watched.isEnabled()):
+                self.press_dip(watched)
+        elif kind == QEvent.Type.MouseButtonRelease:
+            if (event.button() == Qt.MouseButton.LeftButton
+                    and isinstance(watched, QAbstractButton)):
+                self.release_dip(watched)
+        elif kind in (QEvent.Type.KeyPress,
+                      QEvent.Type.KeyRelease):
+            if (isinstance(watched, QAbstractButton)
+                    and not event.isAutoRepeat()
+                    and event.key() in (Qt.Key.Key_Space,
+                                        Qt.Key.Key_Return,
+                                        Qt.Key.Key_Enter)):
+                if kind == QEvent.Type.KeyPress:
+                    if watched.isEnabled():
+                        self.press_dip(watched)
+                else:
+                    self.release_dip(watched)
+        return False
+
+
+class _LiftDelegate(QStyledItemDelegate):
+    """Paints the hovered card a few pixels higher (task 94).
+
+    Only the painting moves: the item's rect, its hit
+    testing, and its clicks are exactly where they were, so
+    the lift can never change what a click lands on.
+    """
+
+    def __init__(self, lift):
+        super().__init__(lift)
+        self._lift = lift
+
+    def paint(self, painter, option, index):
+        lift = self._lift
+        if (lift.progress > 0.0
+                and index == lift.hover_index):
+            option = QStyleOptionViewItem(option)
+            option.rect.translate(
+                0, -round(LIFT_PX * lift.progress))
+        super().paint(painter, option, index)
+
+
+class _CardLift(QObject):
+    """Hover lift for a thumbnail grid's cards (task 94).
+
+    The app's cards are QListWidget entries: the Library
+    grid and the Prompt tab's candidate strip. Entries are
+    painted, not widgets, so the lift lives in the delegate:
+    this driver tracks the hovered entry and animates a 0..1
+    progress over 200 ms, and the delegate paints that entry
+    up to 4 px higher. Moving to another card settles the
+    old one at once (it is no longer under the mouse) and
+    starts the new one's lift; leaving the grid settles the
+    card back down. Only the hovered entry's rect repaints,
+    and only while the 200 ms runs.
+    """
+
+    def __init__(self, list_widget):
+        super().__init__(list_widget)
+        self._list = list_widget
+        self._hover = None    # QPersistentModelIndex or None
+        self._progress = 0.0
+        self._anim = QPropertyAnimation(self, b"progress", self)
+        self._anim.setDuration(LIFT_MS)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.finished.connect(self._on_anim_finished)
+        list_widget.setMouseTracking(True)
+        list_widget.viewport().setMouseTracking(True)
+        list_widget.setItemDelegate(_LiftDelegate(self))
+        list_widget.itemEntered.connect(self._on_item_entered)
+        list_widget.viewport().installEventFilter(self)
+        model = list_widget.model()
+        model.modelReset.connect(self._reset)
+        model.rowsRemoved.connect(self._reset)
+        model.rowsMoved.connect(self._reset)
+
+    def get_progress(self):
+        return self._progress
+
+    def set_progress(self, value):
+        self._progress = float(value)
+        self._repaint_hover()
+
+    progress = Property(float, get_progress, set_progress)
+
+    @property
+    def hover_index(self):
+        """The hovered entry's index, or None."""
+        if self._hover is None:
+            return None
+        index = QModelIndex(self._hover)
+        return index if index.isValid() else None
+
+    def _repaint_hover(self):
+        index = self.hover_index
+        if index is None:
+            return
+        rect = self._list.visualRect(index)
+        self._list.viewport().update(
+            rect.adjusted(0, -LIFT_PX - 1, 0, 1))
+
+    def _on_item_entered(self, item):
+        index = QPersistentModelIndex(
+            self._list.indexFromItem(item))
+        if self._hover is not None and index == self._hover:
+            return
+        old = self.hover_index
+        self._anim.stop()
+        self._progress = 0.0
+        if old is not None:
+            rect = self._list.visualRect(old)
+            self._list.viewport().update(
+                rect.adjusted(0, -LIFT_PX - 1, 0, 1))
+        self._hover = index
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.start()
+
+    def _settle(self):
+        if self._hover is None or self._progress == 0.0:
+            return
+        self._anim.stop()
+        self._anim.setStartValue(self._progress)
+        self._anim.setEndValue(0.0)
+        self._anim.start()
+
+    def _on_anim_finished(self):
+        if self._progress == 0.0:
+            self._hover = None
+
+    def _reset(self, *_args):
+        """The entries changed under the hover (a rebuild, a
+        removal): the hovered entry may be a different card
+        now, so the lift clears rather than lifting a stranger."""
+        self._anim.stop()
+        self._progress = 0.0
+        self._hover = None
+        try:
+            self._list.viewport().update()
+        except RuntimeError:
+            # The model can fire while the list itself is
+            # being destroyed (its items are cleared first);
+            # there is nothing left to repaint then.
+            pass
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Leave:
+            self._settle()
+        elif event.type() == QEvent.Type.MouseMove:
+            # Empty grid space settles the card too:
+            # itemEntered only ever fires for items, so
+            # drifting off a card onto blank space would
+            # otherwise leave it lifted.
+            if self._list.itemAt(
+                    event.position().toPoint()) is None:
+                self._settle()
+        return False
 
 
 class PromptWorker(QThread):

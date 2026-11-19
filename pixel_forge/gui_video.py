@@ -1205,6 +1205,10 @@ class VideoTabMixin:
             self._autosave_video_restored = False
             self.statusBar().showMessage(
                 "Brought back your video work from last time.")
+        # The finish moment (task 94): the run landed, so the
+        # preview pops once. The superseded path returned
+        # early above and never reaches this.
+        self._motion.pulse(self.video_preview_label)
 
 
     def _show_drop_summary(self):
@@ -1374,6 +1378,10 @@ class VideoTabMixin:
         self.video_order = [
             self.video_strip.item(row).data(Qt.ItemDataRole.UserRole)
             for row in range(self.video_strip.count())]
+        # The settle (task 94): the strip lands with a small
+        # spring. Decoration only: the order above is already
+        # recorded, and the settle never touches it.
+        self._motion.settle(self.video_strip)
 
 
     def _on_strip_selection_changed(self):
@@ -2042,6 +2050,8 @@ class VideoTabMixin:
         self._activity_finish("export")
         self.statusBar().showMessage(
             "Exported %d frames to %s" % (len(kept), out.name))
+        # The finish moment (task 94): the files are written.
+        self._motion.pulse(self.video_preview_label)
         return True
 
 
@@ -2198,6 +2208,7 @@ class VideoTabMixin:
                 % (plural(len(metadata["sheets"]), "sheet"),
                    plural(len(kept), "frame"),
                    (", %d deduped" % deduped) if deduped else ""))
+            self._motion.pulse(self.video_preview_label)
             return True
         try:
             metadata = write_sheet(images, names, str(path),
@@ -2214,6 +2225,7 @@ class VideoTabMixin:
             "Exported spritesheet: %d frames, %d x %d grid, %s"
             % (len(kept), metadata["columns"], metadata["rows"],
                path.name))
+        self._motion.pulse(self.video_preview_label)
         return True
 
 
@@ -2293,6 +2305,7 @@ class VideoTabMixin:
         self._activity_finish("export")
         self.statusBar().showMessage(
             "Exported GIF: %d frames, %s" % (len(kept), out.name))
+        self._motion.pulse(self.video_preview_label)
         return True
 
 
@@ -2332,3 +2345,5 @@ class VideoTabMixin:
             "Exported %s: %s" % (FORMAT_INFO[key][0],
                                  " + ".join(p.name for p in files)))
         self._remember_export_dir(Path(files[0]).parent)
+        # The finish moment (task 94): the export landed.
+        self._motion.pulse(self.video_preview_label)

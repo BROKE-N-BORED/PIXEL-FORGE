@@ -13597,5 +13597,479 @@ class PieMenuTests(unittest.TestCase):
                        ratio))
 
 
+class MotionTests(unittest.TestCase):
+    """Task 94: micro-interactions and spring motion.
+
+    Buttons dip to 0.97 over 150 ms while pressed and settle
+    back on release; Library and Prompt cards lift 4 px over
+    200 ms under the mouse; a dropped strip frame lands with
+    an OutBack spring; picking an editor tool pops its
+    button; a finished generation or export pops the result
+    once. All of it is feedback only: clicks fire exactly as
+    before, files are written before the pulse starts, and
+    nothing runs when nothing is animating. Animation tests
+    wait for state, never a fixed sleep. Runner group g17.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.tmp = tempfile.mkdtemp()
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self.win = MainWindow(library_dir=self.lib_dir,
+                              restore=False)
+        self.win.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # ------------------------------------------------ helpers
+
+    def _wait_until(self, predicate, timeout=5.0):
+        """Poll with qWait(10) until the state holds. A fixed
+        sleep would flake under load (the standing lesson):
+        animations advance on wall-clock time, so the wait
+        watches the value, not the clock."""
+        from PySide6.QtTest import QTest
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            QTest.qWait(10)
+        return predicate()
+
+    def _load_image(self):
+        path = write_image(
+            make_solid_image(32, 32, 200, 100, 50),
+            os.path.join(self.tmp, "solid.png"))
+        self.assertTrue(self.win.load_image(path))
+        self.app.processEvents()
+        return path
+
+    def _wait_for_video(self, timeout=60):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (self.win.video_worker is None
+                    and not self.win._video_debounce_timer.isActive()):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _load_video(self):
+        from pixel_forge import video as video_mod
+        if video_mod.find_ffmpeg() is None:
+            self.skipTest("ffmpeg not installed")
+        clip = make_test_video(os.path.join(self.tmp, "clip.mp4"),
+                               duration=2, fps=8, width=80,
+                               height=60)
+        self.win.tabs.setCurrentIndex(1)
+        self.assertTrue(self.win.load_video(clip))
+        self.assertTrue(self._wait_for_video())
+        self.assertGreaterEqual(len(self.win.video_frames), 8)
+        return clip
+
+    def _scale_of(self, widget):
+        effect = widget.graphicsEffect()
+        return None if effect is None else effect.scale
+
+    def _at_rest(self, widget):
+        return (widget.graphicsEffect() is None
+                and widget not in self.win._motion._running)
+
+    # ------------------------------------------------ the numbers
+
+    def test_motion_numbers_match_the_task(self):
+        from pixel_forge.gui_shared import (LIFT_MS, LIFT_PX,
+                                            PRESS_MS, PRESS_SCALE,
+                                            PULSE_MS, SETTLE_MS)
+        self.assertEqual(PRESS_SCALE, 0.97)
+        self.assertEqual(PRESS_MS, 150)
+        self.assertEqual(LIFT_PX, 4)
+        self.assertEqual(LIFT_MS, 200)
+        self.assertLessEqual(SETTLE_MS, 300)
+        self.assertLessEqual(PULSE_MS, 300)
+
+    def test_idle_window_carries_no_motion(self):
+        # Nothing runs when nothing is animating: no effect on
+        # a plain button, no registry entries.
+        self.assertEqual(len(self.win._motion._running), 0)
+        self.assertIsNone(self.win.export_btn.graphicsEffect())
+        self.assertIsNone(
+            self.win.editor_tool_buttons["pencil"].graphicsEffect())
+
+    # ------------------------------------------------ press dip
+
+    def test_press_dip_reaches_097_and_holds(self):
+        from PySide6.QtTest import QTest
+        self._load_image()
+        button = self.win.editor_tool_buttons["pencil"]
+        QTest.mousePress(button, Qt.MouseButton.LeftButton)
+        try:
+            self.assertTrue(self._wait_until(
+                lambda: self._scale_of(button) == 0.97),
+                "the dip never reached 0.97")
+            # A hold stays dipped: it does not bounce back
+            # while the button is still down.
+            QTest.qWait(120)
+            self.assertEqual(self._scale_of(button), 0.97)
+        finally:
+            QTest.mouseRelease(button, Qt.MouseButton.LeftButton)
+
+    def test_release_settles_back_and_click_fires_once(self):
+        from PySide6.QtTest import QTest
+        self._load_image()
+        button = self.win.editor_tool_buttons["pencil"]
+        clicks = []
+        button.clicked.connect(lambda: clicks.append(1))
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        # The click fired exactly once, through the dip.
+        self.assertEqual(len(clicks), 1)
+        self.assertEqual(self.win._editor_tool, "pencil")
+        # ... and everything settles: effect off, registry
+        # empty (the tool pop runs on the same button and
+        # finishes inside this wait).
+        self.assertTrue(self._wait_until(
+            lambda: self._at_rest(button)))
+
+    def test_dip_interrupts_cleanly(self):
+        from PySide6.QtTest import QTest
+        self._load_image()
+        button = self.win.editor_tool_buttons["eraser"]
+        QTest.mousePress(button, Qt.MouseButton.LeftButton)
+        # Catch the dip on its way down, then release and
+        # press again mid-return: no queue, no stuck state.
+        self.assertTrue(self._wait_until(
+            lambda: self._scale_of(button) is not None
+            and self._scale_of(button) < 1.0))
+        QTest.mouseRelease(button, Qt.MouseButton.LeftButton)
+        QTest.mousePress(button, Qt.MouseButton.LeftButton)
+        try:
+            self.assertTrue(self._wait_until(
+                lambda: self._scale_of(button) == 0.97),
+                "the re-press never reached the dip")
+        finally:
+            QTest.mouseRelease(button, Qt.MouseButton.LeftButton)
+        self.assertTrue(self._wait_until(
+            lambda: self._at_rest(button)))
+        self.assertEqual(self.win._editor_tool, "eraser")
+
+    def test_disabled_button_never_dips(self):
+        from PySide6.QtTest import QTest
+        button = self.win.editor_tool_buttons["pencil"]
+        self.assertFalse(button.isEnabled())
+        QTest.mousePress(button, Qt.MouseButton.LeftButton)
+        QTest.qWait(80)
+        self.assertIsNone(button.graphicsEffect())
+        self.assertNotIn(button, self.win._motion._running)
+        QTest.mouseRelease(button, Qt.MouseButton.LeftButton)
+
+    def test_keyboard_press_dips_too(self):
+        from PySide6.QtTest import QTest
+        self._load_image()
+        button = self.win.editor_tool_buttons["fill"]
+        button.setFocus()
+        self.app.processEvents()
+        QTest.keyPress(button, Qt.Key.Key_Space)
+        try:
+            self.assertTrue(self._wait_until(
+                lambda: self._scale_of(button) is not None
+                and self._scale_of(button) < 1.0),
+                "Space never started the dip")
+        finally:
+            QTest.keyRelease(button, Qt.Key.Key_Space)
+        # Space activated the button on release, as always.
+        self.assertEqual(self.win._editor_tool, "fill")
+        self.assertTrue(self._wait_until(
+            lambda: self._at_rest(button)))
+
+    def test_right_press_never_dips(self):
+        from PySide6.QtTest import QTest
+        self._load_image()
+        button = self.win.editor_tool_buttons["pencil"]
+        QTest.mousePress(button, Qt.MouseButton.RightButton)
+        QTest.qWait(80)
+        self.assertIsNone(button.graphicsEffect())
+        QTest.mouseRelease(button, Qt.MouseButton.RightButton)
+
+    # ------------------------------------------------ tool pop
+
+    def test_tool_pick_pops_the_button(self):
+        from PySide6.QtTest import QTest
+        self._load_image()
+        button = self.win.editor_tool_buttons["line"]
+        with mock.patch.object(self.win._motion, "pulse",
+                               wraps=self.win._motion.pulse) as spy:
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        self.assertTrue(spy.called)
+        args, kwargs = spy.call_args
+        self.assertIs(args[0], button)
+        self.assertEqual(kwargs.get("peak"), 1.07)
+        self.assertEqual(self.win._editor_tool, "line")
+        self.assertTrue(self._wait_until(
+            lambda: self._at_rest(button)))
+
+    def test_number_key_pick_pops_too(self):
+        from PySide6.QtTest import QTest
+        self._load_image()
+        button = self.win.editor_tool_buttons["fill"]
+        with mock.patch.object(self.win._motion, "pulse",
+                               wraps=self.win._motion.pulse) as spy:
+            QTest.keyClick(self.win, Qt.Key.Key_3)
+            self.app.processEvents()
+        self.assertEqual(self.win._editor_tool, "fill")
+        self.assertTrue(spy.called)
+        self.assertIs(spy.call_args.args[0], button)
+
+    def test_pulse_peaks_and_settles(self):
+        # The pulse itself, driven directly on a stretched
+        # clock (the same code path with a longer duration,
+        # so the peak is wide enough to sample under load;
+        # the real 240 ms is pinned by the constants test).
+        # It rises to the peak and lands back at rest with
+        # the effect removed.
+        self._load_image()
+        label = self.win.after_label
+        self.win._motion.pulse(label, peak=1.05, duration=1500)
+        peak = [1.0]
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            scale = self._scale_of(label)
+            if scale is not None:
+                peak[0] = max(peak[0], scale)
+            elif label not in self.win._motion._running:
+                break
+            time.sleep(0.002)
+        self.assertGreater(peak[0], 1.04)
+        self.assertIsNone(label.graphicsEffect())
+        self.assertNotIn(label, self.win._motion._running)
+
+    # ------------------------------------------------ card lift
+
+    def _fill_library(self):
+        self.win.library.add_image(
+            make_solid_image(32, 32, 255, 0, 0), "One")
+        self.win.library.add_image(
+            make_solid_image(32, 32, 0, 255, 0), "Two")
+        self.win._refresh_library()
+        self.win.tabs.setCurrentIndex(4)
+        self.app.processEvents()
+        self.assertEqual(self.win.library_list.count(), 2)
+
+    def test_library_card_lifts_and_settles(self):
+        from PySide6.QtTest import QTest
+        self._fill_library()
+        lst = self.win.library_list
+        item = lst.item(0)
+        rect = lst.visualItemRect(item)
+        QTest.mouseMove(lst.viewport(), rect.center())
+        lift = self.win.library_lift
+        self.assertTrue(self._wait_until(
+            lambda: lift.progress == 1.0),
+            "the card never lifted")
+        self.assertEqual(lift.hover_index.row(), 0)
+        # The lift is paint-only: the item's rect (and so its
+        # click target) never moved.
+        self.assertEqual(lst.visualItemRect(item), rect)
+        # Off the card onto blank grid space: it settles.
+        QTest.mouseMove(lst.viewport(),
+                        lst.viewport().rect().bottomLeft())
+        self.assertTrue(self._wait_until(
+            lambda: lift.progress == 0.0))
+        self.assertTrue(self._wait_until(
+            lambda: lift.hover_index is None))
+
+    def test_library_lift_moves_to_the_next_card(self):
+        from PySide6.QtTest import QTest
+        self._fill_library()
+        lst = self.win.library_list
+        lift = self.win.library_lift
+        QTest.mouseMove(lst.viewport(),
+                        lst.visualItemRect(lst.item(0)).center())
+        self.assertTrue(self._wait_until(
+            lambda: lift.progress == 1.0
+            and lift.hover_index is not None
+            and lift.hover_index.row() == 0))
+        QTest.mouseMove(lst.viewport(),
+                        lst.visualItemRect(lst.item(1)).center())
+        self.assertTrue(self._wait_until(
+            lambda: lift.hover_index is not None
+            and lift.hover_index.row() == 1
+            and lift.progress == 1.0),
+            "the lift never moved to the second card")
+
+    def test_prompt_card_lifts(self):
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QListWidgetItem
+        from pixel_forge.gui_shared import thumb_pixmap
+        strip = self.win.prompt_strip
+        for number in range(2):
+            icon = thumb_pixmap(
+                make_solid_image(16, 16, 90 * number, 40, 40),
+                64)
+            strip.addItem(QListWidgetItem(
+                icon, "Candidate %d" % (number + 1)))
+        self.win.tabs.setCurrentIndex(2)
+        self.app.processEvents()
+        rect = strip.visualItemRect(strip.item(0))
+        QTest.mouseMove(strip.viewport(), rect.center())
+        self.assertTrue(self._wait_until(
+            lambda: self.win.prompt_lift.progress == 1.0),
+            "the candidate card never lifted")
+        self.assertEqual(
+            self.win.prompt_lift.hover_index.row(), 0)
+
+    # ------------------------------------------------ strip settle
+
+    def test_strip_settle_springs_and_lands(self):
+        from PySide6.QtCore import QEasingCurve
+        from pixel_forge.gui_shared import SETTLE_DY, SETTLE_MS
+        self._load_video()
+        strip = self.win.video_strip
+        order_before = list(self.win.video_order)
+        # The real rowsMoved handler: the order it records is
+        # the strip's (unchanged here), and the settle is the
+        # decoration it adds.
+        self.win._on_strip_reordered(None, 0, 0, 0, 0)
+        # The spring is pinned deterministically first: one dy
+        # animation, SETTLE_DY down to 0, OutBack easing,
+        # inside the time cap.
+        entry = self.win._motion._running.get(strip)
+        self.assertIsNotNone(entry, "the settle never started")
+        group = entry[1]
+        self.assertEqual(group.animationCount(), 1)
+        animation = group.animationAt(0)
+        self.assertEqual(animation.propertyName(), b"dy")
+        self.assertEqual(animation.startValue(), SETTLE_DY)
+        self.assertEqual(animation.endValue(), 0.0)
+        self.assertEqual(animation.duration(), SETTLE_MS)
+        self.assertEqual(animation.easingCurve().type(),
+                         QEasingCurve.Type.OutBack)
+        # And behaviorally: OutBack's signature is the value
+        # overshooting past rest (dy goes negative) before
+        # settling at 0. Sampled on a tight event pump, since
+        # a qWait poll can sleep through the overshoot under
+        # load.
+        overshot = []
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            effect = strip.graphicsEffect()
+            if effect is None:
+                if strip not in self.win._motion._running:
+                    break
+            elif effect.dy < 0:
+                overshot.append(True)
+            time.sleep(0.002)
+        self.assertTrue(overshot,
+                        "the settle never overshot: not a spring")
+        self.assertIsNone(strip.graphicsEffect())
+        self.assertEqual(self.win.video_order, order_before)
+
+    # ------------------------------------------------ finish moment
+
+    def test_finish_pulse_on_export_success(self):
+        self._load_image()
+        out = os.path.join(self.tmp, "out.png")
+        self.assertTrue(self.win.export_image(out))
+        # The file is written before the pulse starts: the
+        # animation never delays or blocks the action.
+        self.assertTrue(os.path.exists(out))
+        label = self.win.after_label
+        self.assertTrue(
+            label in self.win._motion._running
+            or label.graphicsEffect() is not None,
+            "no finish pulse followed the export")
+        self.assertTrue(self._wait_until(
+            lambda: self._at_rest(label)))
+
+    def test_no_finish_pulse_on_failed_export(self):
+        self._load_image()
+        bad = os.path.join(self.tmp, "missing-dir", "out.png")
+        with mock.patch("pixel_forge.gui.warn_dialog"):
+            self.assertFalse(self.win.export_image(bad))
+        self.assertNotIn(self.win.after_label,
+                         self.win._motion._running)
+        self.assertIsNone(self.win.after_label.graphicsEffect())
+
+    def test_finish_pulse_on_video_run(self):
+        with mock.patch.object(self.win._motion, "pulse",
+                               wraps=self.win._motion.pulse) as spy:
+            self._load_video()
+        targets = [call.args[0] for call in spy.call_args_list]
+        self.assertIn(self.win.video_preview_label, targets)
+
+    def test_no_finish_pulse_on_video_cancel(self):
+        from PySide6.QtCore import QObject, Signal
+
+        class _StubWorker(QObject):
+            fired = Signal()
+
+            def __init__(self):
+                super().__init__()
+                self.settings = {"mode": "reload"}
+
+        stub = _StubWorker()
+        self.win.video_worker = stub
+        stub.fired.connect(self.win._on_video_cancelled)
+        with mock.patch.object(self.win._motion, "pulse") as spy:
+            stub.fired.emit()
+            self.app.processEvents()
+        self.assertFalse(spy.called)
+        self.assertIsNone(self.win.video_worker)
+        self.assertIn("cancelled",
+                      self.win.statusBar().currentMessage())
+
+    def _prompt_worker(self):
+        from pixel_forge import imagegen as imagegen_mod
+        from pixel_forge.gui_shared import PromptWorker
+        work = os.path.join(self.tmp, "prompt-work")
+        os.makedirs(work, exist_ok=True)
+        batch, bdir = imagegen_mod.new_batch(work, "a knight")
+        worker = PromptWorker(bdir, parent=self.win,
+                              mode="generate")
+        self.win.prompt_worker = worker
+        self.win.prompt_batch_dir = bdir
+        worker.done.connect(self.win._on_prompt_done)
+        return batch, bdir, worker
+
+    def test_finish_pulse_on_prompt_done(self):
+        batch, bdir, worker = self._prompt_worker()
+        write_image(make_solid_image(24, 24, 10, 200, 90),
+                    os.path.join(bdir, "cand_01.png"))
+        batch["candidates"] = [
+            {"file": "cand_01.png", "status": "pending",
+             "seed": 42}]
+        with mock.patch.object(self.win._motion, "pulse",
+                               wraps=self.win._motion.pulse) as spy:
+            worker.done.emit(batch)
+            self.app.processEvents()
+        self.assertTrue(spy.called)
+        self.assertIs(spy.call_args.args[0],
+                      self.win.prompt_after_label)
+        self.assertEqual(len(self.win.prompt_candidates), 1)
+
+    def test_no_finish_pulse_when_all_candidates_fail(self):
+        batch, _bdir, worker = self._prompt_worker()
+        batch["candidates"] = [
+            {"file": "cand_01.png", "status": "failed",
+             "seed": 42, "error": "boom"}]
+        with mock.patch("pixel_forge.gui.warn_dialog"), \
+                mock.patch.object(self.win._motion, "pulse") as spy:
+            worker.done.emit(batch)
+            self.app.processEvents()
+        self.assertFalse(spy.called)
+        self.assertIsNone(self.win.after_label.graphicsEffect())
+
+
 if __name__ == "__main__":
     unittest.main()

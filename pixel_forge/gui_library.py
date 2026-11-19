@@ -6,7 +6,7 @@ One of the MainWindow mixins (task 58).
 from PySide6.QtCore import QEventLoop, QSize, Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
-from .gui_shared import (SaveToLibraryDialog, _LibraryDeleteCommand, gui_module, thumb_pixmap)
+from .gui_shared import (SaveToLibraryDialog, _CardLift, _LibraryDeleteCommand, gui_module, thumb_pixmap)
 from .library import SOURCE_LABELS, unreadable_reason
 from .palettes import PALETTE_LABELS
 from pathlib import Path
@@ -121,6 +121,10 @@ class LibraryTabMixin:
         self.library_list.setMovement(QListWidget.Movement.Static)
         self.library_list.itemClicked.connect(
             self._on_library_item_clicked)
+        # Card hover lift (task 94): the grid's entries are
+        # cards; the hovered one rises 4 px. Painting only:
+        # clicks land exactly as before.
+        self.library_lift = _CardLift(self.library_list)
         # The grid area is a stack: the list, or — when the
         # library is empty — a centered "No sprites yet" label,
         # so the tab is never a void (review B1).
