@@ -1,5 +1,16 @@
 # Pixel Forge changelog
 
+## 0.86 — 2026-11-18
+
+Pie menu for editor tools (task 93). Right-click the Pixel
+art canvas, or press Q, and a radial wheel opens at the
+cursor with all seven editor tools around a center dial
+showing the current tool. Flick toward a slice and release
+to pick it; Esc or a click outside closes with no change.
+Number keys 1 to 7 pick the tools straight off, for anyone
+who can't flick precisely. The tool buttons work exactly as
+before — the wheel is an addition, not a replacement.
+
 ## 0.85 — 2026-11-18
 
 Hover-scrub the frame strip (task 92). Hovering a frame

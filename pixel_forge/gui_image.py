@@ -9,7 +9,7 @@ from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget)
 from .codeinput import CODE_EXTENSIONS
 from .editor import (distinct_colors, draw_line, draw_rect_outline, flood_fill, line_points, pick_color, rect_points)
-from .gui_shared import (BgRemoveWorker, GridSnapWorker, MAX_CUSTOM_SIZE, NormalMapWorker, ORIGINAL_FIT, SIZE_PRESETS, _LayerStackCommand, _PixelCanvas, _PixelEditCommand, gui_module, image_extensions, supported_filter)
+from .gui_shared import (BgRemoveWorker, EDITOR_TOOLS, GridSnapWorker, MAX_CUSTOM_SIZE, NormalMapWorker, ORIGINAL_FIT, SIZE_PRESETS, _LayerStackCommand, _PieMenu, _PixelCanvas, _PixelEditCommand, gui_module, image_extensions, supported_filter)
 from .image import Image, argb
 from .layers import Layer, composite_layers, has_content
 from pathlib import Path
@@ -509,21 +509,10 @@ class ImageTabMixin:
         self.editor_tool_group = QButtonGroup(self)
         self.editor_tool_group.setExclusive(True)
         self.editor_tool_buttons = {}
-        for tool, label, tip in (
-                ("pencil", "Pencil",
-                 "Paint the picked color, one pixel at a time"),
-                ("eraser", "Eraser",
-                 "Paint transparency, one pixel at a time"),
-                ("fill", "Fill",
-                 "Fill the connected area of one color"),
-                ("eyedropper", "Eyedropper",
-                 "Pick the color under the cursor"),
-                ("line", "Line",
-                 "Draw a straight line — drag, then release"),
-                ("rectangle", "Rectangle",
-                 "Draw a rectangle outline — drag, then release"),
-                ("text", "Text",
-                 "Stamp a word or number: click where it goes")):
+        # The tools come from EDITOR_TOOLS (gui_shared) — the
+        # pie menu reads the same list, so the wheel and the
+        # buttons can never disagree about the tools.
+        for tool, label, tip in EDITOR_TOOLS:
             button = QPushButton(label)
             button.setCheckable(True)
             button.setToolTip(tip)
@@ -534,6 +523,18 @@ class ImageTabMixin:
             tool_row.addWidget(button)
         tool_row.addStretch(1)
         after_layout.addLayout(tool_row)
+        # The pie menu hint (task 93): one plain line under
+        # the tool row, so the right-click gesture can be
+        # found. It reuses the explanation style but is NOT
+        # registered in field_explanations — that registry
+        # pins an exact key set (the v0.85 strip hint does
+        # the same).
+        self.pie_hint = QLabel(
+            "Right-click the canvas, or press Q, for the tool "
+            "wheel. Number keys 1 to 7 pick a tool.")
+        self.pie_hint.setObjectName("explanation")
+        self.pie_hint.setWordWrap(True)
+        after_layout.addWidget(self.pie_hint)
         # The color strip: one swatch per color the result
         # actually uses, in first-appearance order — the editor
         # draws with the result's own palette, not a color
@@ -559,6 +560,10 @@ class ImageTabMixin:
         self.editor_color_group.setExclusive(True)
         after_layout.addWidget(self.editor_color_scroll)
         self.after_label = _PixelCanvas(self)
+        # Task 93: the canvas names the wheel gesture too, so a
+        # hover over the canvas teaches it alongside the hint.
+        self.after_label.setToolTip(
+            "Right-click for the tool wheel, or press Q")
         self.after_scroll = QScrollArea()
         self.after_scroll.setWidgetResizable(True)
         self.after_scroll.setWidget(self.after_label)
@@ -1606,6 +1611,36 @@ class ImageTabMixin:
         self.statusBar().showMessage(
             "%s — click or drag on the pixel preview"
             % tool.capitalize())
+
+
+    # ------------------------------------------- pie menu (task 93)
+
+    def _open_pie_menu(self, global_pos):
+        """Open the tool wheel centered on a global point —
+        a right-click on the canvas, or the Q key. One wheel
+        at a time, and none at all while the editor is off
+        (no result, or the normal map showing): the tool
+        buttons' enabled state is exactly that condition."""
+        if self._pie_menu is not None:
+            return
+        if not self.editor_tool_buttons["pencil"].isEnabled():
+            return
+        self._pie_menu = _PieMenu(self, self._theme,
+                                  self._editor_tool)
+        self._pie_menu.show_at(global_pos)
+
+    def _on_pie_pick(self, tool):
+        """The wheel picked a tool — press its button, the
+        same path as clicking it, so the button checks and
+        the status line follows."""
+        button = self.editor_tool_buttons[tool]
+        if button.isEnabled():
+            button.click()
+
+    def _on_pie_closed(self):
+        """The wheel closed, picked or not — drop the
+        reference so the next right-click opens a fresh one."""
+        self._pie_menu = None
 
 
     def _on_editor_color(self, color):

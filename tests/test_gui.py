@@ -13214,5 +13214,388 @@ class HoverScrubTests(unittest.TestCase):
                            pos=rect.center())
 
 
+class PieMenuTests(unittest.TestCase):
+    """Task 93 (U16/U34): the pie menu for editor tools.
+    Right-click (or Q) on the Pixel art canvas opens a radial
+    wheel at the cursor with all seven editor tools around a
+    center dial showing the current tool. Flick toward a slice
+    and release to pick it; a plain right-click leaves the
+    wheel open for a click pick; Esc or a click outside closes
+    with no change. Number keys 1 to 7 pick the tools straight
+    off, for anyone who can't flick precisely. Runner group
+    g16."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        from pixel_forge.gui import MainWindow
+        self.tmp = tempfile.mkdtemp()
+        self.lib_dir = os.path.join(tempfile.mkdtemp(), "lib")
+        self.win = MainWindow(library_dir=self.lib_dir,
+                              restore=False)
+        self.win.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        # The wheel is a top-level popup — closing the window
+        # does not close it, and a leftover popup would swallow
+        # events in the next test.
+        if self.win._pie_menu is not None:
+            self.win._pie_menu.close()
+            self.app.processEvents()
+        self.win.close()
+        self.win.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _load_image(self):
+        path = write_image(
+            make_solid_image(32, 32, 200, 100, 50),
+            os.path.join(self.tmp, "solid.png"))
+        self.assertTrue(self.win.load_image(path))
+        self.app.processEvents()
+        self.assertIsNotNone(self.win.result_image)
+
+    def _open_with_q(self):
+        from PySide6.QtTest import QTest
+        QTest.keyClick(self.win, Qt.Key.Key_Q)
+        self.app.processEvents()
+        self.assertIsNotNone(self.win._pie_menu,
+                             "Q did not open the wheel")
+        return self.win._pie_menu
+
+    # --------------------------------------------------- the hint
+
+    def test_hint_line_and_tooltip(self):
+        # The gesture can be found, not guessed: a plain-words
+        # line under the tool row and a tooltip on the canvas
+        # that names the right-click and the Q key. No em-dash,
+        # no "(s)".
+        hint = self.win.pie_hint
+        self.assertEqual(
+            hint.text(),
+            "Right-click the canvas, or press Q, for the tool "
+            "wheel. Number keys 1 to 7 pick a tool.")
+        self.assertEqual(hint.objectName(), "explanation")
+        self.assertTrue(hint.wordWrap())
+        self.assertNotIn("\u2014", hint.text())
+        self.assertNotIn("(s)", hint.text())
+        tooltip = self.win.after_label.toolTip()
+        self.assertIn("Right-click for the tool wheel", tooltip)
+        self.assertIn("press Q", tooltip)
+        # The hint explains a gesture, not a field — it is
+        # not a registered field explanation.
+        self.assertNotIn(self.win.pie_hint,
+                         self.win.field_explanations.values())
+
+    # --------------------------------------------------- the wheel
+
+    def test_wheel_has_all_seven_tools(self):
+        # The task text says six, but the Text tool is a real
+        # editor tool — the wheel holds all seven, still under
+        # Blender's 8-item cap. Every slice center maps back
+        # to its own slice; the dial and the outside map to
+        # nothing.
+        from PySide6.QtCore import QPoint
+        from pixel_forge.gui_shared import EDITOR_TOOLS, _PieMenu
+        self.assertEqual(len(EDITOR_TOOLS), 7)
+        self.assertIn("text", [tool for tool, _l, _t in EDITOR_TOOLS])
+        pie = _PieMenu(self.win, "dark", None)
+        try:
+            for index in range(len(EDITOR_TOOLS)):
+                self.assertEqual(
+                    pie._slice_at(pie.slice_center(index)), index)
+            self.assertIsNone(
+                pie._slice_at(QPoint(_PieMenu.CENTER,
+                                     _PieMenu.CENTER)))
+            self.assertIsNone(pie._slice_at(QPoint(0, 0)))
+        finally:
+            pie.deleteLater()
+
+    def test_right_click_opens_wheel_at_cursor(self):
+        # A real right-click on the canvas opens the wheel over
+        # the click point — the wheel contains the click (the
+        # center is the click unless the screen edge clamps
+        # it; the offscreen screen is 800x800 and the window
+        # is wider than that).
+        from PySide6.QtTest import QTest
+        self._load_image()
+        canvas = self.win.after_label
+        point = canvas.rect().center()
+        QTest.mouseClick(canvas, Qt.MouseButton.RightButton,
+                         pos=point)
+        self.app.processEvents()
+        pie = self.win._pie_menu
+        self.assertIsNotNone(pie, "right-click did not open it")
+        self.assertTrue(pie.isVisible())
+        self.assertTrue(pie.geometry().contains(
+            canvas.mapToGlobal(point)))
+
+    def test_plain_right_click_stays_open_for_click(self):
+        # Press right and release in place (over the dial):
+        # the wheel stays open in click mode instead of
+        # flashing shut, and nothing is picked yet.
+        from PySide6.QtCore import QPoint
+        from PySide6.QtTest import QTest
+        self._load_image()
+        canvas = self.win.after_label
+        point = canvas.rect().center()
+        QTest.mousePress(canvas, Qt.MouseButton.RightButton,
+                         pos=point)
+        self.app.processEvents()
+        pie = self.win._pie_menu
+        self.assertIsNotNone(pie)
+        self.assertFalse(pie.click_mode,
+                         "opened under a held button, so the "
+                         "wheel starts in flick mode")
+        # The release goes to the popup (it holds the grab)
+        # over the dial — the real delivery, not the canvas.
+        QTest.mouseRelease(pie, Qt.MouseButton.RightButton,
+                           pos=QPoint(150, 150))
+        self.app.processEvents()
+        self.assertIs(pie, self.win._pie_menu)
+        self.assertTrue(pie.isVisible())
+        self.assertTrue(pie.click_mode)
+        self.assertIsNone(self.win._editor_tool)
+
+    def test_flick_picks_tool(self):
+        # Press right, drag to a slice, release: the tool is
+        # picked, its button checks, and the wheel closes.
+        from PySide6.QtTest import QTest
+        self._load_image()
+        canvas = self.win.after_label
+        QTest.mousePress(canvas, Qt.MouseButton.RightButton,
+                         pos=canvas.rect().center())
+        self.app.processEvents()
+        pie = self.win._pie_menu
+        self.assertIsNotNone(pie)
+        target = pie.slice_center(0)  # pencil
+        QTest.mouseMove(pie, target)
+        self.app.processEvents()
+        self.assertEqual(pie.hovered, 0)
+        QTest.mouseRelease(pie, Qt.MouseButton.RightButton,
+                           pos=target)
+        self.app.processEvents()
+        self.assertEqual(pie.picked, "pencil")
+        self.assertEqual(self.win._editor_tool, "pencil")
+        self.assertTrue(
+            self.win.editor_tool_buttons["pencil"].isChecked())
+        self.assertIsNone(self.win._pie_menu)
+
+    def test_q_opens_wheel_at_canvas_center(self):
+        self._load_image()
+        pie = self._open_with_q()
+        self.assertTrue(pie.isVisible())
+        self.assertTrue(pie.click_mode,
+                        "opened from the keyboard, no button "
+                        "is held")
+        canvas = self.win.after_label
+        self.assertTrue(pie.geometry().contains(
+            canvas.mapToGlobal(canvas.rect().center())))
+
+    def test_wheel_centers_on_point_and_clamps_to_screen(self):
+        # Direct open: centered exactly on the point when it
+        # fits, clamped inside the screen when it does not.
+        from PySide6.QtCore import QPoint
+        self._load_image()
+        screen = QApplication.primaryScreen()
+        area = screen.availableGeometry()
+        center = area.center()
+        self.win._open_pie_menu(center)
+        self.app.processEvents()
+        pie = self.win._pie_menu
+        # The DRAWN center (the dial) sits on the point — the
+        # rect center is 1 px off for an even-sized widget,
+        # which is a rounding artifact, not a misplaced wheel.
+        from PySide6.QtCore import QPoint
+        from pixel_forge.gui_shared import _PieMenu
+        drawn = pie.geometry().topLeft() + QPoint(
+            _PieMenu.CENTER, _PieMenu.CENTER)
+        self.assertEqual(drawn, center)
+        pie.close()
+        self.app.processEvents()
+        self.win._open_pie_menu(QPoint(5, 5))
+        self.app.processEvents()
+        pie = self.win._pie_menu
+        self.assertTrue(area.contains(pie.geometry()),
+                        "wheel off screen: %s vs %s"
+                        % (pie.geometry(), area))
+
+    def test_click_slice_picks_tool(self):
+        # Q opens, a left-click on a slice picks it.
+        from PySide6.QtTest import QTest
+        self._load_image()
+        pie = self._open_with_q()
+        target = pie.slice_center(4)  # line
+        QTest.mouseClick(pie, Qt.MouseButton.LeftButton,
+                         pos=target)
+        self.app.processEvents()
+        self.assertEqual(self.win._editor_tool, "line")
+        self.assertTrue(
+            self.win.editor_tool_buttons["line"].isChecked())
+        self.assertIsNone(self.win._pie_menu)
+
+    def test_number_key_picks_tool(self):
+        from PySide6.QtTest import QTest
+        self._load_image()
+        QTest.keyClick(self.win, Qt.Key.Key_5)
+        self.app.processEvents()
+        self.assertEqual(self.win._editor_tool, "line")
+        QTest.keyClick(self.win, Qt.Key.Key_1)
+        self.app.processEvents()
+        self.assertEqual(self.win._editor_tool, "pencil")
+        QTest.keyClick(self.win, Qt.Key.Key_7)
+        self.app.processEvents()
+        self.assertEqual(self.win._editor_tool, "text")
+
+    def test_number_keys_ignored_while_typing(self):
+        # Pressing 1 while a size spin has focus must type 1,
+        # not pick the pencil — and Q must not open the wheel.
+        from PySide6.QtTest import QTest
+        self._load_image()
+        self.win.width_spin.setFocus()
+        self.app.processEvents()
+        self.assertIs(QApplication.focusWidget(),
+                      self.win.width_spin)
+        QTest.keyClick(self.win, Qt.Key.Key_1)
+        self.app.processEvents()
+        self.assertIsNone(self.win._editor_tool)
+        QTest.keyClick(self.win, Qt.Key.Key_Q)
+        self.app.processEvents()
+        self.assertIsNone(self.win._pie_menu)
+
+    def test_number_keys_ignored_on_other_tabs(self):
+        from PySide6.QtTest import QTest
+        self._load_image()
+        self.win.tabs.setCurrentIndex(1)  # Video
+        self.app.processEvents()
+        QTest.keyClick(self.win, Qt.Key.Key_1)
+        self.app.processEvents()
+        self.assertIsNone(self.win._editor_tool)
+        QTest.keyClick(self.win, Qt.Key.Key_Q)
+        self.app.processEvents()
+        self.assertIsNone(self.win._pie_menu)
+
+    def test_esc_closes_without_change(self):
+        from PySide6.QtTest import QTest
+        self._load_image()
+        self.win.editor_tool_buttons["fill"].click()
+        self.app.processEvents()
+        pie = self._open_with_q()
+        QTest.keyClick(pie, Qt.Key.Key_Escape)
+        self.app.processEvents()
+        self.assertIsNone(self.win._pie_menu)
+        self.assertIsNone(pie.picked)
+        self.assertEqual(self.win._editor_tool, "fill")
+
+    def test_close_clears_reference_without_change(self):
+        # A click outside closes the wheel — on a real PC that
+        # is Qt's popup behavior (the platform hides the popup
+        # on an outside press). Under offscreen, QTest posts
+        # events straight to the target widget and bypasses
+        # the popup grab, so the test drives the same close()
+        # the platform triggers and checks the window hears it.
+        self._load_image()
+        self.win.editor_tool_buttons["eraser"].click()
+        self.app.processEvents()
+        pie = self._open_with_q()
+        pie.close()
+        self.app.processEvents()
+        self.assertIsNone(self.win._pie_menu)
+        self.assertIsNone(pie.picked)
+        self.assertEqual(self.win._editor_tool, "eraser")
+
+    def test_dial_shows_current_tool(self):
+        self._load_image()
+        self.win.editor_tool_buttons["pencil"].click()
+        self.app.processEvents()
+        pie = self._open_with_q()
+        self.assertEqual(pie.current_tool, "pencil")
+
+    def test_nothing_highlighted_when_no_tool_picked(self):
+        # Nothing selected by default: no tool picked, no
+        # slice pre-highlighted, the dial says so.
+        self._load_image()
+        self.assertIsNone(self.win._editor_tool)
+        pie = self._open_with_q()
+        self.assertIsNone(pie.current_tool)
+        self.assertIsNone(pie.hovered)
+
+    def test_release_over_dial_in_click_mode_does_nothing(self):
+        # Q opens (click mode): a click on the dial picks
+        # nothing and leaves the wheel open.
+        from PySide6.QtCore import QPoint
+        from PySide6.QtTest import QTest
+        self._load_image()
+        pie = self._open_with_q()
+        QTest.mouseClick(pie, Qt.MouseButton.LeftButton,
+                         pos=QPoint(150, 150))
+        self.app.processEvents()
+        self.assertIs(pie, self.win._pie_menu)
+        self.assertTrue(pie.isVisible())
+        self.assertIsNone(self.win._editor_tool)
+
+    def test_number_key_while_wheel_open_picks(self):
+        # Digits work inside the open wheel too.
+        from PySide6.QtTest import QTest
+        self._load_image()
+        pie = self._open_with_q()
+        QTest.keyClick(pie, Qt.Key.Key_3)
+        self.app.processEvents()
+        self.assertEqual(pie.picked, "fill")
+        self.assertEqual(self.win._editor_tool, "fill")
+        self.assertIsNone(self.win._pie_menu)
+
+    def test_wheel_does_not_open_without_result(self):
+        # No image loaded: the editor is off, so neither the
+        # right-click nor Q opens a wheel.
+        from PySide6.QtTest import QTest
+        canvas = self.win.after_label
+        QTest.mouseClick(canvas, Qt.MouseButton.RightButton,
+                         pos=canvas.rect().center())
+        self.app.processEvents()
+        self.assertIsNone(self.win._pie_menu)
+        QTest.keyClick(self.win, Qt.Key.Key_Q)
+        self.app.processEvents()
+        self.assertIsNone(self.win._pie_menu)
+
+    def test_wheel_does_not_open_while_compare_held(self):
+        # Task 91: while the compare is held the canvas shows
+        # the original and stays dead — the wheel included.
+        from PySide6.QtTest import QTest
+        self._load_image()
+        self.win._on_compare_hold_start("image")
+        self.app.processEvents()
+        try:
+            canvas = self.win.after_label
+            QTest.mouseClick(canvas, Qt.MouseButton.RightButton,
+                             pos=canvas.rect().center())
+            self.app.processEvents()
+            self.assertIsNone(self.win._pie_menu)
+        finally:
+            self.win._on_compare_hold_end()
+            self.app.processEvents()
+
+    def test_wheel_contrast_clears_wcag_aa(self):
+        # Every text pair the wheel paints clears the task-22
+        # bar (WCAG AA 4.5:1) in both themes.
+        from test_polish import contrast_ratio
+        from pixel_forge.gui_shared import PIE_COLORS
+        for theme, colors in PIE_COLORS.items():
+            for fg, bg, name in (
+                    ("slice_text", "slice", "slice text"),
+                    ("slice_text", "hover", "slice text hovered"),
+                    ("dial_text", "dial", "dial text")):
+                ratio = contrast_ratio(colors[fg], colors[bg])
+                self.assertGreaterEqual(
+                    ratio, 4.5,
+                    "%s %s %s on %s is %.2f:1"
+                    % (theme, name, colors[fg], colors[bg],
+                       ratio))
+
+
 if __name__ == "__main__":
     unittest.main()

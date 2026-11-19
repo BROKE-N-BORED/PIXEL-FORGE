@@ -371,6 +371,9 @@ it keeps them and prints the way to remove them by hand.
   as before. Hovering a frame thumbnail in the Video tab's strip
   previews that frame in the Animation preview without loading
   it; double-click a thumbnail to jump to that frame.
+  Right-click the Pixel art canvas, or press Q, for a tool
+  wheel at the cursor — flick toward a tool and release to
+  pick it. Number keys 1 to 7 pick the tools straight off.
 
 **Command line:**
 

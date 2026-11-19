@@ -7,14 +7,14 @@ split (task 58).
 from . import __version__, procedural
 from PySide6.QtCore import (QEvent, QRect, QSettings, QTimer, Qt)
 from PySide6.QtGui import (QAction, QKeySequence, QShortcut)
-from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QStatusBar, QTabWidget, QTextEdit, QVBoxLayout)
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStatusBar, QTabWidget, QTextEdit, QVBoxLayout)
 from .autosave import (autosave_home, crashed, discard_recovery, empty_recovery, load_recovery, load_recovery_image, mark_clean_exit, mark_running, recovery_image_path, recovery_path, save_recovery_image)
 from .codeinput import CODE_EXTENSIONS
 from .gui_code import CodeTabMixin
 from .gui_image import ImageTabMixin
 from .gui_library import LibraryTabMixin
 from .gui_prompt import PromptTabMixin
-from .gui_shared import (AUTOSAVE_DEBOUNCE_MS, HowToUseDialog, PaletteEditorDialog, SIZE_PRESETS, TEXTURE_DEBOUNCE_MS, THEMES, UpdateCheckWorker, UpdateDownloadWorker, VIDEO_DEBOUNCE_MS, _ControlChangeCommand, _PresetDeleteCommand, clamp_geometry, gui_module)
+from .gui_shared import (AUTOSAVE_DEBOUNCE_MS, EDITOR_TOOLS, HowToUseDialog, PaletteEditorDialog, SIZE_PRESETS, TEXTURE_DEBOUNCE_MS, THEMES, UpdateCheckWorker, UpdateDownloadWorker, VIDEO_DEBOUNCE_MS, _ControlChangeCommand, _PresetDeleteCommand, clamp_geometry, gui_module)
 from .gui_tileset import TilesetTabMixin
 from .gui_video import VideoTabMixin
 from .imagegen import load_batch
@@ -178,6 +178,9 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
         # drained one variant per timer tick at idle, so a
         # load never blocks on rendering every variant.
         self._compare_held = None
+        # Pie menu (task 93): the open wheel, or None. One
+        # wheel at a time; the wheel clears this on close.
+        self._pie_menu = None
         self._hovering = None
         self._hover_cache = {}
         self._hover_prefetch_queue = []
@@ -723,6 +726,56 @@ class MainWindow(ImageTabMixin, VideoTabMixin,
                 lambda _checked=False, i=index:
                 self.tabs.setCurrentIndex(i))
             self._tab_shortcuts.append(shortcut)
+
+
+    # ------------------------------------------- tool keys (task 93)
+
+    def keyPressEvent(self, event):
+        """Q opens the tool wheel and number keys 1 to 7 pick
+        editor tools — the flick-free alternative for anyone
+        who can't flick precisely. Plain keys only (Ctrl+1..6
+        switch tabs, Ctrl+Q quits); the guards in
+        _editor_keys_live keep them out of text fields, spin
+        boxes, and every tab but Image. Anything else falls
+        through to the default handler."""
+        if event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            key = event.key()
+            if key == Qt.Key.Key_Q and self._editor_keys_live():
+                self._open_pie_menu(
+                    self.after_label.mapToGlobal(
+                        self.after_label.rect().center()))
+                event.accept()
+                return
+            if (Qt.Key.Key_1 <= key <= Qt.Key.Key_7
+                    and self._editor_keys_live()):
+                index = key - Qt.Key.Key_1
+                if index < len(EDITOR_TOOLS):
+                    button = self.editor_tool_buttons[
+                        EDITOR_TOOLS[index][0]]
+                    if button.isEnabled():
+                        button.click()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def _editor_keys_live(self):
+        """Whether the tool keys (Q, 1 to 7) do anything right
+        now: the Image tab showing, the editor live (a result
+        loaded, the normal map not showing), no dialog up, no
+        wheel open, and the keyboard not inside a text field,
+        spin box, or combo — pressing 1 while typing a size
+        must type 1, not pick the pencil."""
+        if self.tabs.currentIndex() != 0:
+            return False
+        if QApplication.activeModalWidget() is not None:
+            return False
+        if self._pie_menu is not None:
+            return False
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit,
+                              QAbstractSpinBox, QComboBox)):
+            return False
+        return self.editor_tool_buttons["pencil"].isEnabled()
 
 
     # ------------------------------------------------------------ undo

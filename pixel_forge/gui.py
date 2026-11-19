@@ -43,7 +43,7 @@ exposed is re-exported here, so
 import sys
 
 from .gui_shared import *
-from .gui_shared import _ControlChangeCommand, _IMAGE_EXTENSIONS, _KeepDropCommand, _LayerStackCommand, _LibraryDeleteCommand, _PixelCanvas, _PixelEditCommand, _PresetDeleteCommand, _parse_hex_color, _render_system_font
+from .gui_shared import _ControlChangeCommand, _IMAGE_EXTENSIONS, _KeepDropCommand, _LayerStackCommand, _LibraryDeleteCommand, _PieMenu, _PixelCanvas, _PixelEditCommand, _PresetDeleteCommand, _parse_hex_color, _render_system_font
 from .gui_core import MainWindow, main
 
 

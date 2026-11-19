@@ -7,6 +7,7 @@ imports no tab module.
 """
 
 import json
+import math
 import os
 import random
 import shutil
@@ -350,6 +351,54 @@ QTextEdit { background-color: #ffffff; border: 1px solid #b8b8b2; }
 THEMES = {"dark": DARK_STYLESHEET, "light": LIGHT_STYLESHEET}
 
 
+# The Image tab's editor tools, in toolbar order (task 33 +
+# task 68): (key, label, tooltip). The tool row and the pie
+# menu (task 93) both read this list, so the wheel can never
+# disagree with the buttons about which tools exist, what they
+# are called, or what order they go in. The number keys 1 to 7
+# pick them in this order. Seven tools still fits Blender's
+# 8-item pie cap with room — the task text says six, but the
+# Text tool is a real editor tool and dropping it from the
+# wheel would strand it on the buttons alone.
+EDITOR_TOOLS = (
+    ("pencil", "Pencil",
+     "Paint the picked color, one pixel at a time"),
+    ("eraser", "Eraser",
+     "Paint transparency, one pixel at a time"),
+    ("fill", "Fill",
+     "Fill the connected area of one color"),
+    ("eyedropper", "Eyedropper",
+     "Pick the color under the cursor"),
+    ("line", "Line",
+     "Draw a straight line — drag, then release"),
+    ("rectangle", "Rectangle",
+     "Draw a rectangle outline — drag, then release"),
+    ("text", "Text",
+     "Stamp a word or number: click where it goes"),
+)
+
+
+# Pie menu colors (task 93), one set per theme — the wheel
+# paints with QPainter, not the stylesheet, so its colors
+# live here instead. Every text pair clears the task-22 bar
+# (WCAG AA 4.5:1): slice text on its fill and on the hover
+# fill, dial text on the dial — pinned in PieMenuTests.
+PIE_COLORS = {
+    "dark": {
+        "slice": "#2e2e35", "slice_text": "#e8e6e3",
+        "hover": "#4a4a54", "accent": "#e07020",
+        "dial": "#1a1a1f", "dial_text": "#ffb066",
+        "border": "#55555e",
+    },
+    "light": {
+        "slice": "#e2e2de", "slice_text": "#232329",
+        "hover": "#d4d4cf", "accent": "#8a4513",
+        "dial": "#e9e9e6", "dial_text": "#8a4513",
+        "border": "#b8b8b2",
+    },
+}
+
+
 _IMAGE_EXTENSIONS = None
 
 
@@ -551,6 +600,13 @@ class _PixelCanvas(QLabel):
             self._window._canvas_press(
                 self.pixel_at(event.position().toPoint()))
             event.accept()
+        elif event.button() == Qt.MouseButton.RightButton:
+            # Task 93: right-click opens the tool wheel at the
+            # cursor. The window decides whether the editor is
+            # live enough for one (no wheel without a result).
+            self._window._open_pie_menu(
+                event.globalPosition().toPoint())
+            event.accept()
         else:
             super().mousePressEvent(event)
 
@@ -575,6 +631,244 @@ class _PixelCanvas(QLabel):
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+
+
+class _PieMenu(QWidget):
+    """The editor tool wheel (task 93): a radial picker that
+    opens at the cursor — flick, don't hunt.
+
+    A Popup widget, so a click outside closes it with nothing
+    picked and no change. The center dial shows the current
+    tool ("No tool picked" when none is); the ring holds one
+    slice per editor tool in toolbar order. Static paint only
+    — no animation loop, no timers — so the wheel costs
+    nothing on a slow machine. Pick by flicking: press right
+    on the canvas, drag toward a slice, release; or open with
+    Q and click a slice, or press its number key (1 to 7).
+    A release over the dial or outside the ring does not pick
+    — when the wheel opened under a held button (the
+    right-click flick), that first release leaves the wheel
+    open for a leisurely click instead of flashing it shut;
+    Esc or a click outside still cancels with no change.
+    Nothing is pre-highlighted: the hovered slice follows
+    the mouse only.
+
+    Angles are screen angles in degrees: 0 is east, positive
+    runs clockwise (widget y grows downward). Slice 0 sits at
+    the top, the rest follow clockwise.
+    """
+
+    SIZE = 300
+    CENTER = SIZE // 2
+    OUTER_R = 140
+    DIAL_R = 52
+    LABEL_R = 97
+
+    def __init__(self, window, theme, current_tool):
+        super().__init__(
+            None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self._window = window
+        self._colors = PIE_COLORS[theme]
+        self._current_tool = current_tool
+        self._hovered = None
+        self._picked = None
+        # Flick mode when the wheel opened under a held button
+        # (right-click): the first release decides — a slice
+        # picks it, anywhere else switches to click mode and
+        # leaves the wheel open. Click mode from the start when
+        # it opened from the keyboard, where no button is held.
+        self._click_mode = True
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setMouseTracking(True)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    @property
+    def picked(self):
+        """The tool the wheel picked, or None when it closed
+        without picking — read by tests after the close."""
+        return self._picked
+
+    @property
+    def hovered(self):
+        """The slice index under the mouse, or None."""
+        return self._hovered
+
+    @property
+    def current_tool(self):
+        """The tool the dial shows, or None."""
+        return self._current_tool
+
+    @property
+    def click_mode(self):
+        """True once the wheel is waiting for a click pick
+        (opened from the keyboard, or the flick's first
+        release landed off-slice)."""
+        return self._click_mode
+
+    def _span(self):
+        return 360.0 / len(EDITOR_TOOLS)
+
+    def _slice_center_angle(self, index):
+        """The screen angle of one slice's middle, in degrees."""
+        return -90.0 + index * self._span()
+
+    def slice_center(self, index):
+        """The widget point at the middle of one slice — where
+        a flick aims, and where tests click."""
+        angle = math.radians(self._slice_center_angle(index))
+        radius = (self.OUTER_R + self.DIAL_R) / 2
+        return QPoint(int(self.CENTER + radius * math.cos(angle)),
+                      int(self.CENTER + radius * math.sin(angle)))
+
+    def _slice_at(self, pos):
+        """The slice index under a widget point, or None over
+        the dial, outside the ring, or off the widget."""
+        dx = pos.x() - self.CENTER
+        dy = pos.y() - self.CENTER
+        radius = math.hypot(dx, dy)
+        if radius < self.DIAL_R or radius > self.OUTER_R:
+            return None
+        angle = math.degrees(math.atan2(dy, dx))
+        span = self._span()
+        rel = (angle + 90.0 + span / 2.0) % 360.0
+        index = int(rel // span)
+        if 0 <= index < len(EDITOR_TOOLS):
+            return index
+        return None
+
+    def show_at(self, global_center):
+        """Show the wheel centered on a global point, clamped
+        so the whole wheel stays on the screen."""
+        screen = (QApplication.screenAt(global_center)
+                  or QApplication.primaryScreen())
+        area = screen.availableGeometry()
+        x = global_center.x() - self.CENTER
+        y = global_center.y() - self.CENTER
+        x = max(area.left(), min(x, area.right() - self.SIZE + 1))
+        y = max(area.top(), min(y, area.bottom() - self.SIZE + 1))
+        self._click_mode = (QApplication.mouseButtons()
+                            == Qt.MouseButton.NoButton)
+        self.move(x, y)
+        self.show()
+        self.setFocus()
+        self.activateWindow()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.setFocus()
+
+    def hideEvent(self, event):
+        # Every close path lands here — picked, Esc, or a click
+        # outside — so the window hears about the close exactly
+        # once per showing and drops its reference.
+        super().hideEvent(event)
+        self._window._on_pie_closed()
+
+    def mouseMoveEvent(self, event):
+        hovered = self._slice_at(event.position().toPoint())
+        if hovered != self._hovered:
+            self._hovered = hovered
+            self.update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        # Release over a slice picks it — the flick's release,
+        # or a plain click on the slice. Release over the dial
+        # or outside the ring picks nothing: in flick mode it
+        # switches to click mode and leaves the wheel open (a
+        # plain right-click must not flash the wheel shut
+        # before the user has seen it); in click mode it just
+        # does nothing, and Esc or a click outside cancels.
+        if event.button() in (Qt.MouseButton.LeftButton,
+                              Qt.MouseButton.RightButton):
+            index = self._slice_at(event.position().toPoint())
+            if index is not None:
+                self._picked = EDITOR_TOOLS[index][0]
+                self._window._on_pie_pick(self._picked)
+                self.close()
+            else:
+                self._click_mode = True
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        # Esc cancels; a number key picks its tool straight off.
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+            event.accept()
+            return
+        if Qt.Key.Key_1 <= event.key() <= Qt.Key.Key_7:
+            index = event.key() - Qt.Key.Key_1
+            if index < len(EDITOR_TOOLS):
+                self._picked = EDITOR_TOOLS[index][0]
+                self._window._on_pie_pick(self._picked)
+                self.close()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event):
+        colors = self._colors
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        span = self._span()
+        rect = QRect(self.CENTER - self.OUTER_R,
+                     self.CENTER - self.OUTER_R,
+                     self.OUTER_R * 2, self.OUTER_R * 2)
+        # The slices: Qt angles run counterclockwise from east,
+        # so a screen-clockwise wedge [lo, hi] starts at -hi.
+        for index, (_tool, label, _tip) in enumerate(EDITOR_TOOLS):
+            center = self._slice_center_angle(index)
+            lo = center - span / 2.0
+            hi = center + span / 2.0
+            fill = (colors["hover"] if index == self._hovered
+                    else colors["slice"])
+            painter.setBrush(QColor(fill))
+            painter.setPen(QColor(colors["border"]))
+            painter.drawPie(rect, int(-hi * 16), int(span * 16))
+        # The labels, one per slice, horizontal at the label
+        # radius — no rotated text, it reads badly at a glance.
+        painter.setPen(QColor(colors["slice_text"]))
+        metrics = QFontMetrics(painter.font())
+        for index, (_tool, label, _tip) in enumerate(EDITOR_TOOLS):
+            angle = math.radians(self._slice_center_angle(index))
+            x = self.CENTER + self.LABEL_R * math.cos(angle)
+            y = self.CENTER + self.LABEL_R * math.sin(angle)
+            width = metrics.horizontalAdvance(label)
+            height = metrics.height()
+            painter.drawText(int(x - width / 2),
+                             int(y + height / 2 - metrics.descent()),
+                             label)
+        # The dial: the current tool, or two plain lines when
+        # none is picked yet.
+        painter.setBrush(QColor(colors["dial"]))
+        painter.setPen(QColor(colors["accent"]))
+        painter.drawEllipse(
+            QPoint(self.CENTER, self.CENTER),
+            self.DIAL_R, self.DIAL_R)
+        font = QFont(painter.font())
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor(colors["dial_text"]))
+        if self._current_tool is None:
+            lines = ("No tool", "picked")
+        else:
+            label = dict((tool, name)
+                         for tool, name, _tip in EDITOR_TOOLS)
+            lines = (label.get(self._current_tool,
+                               self._current_tool),)
+        metrics = QFontMetrics(painter.font())
+        step = metrics.height()
+        top = self.CENTER - (len(lines) - 1) * step / 2
+        for number, line in enumerate(lines):
+            width = metrics.horizontalAdvance(line)
+            painter.drawText(
+                int(self.CENTER - width / 2),
+                int(top + number * step + metrics.ascent()
+                    - step / 2),
+                line)
 
 
 class PromptWorker(QThread):
